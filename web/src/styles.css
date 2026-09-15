@@ -450,6 +450,8 @@ section.card { margin-bottom: 0; }
 .node-title { display: flex; flex-direction: column; gap: 4px; }
 .node-title h2 { display: flex; align-items: center; gap: 10px; font-size: 18px; }
 .back-link { font-size: 13px; color: var(--text-dim); }
+/* Standalone row above the terminal card, so it must not stretch across it. */
+.back-link-row { align-self: flex-start; }
 
 .tile-grid {
   display: grid;
@@ -602,27 +604,51 @@ section.card { margin-bottom: 0; }
   min-height: min(720px, calc(100vh - 180px));
 }
 
+/* No AI upstream configured → the assistant column does not exist and the
+   terminal takes the whole width (§12.1). */
+.terminal-workspace.solo { grid-template-columns: minmax(0, 1fr); }
+
 .terminal-card, .ai-panel { min-width: 0; display: flex; flex-direction: column; }
-.terminal-card { background: #0b111b; border-color: #253149; color: #e7ebf3; }
-.terminal-card .hint, .terminal-card h3 { color: inherit; }
-.terminal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.terminal-head h3 { margin-bottom: 2px; }
-.terminal-host {
-  flex: 1;
+/* The card is a normal panel: the screen inside it is the only dark surface,
+   and the head row inherits the page's text colors. min-height:0 keeps the
+   card from growing past its grid row when the screen is sized by it. */
+.terminal-card { min-height: 0; }
+.terminal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.terminal-head h3 { margin: 0; font-size: 14px; }
+.terminal-head-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.status-dot-chip { display: inline-flex; align-items: center; gap: 7px; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); }
+.status-dot-chip.status-ok .status-dot { background: var(--green); }
+.status-dot-chip.status-failed .status-dot { background: var(--red); }
+.terminal-close-reason { margin-top: 8px; }
+/* The screen is the frame (padding/border/dark surface) FitAddon's host sits
+   in. The padding cannot live on the host itself: xterm's .xterm is an
+   absolutely positioned box, and absolute children are placed against the
+   *padding box*, so inset:0 paints the glyph area right on top of any padding
+   the host declares — the terminal then looks glued to the frame no matter how
+   large that padding is. Frame and host are therefore two elements.
+   The host stays a pure flex-sized box (no content-driven height) because a
+   content-sized xterm hands the frame's padding back as one extra row (+15px)
+   on every fit() round, forever. */
+.terminal-shell {
+  flex: 1 1 auto;
+  display: flex;
   min-height: 440px;
-  margin-top: 14px;
-  padding: 12px;
+  margin-top: 12px;
+  padding: 8px;
   border: 1px solid #253149;
   border-radius: 8px;
   overflow: hidden;
   background: #101722;
 }
-.terminal-host .xterm { height: 100%; }
+.terminal-host {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.terminal-host .xterm { position: absolute; top: 0; right: 0; bottom: 0; left: 0; }
 .terminal-host .xterm-viewport { overflow-y: auto; }
-.terminal-foot { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
-.terminal-head-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.terminal-mode-field { color: inherit; }
-.terminal-mode-field select { padding: 4px 8px; font-size: 13px; }
 .ai-panel { gap: 14px; }
 .ai-context { display: grid; gap: 8px; padding: 12px; background: var(--panel-2); border-radius: 8px; border: 1px solid var(--border); }
 .ai-context > div { display: flex; justify-content: space-between; gap: 12px; }
@@ -644,7 +670,7 @@ section.card { margin-bottom: 0; }
 
 @media (max-width: 900px) {
   .terminal-workspace { grid-template-columns: 1fr; min-height: 0; }
-  .terminal-host { min-height: 360px; }
+  .terminal-shell { min-height: 360px; }
   .ai-panel { min-height: 360px; }
 }
 

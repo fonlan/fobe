@@ -99,6 +99,19 @@ type aiRunShellRequest struct {
 	Risky   bool   `json:"risky"`
 }
 
+// aiConfigured reports whether the assistant has a usable upstream (design
+// §12.1: all three of base_url / api_key / model are required). It is the
+// single source of truth for two consumers that must never disagree: the chat
+// handler's 503 gate, and the panel's decision to render the assistant UI at
+// all — an input whose every submit would 503 is worse than no input.
+func (s *Server) aiConfigured() bool {
+	baseURL, baseOK := s.GetDecryptedSetting("ai.base_url")
+	apiKey, keyOK := s.GetDecryptedSetting("ai.api_key")
+	model, modelOK := s.GetDecryptedSetting("ai.model")
+	return baseOK && keyOK && modelOK &&
+		strings.TrimSpace(baseURL) != "" && strings.TrimSpace(apiKey) != "" && strings.TrimSpace(model) != ""
+}
+
 func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 	var req aiChatRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -129,13 +142,13 @@ func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	baseURL, baseOK := s.GetDecryptedSetting("ai.base_url")
-	apiKey, keyOK := s.GetDecryptedSetting("ai.api_key")
-	model, modelOK := s.GetDecryptedSetting("ai.model")
-	if !baseOK || !keyOK || !modelOK || strings.TrimSpace(baseURL) == "" || strings.TrimSpace(apiKey) == "" || strings.TrimSpace(model) == "" {
+	if !s.aiConfigured() {
 		writeErr(w, http.StatusServiceUnavailable, "ai_not_configured")
 		return
 	}
+	baseURL, _ := s.GetDecryptedSetting("ai.base_url")
+	apiKey, _ := s.GetDecryptedSetting("ai.api_key")
+	model, _ := s.GetDecryptedSetting("ai.model")
 
 	// §12.1: raw logs are only fetched when the operator explicitly enabled
 	// "附带日志" for this request; offline/slow nodes contribute nothing.

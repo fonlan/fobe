@@ -392,7 +392,17 @@ export function listAlerts(limit = 200): Promise<{ alerts: AlertRow[] }> {
 
 // --- settings ---------------------------------------------------------------
 
-export function getSettings(): Promise<{ settings: SettingView[] }> {
+/**
+ * GET /api/settings. `ai_configured` is derived server-side (§12.1): it is the
+ * only thing that decides whether the assistant can actually send, so the
+ * terminal page reads it instead of re-deriving "configured" from the keys.
+ */
+export interface SettingsResponse {
+  settings: SettingView[];
+  ai_configured: boolean;
+}
+
+export function getSettings(): Promise<SettingsResponse> {
   return request('/api/settings');
 }
 

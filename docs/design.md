@@ -499,7 +499,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - 兼容：`TerminalOpen.Mode` 字段保留在 v1 wire 上（server 恒写 `pty`）；旧浏览器发来的 `ssh` 由 server 规范化为 `pty`，旧 agent 收到 `ssh` 也只起本地 PTY。旧 `node_ssh` 凭据表在服务端启动迁移时删除。
 - 会话初始化时记审计：操作者、节点、来源 IP、会话 ID、开始/结束时间。浏览器帧限 1 MiB，会话 ID 由 server 生成并覆写，浏览器不能伪造。
 - 终端与 AI 执行共用 agent 指令通道 → 审计口径统一。
-- 终端页三个盒子（2026-09-15 修订）：卡片头一行（左标题「Agent Web 终端」，右会话 ID +「重连」+ 连接状态点）→ `.terminal-shell`（深色屏幕框，16px padding 让文字不贴边）→ `.terminal-host`（FitAddon 的量测盒）。卡片自身用默认面板底色，屏幕是页面上唯一的深色面；页面不再另起标题。
+- 终端页三个盒子（2026-09-15 修订）：卡片头一行（左标题「Agent Web 终端」，右会话 ID +「重连」+ 连接状态点）→ `.terminal-shell`（深色屏幕框，8px padding 让文字不贴边）→ `.terminal-host`（FitAddon 的量测盒）。卡片自身用默认面板底色，屏幕是页面上唯一的深色面；页面不再另起标题。
 - **padding 不能放在 `.terminal-host` 上**：xterm 的 `.xterm` 是绝对定位盒，绝对定位子元素相对宿主 **padding box** 定位，`inset: 0` 会把字形区直接铺满 padding、把留白盖掉（这就是"padding 设了却依然贴边"的成因）。所以外框（padding/border/深色底）与量测宿主必须是两个元素。
 - `.terminal-host` 高度**必须由卡片所在的网格行决定、不能被 xterm 内容撑高**：宿主 `flex: 1 1 auto`（不写内容高度）、内部 `.xterm` 绝对定位填满，否则每次 fit 都会把外框的 padding+border 折成行数加回去，现象是终端每帧长高一行；fit 只由 rAF 防抖的 `ResizeObserver` 触发（`onResize` 里调 fit 会同步递归），宿主不可见（宽高 ≤0）时跳过 fit，避免把活着的 PTY 缩成 2×1。
 - v1 不做 PTY 全量录制（体积与隐私成本高），但保留 `session_id`，便于后续开启录制。

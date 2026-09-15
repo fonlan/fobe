@@ -17,6 +17,8 @@ import (
 //   arrives via the upload/download endpoints, and geoip.status is server-owned)
 //   ui.theme (light|dark|system; localStorage + server dual-write, §16)
 // Sensitive keys are AES-GCM encrypted at rest and never returned in GET.
+// GET additionally returns the derived ai_configured flag (not a setting) so
+// the frontend can hide the assistant UI without re-implementing §12.1.
 
 type settingView struct {
 	Key       string `json:"key"`
@@ -68,7 +70,10 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, settingView{Key: key, Value: v, Sensitive: sensitiveKeys[key], Set: set})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"settings": out})
+	// ai_configured is derived (not a setting) so the frontend never has to
+	// re-implement the §12.1 "configured" rule: the terminal page hides the
+	// assistant sidebar whenever the chat endpoint would 503 anyway.
+	writeJSON(w, http.StatusOK, map[string]any{"settings": out, "ai_configured": s.aiConfigured()})
 }
 
 type putSettingsReq struct {

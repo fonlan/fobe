@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
@@ -216,7 +216,28 @@ export default function TerminalPage() {
   const { id = '' } = useParams();
   const { t } = useI18n();
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [aiReady, setAiReady] = useState(false);
   const termRef = useRef<TerminalHandle | null>(null);
+
+  // The assistant only has something to talk to once base_url / api_key /
+  // model are all set (§12.1); otherwise every submit would come back 503
+  // ai_not_configured. The server's derived ai_configured flag decides whether
+  // the column exists at all — the in-flight window and any failure stay
+  // hidden rather than flashing a panel that cannot send.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getSettings()
+      .then((r) => {
+        if (!cancelled) setAiReady(r.ai_configured === true);
+      })
+      .catch(() => {
+        if (!cancelled) setAiReady(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   if (!id) {
     return (
@@ -229,19 +250,17 @@ export default function TerminalPage() {
 
   return (
     <div className="terminal-page stack-lg">
-      <div className="page-head">
-        <div className="node-title">
-          <Link to={`/nodes/${encodeURIComponent(id)}`} className="back-link">← {t('back_to_node')}</Link>
-          <h2>{t('terminal_title')}</h2>
-        </div>
-      </div>
-      <div className="terminal-workspace">
+      {/* No page-level title: the terminal card's own head row carries
+          "Agent Web 终端" plus the session and connection state, so a page
+          heading would just repeat it one line above. */}
+      <Link to={`/nodes/${encodeURIComponent(id)}`} className="back-link back-link-row">← {t('back_to_node')}</Link>
+      <div className={`terminal-workspace${aiReady ? '' : ' solo'}`}>
         <Terminal
           nodeId={id}
           onSessionChange={setSessionId}
           onReady={(handle) => { termRef.current = handle; }}
         />
-        <AssistantPanel nodeId={id} sessionId={sessionId} onEcho={(text) => termRef.current?.write(text)} />
+        {aiReady && <AssistantPanel nodeId={id} sessionId={sessionId} onEcho={(text) => termRef.current?.write(text)} />}
       </div>
     </div>
   );

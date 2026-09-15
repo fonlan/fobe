@@ -202,6 +202,47 @@ func TestAIChatUpstreamErrorCode(t *testing.T) {
 	}
 }
 
+func TestGetSettingsExposesAIConfigured(t *testing.T) {
+	server, api := newTestServer(t)
+	defer server.Close()
+	cookie := loginCookie(t, server.URL)
+
+	read := func() bool {
+		t.Helper()
+		resp, raw := doAuthed(t, http.MethodGet, server.URL+"/api/settings", cookie, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d (%s)", resp.StatusCode, raw)
+		}
+		var body struct {
+			AIConfigured bool `json:"ai_configured"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.AIConfigured
+	}
+
+	if read() {
+		t.Fatal("ai_configured = true before any AI settings were stored")
+	}
+
+	// Partially configured (no api_key) must stay false: it is exactly the
+	// state in which POST /api/ai/chat answers 503, and the terminal page
+	// hides the sidebar off this flag.
+	configureAI(t, api, "https://ai.example.com/v1", "test-ai-key", "gpt-test")
+	if err := api.Store.SetSetting("ai.api_key", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if read() {
+		t.Fatal("ai_configured = true without an api_key")
+	}
+
+	configureAI(t, api, "https://ai.example.com/v1", "test-ai-key", "gpt-test")
+	if !read() {
+		t.Fatal("ai_configured = false after base_url/api_key/model were stored")
+	}
+}
+
 func createAINode(t *testing.T, api *Server, id string) string {
 	t.Helper()
 	err := api.Store.CreateNode(&store.Node{

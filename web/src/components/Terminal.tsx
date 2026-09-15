@@ -43,21 +43,18 @@ export interface TerminalHandle {
 
 export interface TerminalProps {
   nodeId: string;
-  nodeLabel?: string;
   onSessionChange?: (sessionId: string | null) => void;
   onReady?: (handle: TerminalHandle | null) => void;
 }
 
 export default function Terminal({
   nodeId,
-  nodeLabel,
   onSessionChange,
   onReady,
 }: TerminalProps) {
   const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const onSessionChangeRef = useRef(onSessionChange);
   const onReadyRef = useRef(onReady);
@@ -93,7 +90,6 @@ export default function Terminal({
     terminal.loadAddon(fitAddon);
     terminal.open(host);
     termRef.current = terminal;
-    fitRef.current = fitAddon;
     onReadyRef.current?.({
       write: (text: string) => {
         termRef.current?.write(text);
@@ -104,6 +100,9 @@ export default function Terminal({
     });
 
     const fit = () => {
+      // A hidden host (route transition, collapsed layout) would propose ~2x1
+      // and resize the live PTY down to nothing; wait for a real box.
+      if (host.clientWidth <= 0 || host.clientHeight <= 0) return;
       try {
         fitAddon.fit();
       } catch {
@@ -194,6 +193,10 @@ export default function Terminal({
       if (resizeRAF) return;
       resizeRAF = window.requestAnimationFrame(() => {
         resizeRAF = 0;
+        // The observer owns fit(): onResize never calls it (that pair
+        // recurses), so the terminal would otherwise keep its stale row count
+        // after the frame is resized — e.g. when the assistant column appears.
+        fit();
         sendResize();
       });
     });
@@ -214,7 +217,6 @@ export default function Terminal({
       onSessionChangeRef.current?.(null);
       onReadyRef.current?.(null);
       termRef.current = null;
-      fitRef.current = null;
       terminal.dispose();
     };
     // epoch is the explicit reconnect trigger; `t` supplies close messages.
@@ -226,26 +228,37 @@ export default function Terminal({
 
   return (
     <section className="terminal-card card">
+      {/*
+        One head row owns everything that is not the screen itself: the title,
+        the live session id and the connection state (right-aligned). The page
+        no longer repeats the title, and the card is not wrapped again — the
+        whole card below this row is the terminal.
+      */}
       <div className="terminal-head">
-        <div>
-          <h3>{t('terminal_title')}</h3>
-          <p className="hint">{nodeLabel || nodeId}</p>
-        </div>
+        <h3>{t('terminal_title')}</h3>
         <div className="terminal-head-controls">
-          <span className={`chip ${stateClass}`}>{stateLabel}</span>
+          <span className="hint mono">{t('terminal_session', { id: sessionId || t('terminal_session_pending') })}</span>
+          {canReconnect && (
+            <button type="button" className="btn small" onClick={() => setEpoch((current) => current + 1)}>
+              {t('terminal_reconnect')}
+            </button>
+          )}
+          <span className={`chip status-dot-chip ${stateClass}`}>
+            <span className="status-dot" aria-hidden="true" />
+            {stateLabel}
+          </span>
         </div>
       </div>
-      <div ref={hostRef} className="terminal-host" role="application" aria-label={t('terminal_title')} />
-      <div className="terminal-foot">
-        <span className="hint mono">{t('terminal_node', { id: nodeId })}</span>
-        <span className="hint mono">{t('terminal_session', { id: sessionId || t('terminal_session_pending') })}</span>
-        {closeReason && <span className="hint">{closeReason}</span>}
-        {canReconnect && (
-          <button type="button" className="btn small" onClick={() => setEpoch((current) => current + 1)}>
-            {t('terminal_reconnect')}
-          </button>
-        )}
+      {/*
+        .terminal-shell is the dark frame: it owns padding/border so the glyphs
+        stay off the edge. That padding cannot sit on the host itself — xterm's
+        absolute .xterm is placed against the host's padding box and would paint
+        over it. The host stays a pure sizing box for FitAddon.
+      */}
+      <div className="terminal-shell">
+        <div ref={hostRef} className="terminal-host" role="application" aria-label={t('terminal_title')} />
       </div>
+      {closeReason && <p className="hint terminal-close-reason">{closeReason}</p>}
     </section>
   );
 }
