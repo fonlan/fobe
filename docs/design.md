@@ -529,10 +529,22 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 - agent 首次启动、网络变化（每 5 分钟检查 IP 集合是否有变化）、以及面板手动触发时，枚举本机地址（`net.Interfaces`，排除 loopback/link-local）→ **全量上报**。
 - 服务端判定：
-  1. 本地 GeoLite2-Country MMDB（离线，面板可上传更新）；
+  1. 本地 GeoLite2-Country MMDB（离线，面板可上传更新，**也会自动下载**——见 §14.1）；
   2. 未命中且可配置在线 API（ip-api / ipinfo，可选配 key）作为回退。
 - 国旗 = ISO 3166-1 alpha-2 → emoji/图标资源（前端内置，不依赖 CDN）。
 - 主 IP 选择：默认第一个公网 IPv4，否则第一个公网 IPv6；面板可手动指定（`node_ips.is_primary`），订阅渲染使用主 IP（或你填的域名）。
+
+### 14.1 数据库的自动下载与更新（实现修订 2026-09-15）
+
+本节原本只有"面板可上传"一条路径：**安装即空白，除非操作者自己找一个 MMDB 传上去**。补齐后，数据库自己有生命周期，上传降级为离线逃生口。
+
+- **来源：只用免密钥镜像，不碰 MaxMind License Key。** 默认按序尝试三个镜像（`raw.githubusercontent.com/P3TERX/GeoLite.mmdb` → `cdn.jsdelivr.net` 同一文件 → `Loyalsoldier/geoip` 最新 release），都是官方 GeoLite2-Country 数据的自动构建；挂一个还有下一个。**不做 License Key 支持**——MaxMind 官方下载要注册账号，让"开箱可用"依赖一个凭据是反向取舍。内网/离线部署用 `geoip.url`（或 `FOBE_GEOIP_URL`，后者优先）钉一个 URL，钉了就不回退到内置镜像：操作者既然配了私有镜像，静默回落到 GitHub 会绕过他的网络策略。
+- **节奏：每天检查一次，数据库文件超过 `geoip.max_age_days`（默认 7 天，MaxMind 每周更新）就换。** 检查本身是一次本地 `stat` 与一次设置读取，只有过期才会联网；`0` 表示不做定期更新，只在文件缺失时下载。面板上的 `geoip.auto_update` 开关（缺省开）管的是这条路；`FOBE_GEOIP_AUTO_UPDATE=0` 是运维的硬闸——连启动时补缺都不做（手动更新与上传不受影响），此时面板开关置灰并说明原因。
+- **安装必须原子且必须能解析**。MMDB **没有文件头 magic**：真实文件以搜索树开头、以 `\xab\xcd\xefMaxMind.com` 元数据标记结尾。此前上传接口检查的是前缀 `MMDB`——没有任何真实数据库长这样，所以**每一次合法上传都被拒**（测试用造出来的假头，掩盖了这一点）。现在统一走 `geoip.WriteMMDB`：临时文件 → 尺寸上限（64MB）→ `geoip2.Open` 真解析（空搜索树也算无效）→ `chmod 0644` → `rename`。下载与上传共用这一条，任何一步失败都**不会**动到线上文件（`Ensure` 的测试专门盯这一点：所有镜像都失败时，磁盘上的旧库必须还在）。
+- **进度与结果都可见**：更新阶段（`connecting` / `downloading` / `verifying` / `done` / `failed`）经 `/ws/events` 的 `geoip_update` 事件推送（字节级 250ms 节流，相位变化立即推），并作为 `download` 快照挂在 `GET /api/geoip/status` 上——中途打开页面也有进度条。落库的只有 `geoip.status`（状态、来源 URL、上次成功/检查时间、失败原因），字节计数**只存内存**，理由同 §9.5.3：每秒多次写 SQLite 会撞 §5 的单写者。
+- **手动更新是异步的**：`POST /api/geoip/update` 只启动后台任务并回 `202`（`accepted:false` 表示已有一个在跑，不是错误）。9MB 的下载不该占着一个 HTTP 响应，面板靠事件与状态端点收敛。
+- **一个进程只有一个 MMDB 句柄**（`geoip.NewWith`）：hub 的国别判定与面板的状态视图共用它，更新成功后 `Reload()` 立即生效。此前 `cmd/server` 建了两个句柄，第二个要等自己的 stat 检查才发现文件变了。
+- 设置页新增：状态三块（数据库/数据日期/来源）、进度条、「立即更新」、「上传 MMDB」，以及三个设置项（自动更新、最长天数、自定义下载源）。改这三项会**当场**跑一次策略检查（`Manager.Check`），不必等下一个日切。
 
 ---
 

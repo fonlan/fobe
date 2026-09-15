@@ -5,12 +5,14 @@ import (
 	"strings"
 )
 
-// Settings groups (design §4.4 / §12.1 / §15 / §16):
+// Settings groups (design §4.4 / §12.1 / §14 / §15 / §16):
 //   ai.base_url, ai.model, ai.api_key (encrypted), ai.default_policy
 //   anytls_password (encrypted; global shared proxy password, §10)
 //   notify.telegram_bot_token (encrypted), notify.telegram_chat_id,
 //   notify.webhook_url, notify.webhook_secret
-//   retention.metrics_days, geoip.mmdb (binary, via upload later)
+//   retention.metrics_days
+//   geoip.auto_update, geoip.max_age_days, geoip.url (§14.1; the MMDB itself
+//   arrives via the upload/download endpoints, and geoip.status is server-owned)
 //   ui.theme (light|dark|system; localStorage + server dual-write, §16)
 // Sensitive keys are AES-GCM encrypted at rest and never returned in GET.
 
@@ -43,6 +45,8 @@ var allowedKeys = func() map[string]bool {
 		"alert.traffic_warn_pct", "alert.traffic_crit_pct",
 		"ai.kill_switch",
 		"ui.theme", // light|dark|system; validated below (§16 dual-write)
+		// §14.1 GeoIP database refresh policy.
+		"geoip.auto_update", "geoip.max_age_days", "geoip.url",
 	} {
 		m[k] = true
 	}
@@ -92,6 +96,11 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// §14.1 policy values; validated by the same helper the §17 import uses.
+		if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {
+			writeErr(w, http.StatusBadRequest, geoIPSettingErrCode(key))
+			return
+		}
 		stored := value
 		encrypted := false
 		if sensitiveKeys[key] && value != "" {
@@ -110,6 +119,18 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit("settings_updated", joinKeys(req.Settings), s.Trust.RealIP(r))
 	s.publishEvent("settings_updated", "")
+	// A change to the §14.1 policy can make the database immediately outdated
+	// (a shorter threshold, or the switch turned back on): evaluate it now
+	// instead of waiting for the next daily tick. Check only downloads when the
+	// policy actually says so, so a no-op change costs one stat.
+	if s.GeoIPUpdater != nil {
+		for key := range req.Settings {
+			if geoIPSettingKey(key) {
+				go s.GeoIPUpdater.Check(s.background())
+				break
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

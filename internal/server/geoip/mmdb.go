@@ -31,6 +31,46 @@ func NewMMDB(path string) *MMDB {
 	return m
 }
 
+// Loaded reports whether a database is currently serving lookups. Like
+// Country it re-stats the file first, so a database that appeared on disk
+// since the last lookup already counts.
+func (m *MMDB) Loaded() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.changed() {
+		m.reload()
+	}
+	return m.reader != nil
+}
+
+// Metadata is the loaded database's self-description. It answers "how old is
+// the data?" honestly, which the file's mtime only approximates: refreshing
+// rewrites the file, but the data inside may be a week older than that.
+type Metadata struct {
+	BuildEpoch   int64  // when the provider built the data (unix seconds); 0 unknown
+	DatabaseType string // e.g. "GeoLite2-Country"
+	NodeCount    uint   // number of nodes in the search tree
+}
+
+// Metadata returns the loaded database's metadata; the zero value when no
+// database is loaded.
+func (m *MMDB) Metadata() Metadata {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.changed() {
+		m.reload()
+	}
+	if m.reader == nil {
+		return Metadata{}
+	}
+	md := m.reader.Metadata()
+	return Metadata{
+		BuildEpoch:   int64(md.BuildEpoch),
+		DatabaseType: md.DatabaseType,
+		NodeCount:    md.NodeCount,
+	}
+}
+
 // Reload re-opens the database now. Country also re-opens on its own when
 // the file changes. It reports whether a database is loaded afterwards.
 func (m *MMDB) Reload() bool {

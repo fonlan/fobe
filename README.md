@@ -186,6 +186,10 @@ environment:
 | `FOBE_SINGBOX_AUTO_DOWNLOAD` | `1` | 启动时若 `<FOBE_DL_DIR>/singbox` 里没有任何有效版本，后台自动下载当时的最新**稳定版**；已有缓存则完全不联网；置 `0` 关闭。失败不阻塞启动，只记 WARN 并把状态与原因写进设置页 |
 | `FOBE_SINGBOX_API_BASE` | `https://api.github.com` | sing-box release 列表来源（GitHub 兼容 API）；镜像源/离线环境改这里 |
 | `FOBE_SINGBOX_DOWNLOAD_BASE` | `https://github.com` | sing-box 产物下载根地址（asset 没带下载 URL 时用它拼路径） |
+| `FOBE_GEOIP_MMDB` | `/data/geoip/GeoLite2-Country.mmdb` | 国别数据库路径。自动下载、手动上传与国别判定写/读的都是这个文件（放挂载卷，见「数据与备份」） |
+| `FOBE_GEOIP_AUTO_UPDATE` | `1` | GeoIP 库的自动更新总闸：每天检查一次，文件超过「最长使用天数」就从免密钥镜像重新下载；置 `0` 连启动补缺都不做（设置页的开关随之失效，但「立即更新」与上传仍可用） |
+| `FOBE_GEOIP_URL` | 内置镜像链 | 钉死一个下载源（内网镜像/离线环境）。设置后不再回退到内置的三个 GitHub 镜像；设置页「自定义下载源」等价，优先级低于本变量 |
+| `FOBE_GEOIP_ONLINE` | `0` | 本地库未命中时用 ip-api.com 在线兜底（会把节点 IP 发给第三方，默认关闭） |
 | `FOBE_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128,172.16.0.0/12` | 可信上游网段（决定 XFF 是否被采信，见上文拓扑 C） |
 | `FOBE_LISTEN` | `0.0.0.0:8080` | 容器内监听地址（对外由 compose 的端口绑定决定） |
 
@@ -205,7 +209,9 @@ https://panel.example.com
 
 ```
 data/
-├─ sqlite/fobe.db     # 全部状态；WAL 模式，勿多实例同时挂载
+├─ sqlite/            # 挂到容器 /data
+│  ├─ fobe.db         # 全部状态；WAL 模式，勿多实例同时挂载
+│  └─ geoip/          # 国别数据库 GeoLite2-Country.mmdb（自动下载 + 手动上传）
 ├─ dl/                # agent / sing-box 产物（容器内是 /srv/dl）
 │  ├─ agent/<version>/    # agent 二进制 + manifest.json
 │  └─ singbox/<version>/  # 面板可选的 sing-box 版本（服务端自动下载，或你手动投放）
@@ -215,6 +221,7 @@ data/
 - `data/dl/`（容器内的 `/srv/dl`）**必须挂载**：它存放 agent 产物与自动下载的 sing-box 版本。跑在容器里且没有独立挂载点时，服务端会打一条 WARN 并在设置页标红（`singbox.dl_mount_ok=false`）——升级/重建容器会把这些版本全部丢掉。
 - **sing-box 版本从哪来**：默认由服务端自己在启动时下载（仅当 `data/dl/singbox/` 里一个有效版本都没有；已有缓存则完全不联网）。也可以不联网：按上面的布局手动放一份 `singbox/<version>/{linux-amd64,linux-amd64.sha256,manifest.json}` 进去即可。想主动补一个版本，用设置页的「下载新版本」下拉（列的是上游 release，已缓存的那几条是灰的），或点「刷新版本列表」重新拉一次；下载中出现的那一行会就地显示阶段、字节与速度，失败的那一行保留原因并给重试图标。
 - **发布与删除**：设置页 sing-box 区块一行一个本地版本，行尾两个图标按钮——「发布」把这一行的版本下发到所有已启用 sing-box 的节点（会先列出受影响节点并要求二次确认；15 分钟后仍未生效的节点汇总发一条告警），「删除」把该版本从服务端磁盘删掉（仍被某节点 `desired_version` 引用时需要确认）。旧版本不会自动删，列表里能看到每个版本的占用、下载时间与被多少节点引用。**同一个产物只会下载一次**：下载进行中「发布」置灰，另一个版本的下载请求会返回 `download_in_progress`。
+- **GeoIP 国别库从哪来**：`data/sqlite/geoip/GeoLite2-Country.mmdb`（容器内 `/data/geoip/`，跟 `fobe.db` 同一个挂载卷，随备份一起走）。服务端每天检查一次，文件超过「最长使用天数」（默认 7 天）就从免密钥镜像自动重新下载——**不需要 MaxMind 账号或 License Key**；设置页 GeoIP 区块能看状态、数据日期、来源，也能点「立即更新」或直接「上传 MMDB」。下载与上传装的是同一个文件，**新库解析失败就拒绝替换**，旧库继续用；更新成功后立即生效，无需重启。
 - 恢复：停服 → 用快照替换 `data/sqlite/fobe.db` → 起服。
 - 探针节点无需重建：agent 用落盘的 machine-id 重连即复用原节点。
 - 换了 `FOBE_MASTER_KEY` = 已加密的 AI key / SSH 凭据 / Bot Token 全部失效，需要重填（节点与指标数据不受影响）。
@@ -293,5 +300,6 @@ export default defineConfig({
 | 装完 agent 连不上、反复重连 | 探针能否解析并连通你的域名（DNS 污染 / 出网限制）；`journalctl -u fobe-agent` 或 OpenWrt 上 `logread` |
 | **升级容器后 sing-box 没了**（设置页版本列表空、节点更新失败） | `/srv/dl` 没挂成独立卷，重建容器把已下载版本留在了旧容器层。核对 `docker compose config` 里的 `./data/dl:/srv/dl`，以及设置页/日志里的 `singbox.dl_mount_ok=false` 警告；恢复做法是重新下载（设置页「重试」）或手动把产物放回 `data/dl/singbox/<version>/` |
 | **拉不到 GitHub / 自动下载失败**（设置页显示失败原因） | 服务端出网受限。三选一：① 配镜像源 `FOBE_SINGBOX_API_BASE` + `FOBE_SINGBOX_DOWNLOAD_BASE`（GitHub 兼容即可）后点「重试」；② 手动把 `linux-amd64` 与 `linux-amd64.sha256` 放进 `data/dl/singbox/<version>/`；③ 用 `FOBE_SINGBOX_AUTO_DOWNLOAD=0` 关掉自动下载，完全手动管理。注意**校验失败会拒绝安装**（fail-closed），不会留半成品 |
+| **GeoIP 库自动更新失败 / 国别显示为空** | 三个免密钥镜像都不通（内网出网受限）。做法：设置 → GeoIP 看失败原因，① 用 `FOBE_GEOIP_URL` 或设置页「自定义下载源」钉一个可达的镜像；② 手动下载 `GeoLite2-Country.mmdb` 后点「上传 MMDB」；③ 用 `FOBE_GEOIP_AUTO_UPDATE=0` 关掉自动更新，只留手动。上传/下载的都是 `FOBE_GEOIP_MMDB` 指向的同一个文件，校验失败会拒绝替换（旧库继续用） |
 | 一键更新后个别节点没生效 | 离线节点要等重连后由 `hello_ack` 自动收敛（结果表里是"离线待生效"）；15 分钟后仍未收敛会发一条 `singbox_update_stale` 告警，逐台查 `journalctl -u fobe-agent` / agent 侧的 sing-box 日志 |
 | **探针上 sing-box 装在哪 / 升级后路径变了** | agent 侧统一用 `/etc/one-sing/`：`sing-box`（二进制）、`config.json`、`cert/{cert.crt,private.key}`（与 one-sing.sh 同一套路径，便于互相接管）。从旧版本升级的探针会在 agent 启动时自动搬迁旧路径（`/usr/local/bin/sing-box`、`/etc/sing-box/…`）并删掉空目录，日志里是 `sing-box layout migrated`。机器上原本有 one-sing.sh 的 `one-sing.service` 时，agent 首次收敛前会**停掉并 disable** 它（两个 supervisor 抢同一个进程只会互相重启）。注意 `config.json` 由面板独占：继续用 one-sing.sh 加协议会互相覆盖，要共存请改路径 |

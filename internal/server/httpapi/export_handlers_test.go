@@ -88,10 +88,19 @@ func TestMMDBUpload(t *testing.T) {
 
 	cookie := loginSession(t, srv)
 
-	// wrong magic → 400 bad_mmdb, nothing written
-	resp, raw := doAuthed(t, "POST", srv.URL+"/api/geoip/mmdb", cookie, []byte("definitely not an mmdb"))
+	// An HTML error page (or any payload that is not an MMDB) → 400 bad_mmdb,
+	// nothing written. This is the case a truncated mirror response produces.
+	resp, raw := doAuthed(t, "POST", srv.URL+"/api/geoip/mmdb", cookie, []byte("<html>404 not found</html>"))
 	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "bad_mmdb") {
-		t.Fatalf("bad magic upload: got %d %s, want 400 bad_mmdb", resp.StatusCode, raw)
+		t.Fatalf("junk upload: got %d %s, want 400 bad_mmdb", resp.StatusCode, raw)
+	}
+	// Regression guard: a leading "MMDB" byte string is not the file format's
+	// magic — real databases start with the search tree — so it must be
+	// rejected too (an earlier version accepted exactly this and rejected every
+	// genuine upload).
+	resp, raw = doAuthed(t, "POST", srv.URL+"/api/geoip/mmdb", cookie, append([]byte("MMDB"), bytes.Repeat([]byte{0}, 128)...))
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "bad_mmdb") {
+		t.Fatalf("fake MMDB header: got %d %s, want 400 bad_mmdb", resp.StatusCode, raw)
 	}
 	if _, err := os.Stat(mmdbPath); !os.IsNotExist(err) {
 		t.Fatalf("rejected upload must not create the file: %v", err)
@@ -100,8 +109,9 @@ func TestMMDBUpload(t *testing.T) {
 		t.Fatalf("reload after rejected upload: got %d, want 0", spy.reloads)
 	}
 
-	// valid magic → 200, bytes land at the path (missing dirs created), resolver reloaded
-	body := append([]byte("MMDB"), bytes.Repeat([]byte{0}, 128)...)
+	// A real database → 200, bytes land at the path (missing dirs created),
+	// resolver reloaded.
+	body := mmdbFixture(t)
 	resp, raw = doAuthed(t, "POST", srv.URL+"/api/geoip/mmdb", cookie, body)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"ok":true`) {
 		t.Fatalf("valid upload: got %d %s, want 200 ok", resp.StatusCode, raw)

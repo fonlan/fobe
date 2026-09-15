@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/fobe-panel/fobe/internal/server/geoip"
+	"github.com/fobe-panel/fobe/internal/server/geoipupdate"
 	"github.com/fobe-panel/fobe/internal/server/httpapi"
 	"github.com/fobe-panel/fobe/internal/server/hub"
 	"github.com/fobe-panel/fobe/internal/server/notify"
@@ -108,7 +109,11 @@ func runServer() {
 	// sends node IPs to a third-party API, so it stays off by default).
 	geoPath := env("FOBE_GEOIP_MMDB", geoip.DefaultMMDBPath)
 	geoOnline, _ := strconv.ParseBool(env("FOBE_GEOIP_ONLINE", "0"))
-	h := hub.New(st, trust, log, geoip.New(geoPath, geoOnline))
+	// One MMDB handle for the whole process: the §14.1 updater reloads it after
+	// a download, and a second handle would keep answering from the old file
+	// until its own stat check happened to fire.
+	mmdb := geoip.NewMMDB(geoPath)
+	h := hub.New(st, trust, log, geoip.NewWith(mmdb, geoOnline))
 	log.Info("geoip resolver", "mmdb", geoPath, "online_fallback", geoOnline)
 	api := httpapi.NewServer(st, h, trust, crypt, log)
 	api.Version = version
@@ -125,10 +130,24 @@ func runServer() {
 	// Long-lived context for work a handler starts but does not wait for.
 	api.Background = bgCtx
 	// The MMDB upload endpoint (§14) writes geoPath and Reload()s this handle
-	// right away; the hub's chain resolver picks the file up on its next
-	// lookup via its own stat-based reload. Both views share the same file.
+	// right away; the hub's chain resolver shares the very same handle, so a
+	// new database serves lookups at once instead of at the next stat check.
 	api.GeoIPMMDBPath = geoPath
-	api.GeoIPResolver = geoip.NewMMDB(geoPath)
+	api.GeoIPResolver = mmdb
+	// Automatic database refresh (§14.1): keyless mirrors, a daily freshness
+	// check and the panel's manual update button all drive this one manager.
+	// FOBE_GEOIP_URL pins a private mirror, FOBE_GEOIP_AUTO_UPDATE=0 turns every
+	// automatic download off (the manual button keeps working).
+	api.GeoIPUpdater = geoipupdate.New(geoipupdate.Config{
+		Path:       geoPath,
+		Settings:   st,
+		Log:        log,
+		SourceURL:  env("FOBE_GEOIP_URL", ""),
+		AutoUpdate: geoipAutoUpdateEnabled(),
+		Reload:     mmdb.Reload,
+		Progress:   api.OnGeoIPProgress,
+	})
+	api.GeoIPUpdater.Start(bgCtx)
 
 	stop := make(chan struct{})
 	notifyClient := &http.Client{Timeout: notify.DeliveryTimeout}
@@ -224,6 +243,20 @@ func startSingboxCache(ctx context.Context, st *store.Store, log *slog.Logger, d
 // including unset, keeps the default on (design §9.2).
 func singboxAutoDownloadEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("FOBE_SINGBOX_AUTO_DOWNLOAD"))) {
+	case "0", "false", "off", "no":
+		return false
+	default:
+		return true
+	}
+}
+
+// geoipAutoUpdateEnabled reports whether automatic GeoIP database refreshes may
+// run (design §14.1). FOBE_GEOIP_AUTO_UPDATE=0 (or false/off/no) turns them
+// off, including the startup download of a missing database; the panel's
+// "update now" button and an upload still work. Anything else, including
+// unset, keeps the default on — the panel's own switch is the softer control.
+func geoipAutoUpdateEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FOBE_GEOIP_AUTO_UPDATE"))) {
 	case "0", "false", "off", "no":
 		return false
 	default:

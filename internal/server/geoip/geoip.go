@@ -17,7 +17,15 @@ const DefaultMMDBPath = "/data/geoip/GeoLite2-Country.mmdb"
 // ip-api.com online fallback when online is set. It never fails: a missing
 // or unreadable database just resolves to misses until the file shows up.
 func New(mmdbPath string, online bool) Resolver {
-	resolvers := []Resolver{NewMMDB(mmdbPath)}
+	return NewWith(NewMMDB(mmdbPath), online)
+}
+
+// NewWith is New around an existing MMDB handle. Callers that also drive
+// reloads — the §14 updater, which must publish a freshly downloaded database
+// immediately — have to share one handle: a second one would keep answering
+// from the old file until its own stat check happened to fire.
+func NewWith(mmdb *MMDB, online bool) Resolver {
+	resolvers := []Resolver{mmdb}
 	if online {
 		resolvers = append(resolvers, NewOnline(DefaultOnlineEndpoint, onlineTimeout, onlineCacheSize))
 	}

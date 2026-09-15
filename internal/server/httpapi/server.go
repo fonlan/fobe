@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/fobe-panel/fobe/internal/server/geoip"
+	"github.com/fobe-panel/fobe/internal/server/geoipupdate"
 	"github.com/fobe-panel/fobe/internal/server/hub"
 	"github.com/fobe-panel/fobe/internal/server/security"
 	"github.com/fobe-panel/fobe/internal/server/singboxcache"
@@ -61,6 +62,10 @@ type Server struct {
 	// reload afterwards. An empty path disables the upload endpoint.
 	GeoIPMMDBPath string
 	GeoIPResolver geoip.Resolver
+	// GeoIPUpdater is the §14.1 database updater (mirror download + freshness
+	// policy). The settings page reads its status and drives manual updates;
+	// optional — without it the section reports "not wired" instead of failing.
+	GeoIPUpdater *geoipupdate.Manager
 
 	// events broker for /ws/events (live panel updates)
 	evMu   sync.Mutex
@@ -136,8 +141,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/ai/chat", s.requireSession(s.handleAIChat))
 	mux.HandleFunc("POST /api/ai/actions/{id}/confirm", s.requireSession(s.handleConfirmAIAction))
 
-	// geoip MMDB upload (§14) + panel export / import (§17)
+	// geoip MMDB upload/status/update (§14) + panel export / import (§17)
 	mux.HandleFunc("POST /api/geoip/mmdb", s.requireSession(s.handleUploadMMDB))
+	mux.HandleFunc("GET /api/geoip/status", s.requireSession(s.handleGeoIPStatus))
+	mux.HandleFunc("POST /api/geoip/update", s.requireSession(s.handleGeoIPUpdate))
 	mux.HandleFunc("GET /api/export", s.requireSession(s.handleExport))
 	mux.HandleFunc("POST /api/import", s.requireSession(s.handleImport))
 

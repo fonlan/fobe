@@ -29,3 +29,10 @@ services:
       FOBE_SINGBOX_AUTO_DOWNLOAD: "${FOBE_SINGBOX_AUTO_DOWNLOAD:-1}"
       FOBE_SINGBOX_API_BASE: "${FOBE_SINGBOX_API_BASE:-}"
       FOBE_SINGBOX_DOWNLOAD_BASE: "${FOBE_SINGBOX_DOWNLOAD_BASE:-}"
+      # GeoIP database refresh (design §14.1): keyless mirrors by default; pin
+      # FOBE_GEOIP_URL for an internal mirror or air-gapped install, and set
+      # FOBE_GEOIP_AUTO_UPDATE=0 to stop every automatic download. The file
+      # itself lives under the /data mount (geoip/GeoLite2-Country.mmdb).
+      FOBE_GEOIP_AUTO_UPDATE: "${FOBE_GEOIP_AUTO_UPDATE:-1}"
+      FOBE_GEOIP_URL: "${FOBE_GEOIP_URL:-}"
+      FOBE_GEOIP_ONLINE: "${FOBE_GEOIP_ONLINE:-0}"

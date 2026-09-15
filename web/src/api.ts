@@ -7,6 +7,8 @@ import type {
   AuditRow,
   BlacklistRow,
   CommandRow,
+  GeoIPStatus,
+  GeoIPUpdateAccepted,
   ImportStats,
   LatencySample,
   LatencyTarget,
@@ -417,7 +419,7 @@ export function importBackup(data: unknown): Promise<ImportStats> {
   return request('/api/import', { method: 'POST', body: data });
 }
 
-// --- GeoIP database upload (design §14) --------------------------------------
+// --- GeoIP database: upload, status & update (design §14/§14.1) --------------
 
 /** Upload a GeoLite2-Country MMDB (raw bytes; the server caps at 64MB). */
 export function uploadGeoIPMMDB(file: File): Promise<{ ok: boolean }> {
@@ -426,6 +428,18 @@ export function uploadGeoIPMMDB(file: File): Promise<{ ok: boolean }> {
     headers: { 'Content-Type': 'application/octet-stream' },
     body: file,
   });
+}
+
+/** The database on disk, the live resolver and the update policy. */
+export function geoipStatus(): Promise<GeoIPStatus> {
+  return request('/api/geoip/status');
+}
+
+/** Start a manual update. It returns immediately (202); the mirror download
+ *  reports progress over /ws/events (`geoip_update`) and the outcome through
+ *  geoipStatus(). accepted=false means one was already running. */
+export function geoipUpdate(): Promise<GeoIPUpdateAccepted> {
+  return request('/api/geoip/update', { method: 'POST' });
 }
 
 // --- subscriptions & templates (design §10) ---------------------------------

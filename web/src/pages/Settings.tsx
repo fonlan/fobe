@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
@@ -10,6 +10,8 @@ import { useTheme, type ThemeMode } from '../theme';
 import { fmtBytes, fmtRate, fmtTime } from '../format';
 import type {
   BlacklistRow,
+  GeoIPDownload,
+  GeoIPStatus,
   SessionRow,
   SettingView,
   AuditRow,
@@ -36,6 +38,8 @@ const SERVER_KEYS = ['server.public_url'] as const;
 const AI_KEYS = ['ai.base_url', 'ai.model', 'ai.api_key', 'ai.default_policy'] as const;
 const NOTIFY_KEYS = ['notify.telegram_bot_token', 'notify.telegram_chat_id', 'notify.webhook_url', 'notify.webhook_secret'] as const;
 const PROXY_KEYS = ['anytls_password'] as const;
+/** §14.1 database refresh policy; the database itself has its own endpoints. */
+const GEOIP_KEYS = ['geoip.auto_update', 'geoip.max_age_days', 'geoip.url'] as const;
 
 function isHTTPURL(value: string): boolean {
   try {
@@ -93,6 +97,12 @@ export default function Settings() {
     for (const k of keys) {
       const v = draft[k];
       if (v !== undefined && v.trim() !== '') payload[k] = v.trim();
+    }
+    // geoip.url is the one field where empty is meaningful: it means "go back
+    // to the built-in mirror chain", so clearing it must reach the server even
+    // though every other emptied field is skipped.
+    if (keys.includes('geoip.url') && draft['geoip.url'] !== undefined && draft['geoip.url'].trim() === '') {
+      payload['geoip.url'] = '';
     }
     if (keys.includes('server.public_url') && draft['server.public_url'] !== undefined && payload['server.public_url'] === undefined) {
       setErr(t('err_invalid_public_url'));
@@ -244,7 +254,13 @@ export default function Settings() {
 
       <SingboxCacheCard />
       <BackupCard />
-      <GeoIPCard />
+      <GeoIPCard
+        field={field}
+        busy={busy}
+        savedMsg={savedMsg}
+        onSave={() => void saveGroup(GEOIP_KEYS)}
+        saveLabel={t('save')}
+      />
       <BlacklistCard />
       <SessionsCard />
       <AuditCard />
@@ -968,35 +984,222 @@ function BackupCard() {
   );
 }
 
-function GeoIPCard() {
+function GeoIPCard({
+  field,
+  busy,
+  savedMsg,
+  onSave,
+  saveLabel,
+}: {
+  field: (
+    key: string,
+    label: string,
+    opts?: { password?: boolean; type?: string; select?: { value: string; label: string }[] },
+  ) => ReactNode;
+  busy: boolean;
+  savedMsg: string | null;
+  onSave: () => void;
+  saveLabel: string;
+}) {
   const { t } = useI18n();
-  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<GeoIPStatus | null>(null);
+  const [dl, setDl] = useState<GeoIPDownload | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
 
-  const doUpload = async (f: File) => {
-    setBusy(true);
-    setErr(null);
-    setDone(false);
+  const load = useCallback(async () => {
     try {
-      await api.uploadGeoIPMMDB(f);
-      setDone(true);
+      const s = await api.geoipStatus();
+      setStatus(s);
+      setDl(s.download);
+      setErr(null);
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Live progress: the server pushes one snapshot per download tick
+  // (geoip_update) and pings geoip_updated when the file changed.
+  useEffect(() => {
+    const close = api.openEvents((ev) => {
+      if (ev.kind === 'geoip_update' && ev.data) {
+        setDl(ev.data as GeoIPDownload);
+      } else if (ev.kind === 'geoip_updated') {
+        void load();
+      }
+    });
+    return close;
+  }, [load]);
+
+  const active = dl?.active === true;
+
+  // Polling fallback while an update runs: a dropped socket must not freeze
+  // the bar at its last tick.
+  useEffect(() => {
+    if (!active) return;
+    const h = window.setInterval(() => {
+      api
+        .geoipStatus()
+        .then((s) => {
+          setStatus(s);
+          setDl(s.download);
+        })
+        .catch(() => {
+          /* transient: the next tick retries */
+        });
+    }, 1500);
+    return () => window.clearInterval(h);
+  }, [active]);
+
+  // A finished update replaced the file: re-read the status so the data date,
+  // size and source are the new ones (the snapshot alone cannot say that).
+  const wasActive = useRef(false);
+  useEffect(() => {
+    if (wasActive.current && !active) void load();
+    wasActive.current = active;
+  }, [active, load]);
+
+  const updateNow = async () => {
+    if (starting || active) return;
+    setStarting(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      const r = await api.geoipUpdate();
+      setMsg(r.accepted ? t('geoip_update_started') : t('geoip_update_running'));
+      await load();
     } catch (e) {
       setErr(apiErrorMessage(e, t));
     } finally {
-      setBusy(false);
+      setStarting(false);
     }
   };
 
+  const doUpload = async (f: File) => {
+    setUploading(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      await api.uploadGeoIPMMDB(f);
+      setMsg(t('geoip_upload_done'));
+      await load();
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const label = (prefix: string, value: string) => {
+    const key = prefix + value;
+    const v = t(key);
+    return v === key ? value : v;
+  };
+
+  const percent = dl?.total ? dl.percent ?? 0 : 0;
+  // Bytes and speed only: the phase is the bar's label, so repeating it here
+  // would waste the row's width.
+  const dlText = dl
+    ? [
+        dl.downloaded > 0
+          ? dl.total
+            ? `${fmtBytes(dl.downloaded)} / ${fmtBytes(dl.total)}`
+            : fmtBytes(dl.downloaded)
+          : '',
+        dl.speed ? fmtRate(dl.speed) : '',
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : '';
+  const stateTone = status?.state === 'failed' ? ' status-failed' : status?.state === 'ok' ? ' status-ok' : ' status-timeout';
+  // The updater persists the failure reason on status.error, so the card shows
+  // it from one place instead of repeating the live snapshot's copy.
+  const stateError = status?.error && (status.state === 'failed' || status.state === 'disabled') ? status.error : null;
+  const sourceText = !status?.source
+    ? t('geoip_source_builtin')
+    : status.source === 'upload'
+      ? t('geoip_source_upload')
+      : status.source;
+
   return (
     <section className="card">
-      <h3>{t('sec_geoip')}</h3>
+      <div className="row-between">
+        <h3>{t('sec_geoip')}</h3>
+        {status && (
+          <span className={'chip' + (status.auto_update ? '' : ' status-timeout')}>
+            {status.auto_update ? t('geoip_auto_on') : t('geoip_auto_off')}
+          </span>
+        )}
+      </div>
       <p className="hint">{t('geoip_desc')}</p>
       {err && <div className="form-error">{err}</div>}
-      {done && <div className="form-ok">{t('geoip_upload_done')}</div>}
-      <div className="row-gap">
-        <FileButton label={t('geoip_upload')} accept=".mmdb,application/octet-stream" busy={busy} onFile={(f) => void doUpload(f)} />
+      {msg && <div className="form-ok">{msg}</div>}
+      {status?.env_locked && <p className="form-error">{t('geoip_env_locked')}</p>}
+
+      <div className="tile-grid">
+        <div className="tile">
+          <div className="tile-label">{t('geoip_state')}</div>
+          <div className="tile-value">
+            {status?.state ? <span className={'chip' + stateTone}>{label('geoip_state_', status.state)}</span> : '…'}
+            {status && !status.exists && ` ${t('geoip_not_installed')}`}
+          </div>
+          <div className="tile-sub">
+            {status?.updated_at ? t('geoip_updated_at', { time: fmtTime(status.updated_at) }) : t('geoip_never_updated')}
+          </div>
+        </div>
+        <div className="tile">
+          <div className="tile-label">{t('geoip_data_date')}</div>
+          <div className="tile-value mono">{status?.build_epoch ? fmtTime(status.build_epoch) : '-'}</div>
+          <div className="tile-sub">
+            {status?.database_type || '-'}
+            {status?.exists ? ` · ${fmtBytes(status.size_bytes ?? 0)}` : ''}
+          </div>
+        </div>
+        <div className="tile">
+          <div className="tile-label">{t('geoip_source')}</div>
+          <div className="tile-value mono">{sourceText}</div>
+          <div className="tile-sub">
+            {status?.checked_at ? t('geoip_checked_at', { time: fmtTime(status.checked_at) }) : '-'}
+          </div>
+        </div>
       </div>
+
+      {active && dl && (
+        <div style={{ marginTop: 10 }}>
+          <ProgressBar tone="plain" label={label('geoip_phase_', dl.phase ?? '')} pct={percent} text={dlText} />
+        </div>
+      )}
+      {!active && stateError && <div className="form-error">{stateError}</div>}
+
+      <div className="row-gap" style={{ marginTop: 12 }}>
+        <button type="button" className="btn primary" disabled={starting || active} onClick={() => void updateNow()}>
+          {active ? t('geoip_updating') : t('geoip_update_now')}
+        </button>
+        <FileButton
+          label={t('geoip_upload')}
+          accept=".mmdb,application/octet-stream"
+          busy={uploading || active}
+          onFile={(f) => void doUpload(f)}
+        />
+      </div>
+
+      <div className="form-grid" style={{ marginTop: 14 }}>
+        {field('geoip.auto_update', t('geoip_auto_update'), {
+          select: [
+            { value: '1', label: t('geoip_auto_on') },
+            { value: '0', label: t('geoip_auto_off') },
+          ],
+        })}
+        {field('geoip.max_age_days', t('geoip_max_age'), { type: 'number' })}
+        {field('geoip.url', t('geoip_url'), { type: 'url' })}
+      </div>
+      <SaveRow busy={busy} savedMsg={savedMsg} onSave={onSave} label={saveLabel} />
     </section>
   );
 }

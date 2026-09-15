@@ -538,6 +538,11 @@ func (s *Server) importSettings(settings map[string]string, stats *importStats) 
 				continue
 			}
 		}
+		// A hand-edited snapshot must not install a §14.1 policy the API would
+		// have rejected (a nonsense threshold or a non-URL source).
+		if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {
+			continue
+		}
 		if err := s.Store.SetSetting(key, value, false); err != nil {
 			s.Log.Warn("import setting", "key", key, "err", err)
 			continue

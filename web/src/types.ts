@@ -532,6 +532,57 @@ export interface AIConfirmResponse {
 
 // --- panel export / import & GeoIP upload (design §17 / §14) ---
 
+/** One GeoIP database update in flight (or the last one that ran), pushed as
+ *  the `geoip_update` event and mirrored by GET /api/geoip/status. */
+export interface GeoIPDownload {
+  active: boolean;
+  /** connecting | downloading | verifying | done | failed */
+  phase?: string;
+  /** Mirror URL being tried. */
+  source?: string;
+  downloaded: number;
+  /** 0/absent when the mirror sends no Content-Length (no percentage then). */
+  total?: number;
+  percent?: number;
+  speed?: number;
+  started_at?: number;
+  updated_at?: number;
+  error?: string;
+}
+
+/** GET /api/geoip/status: the file on disk, the live resolver and the §14.1
+ *  update policy in one flat object. */
+export interface GeoIPStatus {
+  path: string;
+  /** false when FOBE_GEOIP_MMDB is empty: no upload, no update. */
+  configured: boolean;
+  exists: boolean;
+  size_bytes?: number;
+  mod_time?: number;
+  /** When the provider built the data (unix seconds) — the honest data age. */
+  build_epoch?: number;
+  database_type?: string;
+  /** true when the resolver is actually serving a database. */
+  live: boolean;
+  /** ok | disabled | pending | failed */
+  state: string;
+  source?: string;
+  updated_at?: number;
+  checked_at?: number;
+  error?: string;
+  auto_update: boolean;
+  /** true when FOBE_GEOIP_AUTO_UPDATE=0 overrides the panel switch. */
+  env_locked: boolean;
+  max_age_days: number;
+  download: GeoIPDownload;
+}
+
+/** POST /api/geoip/update: accepted=false means one was already running. */
+export interface GeoIPUpdateAccepted {
+  accepted: boolean;
+  running: boolean;
+}
+
 /** Server-side import summary: merged counts, idempotent by machine_id/name. */
 export interface ImportStats {
   nodes_created: number;
