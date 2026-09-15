@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"runtime"
 	"time"
@@ -27,8 +28,32 @@ func (s *agentSession) executeCommand(env protocol.Envelope) {
 		return
 	}
 
-	result := s.runCommand(env.ID, env.Type, env.Payload)
-	s.sendEnvelope(protocol.NewEnvelope(protocol.TypeCmdResult, env.ID, result))
+	cmd, err := commandFromEnvelope(env)
+	if err != nil {
+		s.sendEnvelope(protocol.NewEnvelope(protocol.TypeCmdResult, env.ID, protocol.CmdResult{ID: env.ID, Error: err.Error()}))
+		return
+	}
+	result := s.runCommand(cmd.ID, cmd.Kind, cmd.Payload)
+	s.sendEnvelope(protocol.NewEnvelope(protocol.TypeCmdResult, cmd.ID, result))
+}
+
+// commandFromEnvelope unpacks the wire command (§7). The envelope type is
+// always "cmd"; the kind and the kind-specific payload live inside the payload
+// (protocol.Cmd). Reading env.Type here answered every panel/AI command with
+// "unsupported command kind: cmd" — run_shell, restart/start/stop_singbox and
+// tail_logs were all dead on arrival.
+func commandFromEnvelope(env protocol.Envelope) (protocol.Cmd, error) {
+	var cmd protocol.Cmd
+	if err := json.Unmarshal(env.Payload, &cmd); err != nil {
+		return protocol.Cmd{}, fmt.Errorf("decode cmd: %w", err)
+	}
+	if cmd.ID == "" {
+		cmd.ID = env.ID
+	}
+	if cmd.Kind == "" {
+		return cmd, fmt.Errorf("cmd %s: missing kind", cmd.ID)
+	}
+	return cmd, nil
 }
 
 func (s *agentSession) runCommand(id, kind string, payload json.RawMessage) protocol.CmdResult {
