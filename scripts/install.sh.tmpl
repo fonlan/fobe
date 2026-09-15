@@ -114,7 +114,16 @@ WantedBy=multi-user.target
 UNIT
         $SUDO install -m 0644 "$TMP/fobe-agent.service" /etc/systemd/system/fobe-agent.service
         $SUDO systemctl daemon-reload
-        $SUDO systemctl enable --now fobe-agent.service
+        # restart, NOT `enable --now`: this script is also the panel's
+        # "reinstall command" (§5.5), which runs on a node whose agent is
+        # already up. `systemctl enable --now` is a no-op for an already-active
+        # unit, so the new binary would be installed and never executed — the
+        # node keeps reporting the old version no matter how often you reinstall
+        # (the tell is `systemctl status`: Active since long before the install).
+        # `restart` also starts a stopped unit, so the fresh-install case is
+        # covered by the same line.
+        $SUDO systemctl enable fobe-agent.service
+        $SUDO systemctl restart fobe-agent.service
         ;;
     procd)
         cat > "$TMP/fobe-agent.initd" <<'INITD'
@@ -133,12 +142,19 @@ start_service() {
 INITD
         $SUDO install -m 0755 "$TMP/fobe-agent" /etc/init.d/fobe-agent
         $SUDO /etc/init.d/fobe-agent enable
-        $SUDO /etc/init.d/fobe-agent start
+        # same trap as the systemd branch: `start` on a running service is a
+        # no-op, `restart` is what actually puts the new binary in charge.
+        $SUDO /etc/init.d/fobe-agent restart
         ;;
     fallback)
         echo "fobe: no service manager found; start the agent manually:"
         echo "  $BIN_DIR/fobe-agent -config /etc/fobe-agent/config.json -run"
         $SUDO mkdir -p /var/log
+        # Reinstalling with no supervisor used to leave the previous nohup'd
+        # agent alive on the replaced inode, so two agents fought over one node
+        # credential (the hub closes whichever connected first). Stop it first;
+        # the path anchor keeps the pattern from matching this install script.
+        $SUDO pkill -f "^$BIN_DIR/fobe-agent" 2>/dev/null || true
         $SUDO sh -c "nohup $BIN_DIR/fobe-agent -config /etc/fobe-agent/config.json -run >/var/log/fobe-agent.log 2>&1 &"
         ;;
 esac

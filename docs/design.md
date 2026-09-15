@@ -216,6 +216,12 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 - **面板与接口**（全部走会话鉴权，`GET /api/agent/update` 集群状态、`POST /api/nodes/{id}/agent/retry` 人工解锁、`POST /api/nodes/{id}/agent/reinstall-command` 生成一次重装命令）。节点视图新增 `agent_target_version / agent_update_state / agent_update_attempts / agent_update_error / agent_update_planned_at / agent_update_done_at` 与能力位 `agent_self_update`（外加 `agent_caps_seen`：没握过手的节点不算"不支持"，否则新建节点会被误标重装）；`agent_update_state` 取 `planned|downloading|verifying|committed|failed|transient|suppressed|unsupported`。
 - **"重试"要能推动在线的探针**：`hello_ack` 之外的载体是普通 `desired` 帧（`DesiredState` 里带上同样两个字段），因此解锁不必等下一次握手；服务端由同一个函数同时填两个载体，不可能填出不一致的两份。
 - **两个必须失败关闭的点**（都在实现里显式处理）：① 临时文件必须落在**目标二进制同目录**再 `rename`（跨文件系统 `EXDEV`；`open+truncate` 覆盖正在运行的文件会 `ETXTBSY`）；② 同目录可用空间 < 2×产物即判 `transient` 拒绝，宁可不动也不能写半个二进制。
+- **dev 环境怎么让"跟随"真的可验证（实现修订 2026-09-15）**：设计上 `dev`/`compose` 不是发布形态，而两端版本号又恒等（判据是"相等"，不是"新旧"）⇒ 测试环境**永远判已收敛**，这条链路在 dev 里一次都跑不到；"把 `IsReleaseVersion` 对 dev 放开"是死路——等值判定在门槛之前，两端都是 `dev` 照样什么都不发生，还会让面板把陈旧探针显示成已收敛。`scripts/dev.sh` 因此自己产 agent 产物、并给自己一个**内容寻址**的版本号：先用固定占位版本 `dev-pending` 交叉编译一份 agent，对产物取 sha256 前 12 位作为 `dev-<fp>`（全字母时补一位数字，保证过 `IsReleaseVersion`），再用这个号正式编一次（Go 对相同输入确定性：实测同 flags、不同输出路径两次构建哈希一致）。产物落 `data/agent-seed/agent/<版本>/`（`FOBE_AGENT_SEED_DIR`），由 server 启动时的 `Seed` 复制进 DL 卷——和容器同一条路径，顺带覆盖"挂载卷遮蔽"。
+  **为什么不是时间戳**：AGENTS.md 要求"改了后端必须重启 `dev.sh`"，时间戳会让**每次后端热改都触发全网探针下一次 10MB 并重启一次**，`data/dl/agent/<版本>` 还会每次多一个 ~10MB 目录。内容寻址把触发条件收紧成"agent 真正编出来的东西变了"（改 `internal/protocol` 这类两端共用包也会换号，这是正确的）；**纯注释/格式改动不换号**——二进制没变，探针本来就不该动（实测：改一个日志字符串换号，还原后回到原号）。
+  **语义后果**：版本号是**占位构建**产物的哈希，不是交付产物的哈希——它与 `linux-amd64.sha256`（交付产物的摘要）没有推导关系，别互相校验。`FOBE_VERSION=<旧号>` 可显式钉住版本号 ⇒ 降级演练就是"用旧号重跑 dev.sh"（旧产物还在 DL 卷里，`Seed` 不覆盖）。
+  ⚠️ **一次性动作**：`data/dl/agent/latest` 若是**真实目录**（本地手工 staged 的产物），`ownedLatest` 判定"不是我们的布局"、永不重指，而 `/install.sh` 固定取 `dl/agent/latest/linux-amd64`（重装命令走的也是它）——于是"重装"会把你装回那份旧二进制，人却在困惑它为什么永远不跟随。删掉它，让 `pointLatest` 建符号链接布局。
+- **错峰可参数化（`FOBE_AGENT_UPDATE_STAGGER`）**：默认仍是 5 分钟；1–2 台探针的测试机设 `1s` 即"立即"（偏移取 `hash%span`，span=1s 时恒为 0）。理由是"还没到计划时刻"在面板上与"功能没生效"长得一模一样。≤0 视为未设——`agentupdate.New` 会把非正值回落到默认 5 分钟，静默吃掉 `0` 本身就是一个陷阱。生产不设。
+- **重装命令必须让新二进制真的上场（2026-09-15 修订）**：`install.sh` 的 systemd 分支原本收尾是 `systemctl enable --now`，procd 分支是 `/etc/init.d/fobe-agent start`——**对已经在跑的 agent 两者都是 no-op**。而面板的「重装命令」恰恰是为"已经在跑、只是版本旧"的节点准备的（§5.5 存量探针路径），于是它只把磁盘上的文件换掉，进程仍跑着被替换掉的旧 inode：`strings $(command -v fobe-agent)` 显示新代码（用户以为装好了），`systemctl status` 的 `Active since` 却远早于这次安装，节点永远报旧版本、期望版本箭头永不消失。改成 `enable` + `restart`（`restart` 对未运行的单元等同启动，首次安装同样覆盖），procd 侧同样用 `restart`；fallback（`nohup`）分支则先 `pkill -f "^$BIN_DIR/fobe-agent"` 再起，否则重装会留下两个 agent 抢同一个节点凭据（hub 会把先连上的那个顶掉）。排查口径：`systemctl status fobe-agent` 的 `Active since` 是否是刚刚；与 `/proc/$(systemctl show -p MainPID --value fobe-agent)/exe` 里的版本号对照磁盘上的二进制。
 
 ---
 
@@ -493,6 +499,9 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - 兼容：`TerminalOpen.Mode` 字段保留在 v1 wire 上（server 恒写 `pty`）；旧浏览器发来的 `ssh` 由 server 规范化为 `pty`，旧 agent 收到 `ssh` 也只起本地 PTY。旧 `node_ssh` 凭据表在服务端启动迁移时删除。
 - 会话初始化时记审计：操作者、节点、来源 IP、会话 ID、开始/结束时间。浏览器帧限 1 MiB，会话 ID 由 server 生成并覆写，浏览器不能伪造。
 - 终端与 AI 执行共用 agent 指令通道 → 审计口径统一。
+- 终端页三个盒子（2026-09-15 修订）：卡片头一行（左标题「Agent Web 终端」，右会话 ID +「重连」+ 连接状态点）→ `.terminal-shell`（深色屏幕框，16px padding 让文字不贴边）→ `.terminal-host`（FitAddon 的量测盒）。卡片自身用默认面板底色，屏幕是页面上唯一的深色面；页面不再另起标题。
+- **padding 不能放在 `.terminal-host` 上**：xterm 的 `.xterm` 是绝对定位盒，绝对定位子元素相对宿主 **padding box** 定位，`inset: 0` 会把字形区直接铺满 padding、把留白盖掉（这就是"padding 设了却依然贴边"的成因）。所以外框（padding/border/深色底）与量测宿主必须是两个元素。
+- `.terminal-host` 高度**必须由卡片所在的网格行决定、不能被 xterm 内容撑高**：宿主 `flex: 1 1 auto`（不写内容高度）、内部 `.xterm` 绝对定位填满，否则每次 fit 都会把外框的 padding+border 折成行数加回去，现象是终端每帧长高一行；fit 只由 rAF 防抖的 `ResizeObserver` 触发（`onResize` 里调 fit 会同步递归），宿主不可见（宽高 ≤0）时跳过 fit，避免把活着的 PTY 缩成 2×1。
 - v1 不做 PTY 全量录制（体积与隐私成本高），但保留 `session_id`，便于后续开启录制。
 
 ---
@@ -502,6 +511,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 ### 12.1 形态
 
 - 服务端代理到 OpenAI 兼容 API：`base_url`、`api_key`（AES-GCM 加密存 `settings`）、`model` 均由面板配置；支持流式输出。
+- 三键缺一即视为**未配置**（2026-09-15 修订）：判定收敛为服务端唯一函数，`GET /api/settings` 额外返回派生字段 `ai_configured`（不是 setting，不受 `allowedKeys` 影响），终端页只在它为 `true` 时渲染 AI 侧栏——否则侧栏每次提交都只会拿到 503 `ai_not_configured`，不如不显示，终端独占整宽。
 - 上下文注入（默认）：节点列表、当前指标、流量与配额、延迟、sing-box 版本与状态、最近告警。
 - **默认不注入原始日志**：需要时由你在对话里显式打开"附带日志（最近 N 行）"开关。这既减少 token，也显著缩小注入面——**但不改变你选的默认放行语义**。
 
@@ -603,6 +613,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 - 技术：**React + TypeScript + Vite**；构建产物输出到 `web/dist`。**生产镜像在构建阶段把产物烤进镜像**（`/srv/web`），由 server 直出（`FOBE_WEB_DIR`）——不嵌入 Go 二进制（避免体积膨胀），也不再依赖宿主机挂载前端目录。若想让外部 nginx 直接吐静态文件，见 §3 末尾的替代做法。
 - **本地开发不走容器**：前端 `npm run dev`（Vite dev server，把 `/api`、`/ws`、`/sub`、`/install.sh`、`/dl` 代理到 `http://127.0.0.1:8080`，**WebSocket 代理必须开 `ws: true`**），后端 `go run ./cmd/server`。此时把 `FOBE_WEB_DIR` 留空 → server 进 **API-only 模式**：`/` 返回一句"请访问 Vite dev server"的提示（不 404、不白屏），其余接口行为与生产一致。
+- **`scripts/dev.sh` 与自更新（2026-09-15 修订）**：dev.sh 现在除 server 外还交叉编译 linux/amd64 的 agent 产物，并给两端注入同一个内容寻址版本号 `dev-<哈希>`（§5.5 实现修订），所以本机 dev 也能真跑"探针跟随服务端"；`go run ./cmd/server` 没有 `-ldflags`、版本仍是 `dev`，不会下发目标。降级演练用 `FOBE_VERSION=<旧号> scripts/dev.sh`；改后端必须重启 dev.sh 这条老规矩不变，但版本号只在 agent 源码真的变了才变——重启本身不再惊动探针。
 - 页面：登录 / 概览（卡片墙）/ 节点详情（**只读监控**：指标 + 图表 + 流量 + 延迟历史 + 命令）/ 订阅与模板 / 延迟目标 / 告警 / 终端（全屏）/ AI 助手（侧栏）/ 设置（AI、通知、GeoIP、保留期、主密钥状态、**服务器**）。（2026-09-15 修订）
 - **配置入口收敛（2026-09-15）**：设置里新增「服务器」页，表格列出已接入的服务器，行尾为编辑/删除图标按钮。「编辑服务器」页集中承载该服务器的全部配置：节点设置（名称/备注/网卡/配额/账单）、延迟测量端点选择、IP 列表（含手动主 IP）、sing-box 服务端配置（版本/启停/端口）。节点详情页不再承载配置表单与删除按钮——监控与配置分离，删除服务器统一走设置页（带确认）。
 - 实时（2026-09-15 修订）：`/ws/events` 只覆盖状态类变化（节点增删改、sing-box、订阅、设置、GeoIP）——**常规指标上报不产生任何事件**，所以数据新鲜度必须靠「轮询 + 高频上报」两条腿：

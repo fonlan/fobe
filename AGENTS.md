@@ -35,6 +35,8 @@ scripts/dev.sh                    # 后端 API-only + Vite（Ctrl+C 一起退；
 scripts/dev.sh --reset            # 先删 data/dev.db 再起
 scripts/dev.sh --no-web           # 只起后端
 FOBE_LISTEN=127.0.0.1:8080 scripts/dev.sh   # 只绑本机（默认 0.0.0.0，会打印局域网地址）
+FOBE_VERSION=<旧号> scripts/dev.sh          # 钉住版本号 → 降级演练（§5.5）
+FOBE_AGENT_UPDATE_STAGGER=1s scripts/dev.sh # 一两台探针时把 0–5 分钟错峰压成"立即"
 
 go test ./...                     # 全部测试
 go test ./internal/server/httpapi/ -run TestFullAgentPath   # 端到端主链路
@@ -102,4 +104,7 @@ fobe-server admin unblock <ip|all> | reset-password | list-sessions --revoke | k
 - **`FOBE_ADMIN_PASSWORD` 是密码准绳**：每次启动同步为该值，变更时吊销全部旧会话；不设置则不动现有密码。首次启动无用户且未设置时才打印一次性初始密码。
 - **`.gitignore` 覆盖了 `.agents/`、`.zcode/`、`.mem/`**（本地 skills 与工具元数据）以及构建产物 `agent`、`agent.exe`、`server`、`web/dist/`、`data/`。仓库根目录里那些二进制是本地构建残留，不要提交。
 - **挂载卷遮蔽镜像内置的 agent 产物**：镜像里 `COPY` 了 `/srv/dl/agent/<version>/`，但 compose 把 `../data/dl` 挂到 `/srv/dl`——宿主机目录里没有的版本就看不见，标准部署下 `/dl/agent/<version>/linux-amd64` 默认 404，"探针跟随服务端"（design §5.5）会静默失效。所以服务端启动时必须把镜像自带产物**复制进 DL 卷**；排查"节点一直没跟上"先看 DL 卷里有没有该版本目录和 `.sha256`。
+- **`data/dl/agent/latest` 是真实目录 → "重装"会把你装回旧二进制**：`pointLatest` 只重指自己建的符号链接布局（`ownedLatest` 一看到真实文件就放弃），而 `/install.sh` 与面板「重装命令」都固定取 `dl/agent/latest/linux-amd64`。本地手工 staged 的 `latest/` 因此会让重装永远装那份旧产物（可能就是没有自更新代码的那版），现象是"重装了还是不支持跟随"。删掉该目录，下次启动让 server 重建符号链接布局。
+- **`scripts/dev.sh` 自己产 agent 产物并注入内容寻址版本号 `dev-<哈希>`**（§5.5）：版本号 = 占位构建产物的 sha256 前 12 位，所以只随 **agent 编出来的二进制**变——改后端代码重启不换号，**只改注释/格式也不换号**（二进制相同；已验证：改日志字符串换号 `…afdfc60` → `…4286310`，还原后回到原号）；`FOBE_VERSION=<旧号>` 钉住版本号做降级演练；`FOBE_AGENT_UPDATE_STAGGER=1s` 把 0–5 分钟错峰压成"立即"。所以改了 `internal/agent` / `internal/protocol` 的**语义**后重启 dev.sh，局域网探针会**真的自更新一次**（自己 exit、systemd 拉起）——看到探针短暂掉线是预期，不是故障。
+- **重装命令 ≠ 生效**：`install.sh` 曾用 `systemctl enable --now` / `/etc/init.d/… start` 收尾，**对已经在跑的 agent 是 no-op** —— 重装只换磁盘上的文件，进程仍在跑被替换掉的旧 inode，于是"装好了却永远报旧版本"（`strings $(command -v fobe-agent)` 有新代码，`systemctl status` 的 `Active since` 却远早于这次安装）。已改成 `enable` + `restart`（procd 同理），fallback 分支先 `pkill -f "^$BIN_DIR/fobe-agent"` 再起。判断这类问题永远先对时间线：磁盘二进制 vs `/proc/<MainPID>/exe`。
 - `data/sqlite/fobe.db` 是 WAL 单写者，别用多实例同时挂载。

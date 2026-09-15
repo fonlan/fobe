@@ -194,11 +194,28 @@ func runServer() {
 			log.Warn("agent artifact seed failed", "seed_dir", seedDir, "dl_dir", dlDir, "err", err)
 		}
 	}
+	// §5.5 stagger: the five-minute deterministic spread is what keeps a
+	// post-restart stampede off the artifact volume — but a dev/test box with
+	// one or two probes has no stampede to spread, and waiting out the window
+	// makes verification look like "nothing happened". FOBE_AGENT_UPDATE_STAGGER
+	// (1s = immediate: the offset is hash%span) is the escape hatch; unset keeps
+	// the default. Values <= 0 are refused because agentupdate.New reads them as
+	// "unset" and would silently put the default back.
+	stagger := agentupdate.DefaultStagger
+	if v := strings.TrimSpace(os.Getenv("FOBE_AGENT_UPDATE_STAGGER")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			stagger = d
+		} else {
+			log.Warn("FOBE_AGENT_UPDATE_STAGGER ignored",
+				"value", v, "using", agentupdate.DefaultStagger.String())
+		}
+	}
 	agentUpd := agentupdate.New(agentupdate.Config{
 		Store:         st,
 		Log:           log,
 		ServerVersion: version,
 		DLDir:         dlDir,
+		Stagger:       stagger,
 		// §12.3: the freeze wins over follow — a killed panel must not swap
 		// probe binaries while the operator is trying to stop the bleeding.
 		KillSwitch: func() bool { return settingBool(st, "ai.kill_switch") },
