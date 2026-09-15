@@ -234,6 +234,12 @@ export interface TemplateRow {
 export interface SingboxVersion {
   version: string;
   sha256?: string;
+  /** Cached binary size in bytes (server-side artifact cache, §9.2). */
+  size?: number;
+  /** When the version was cached, unix seconds (0/absent = unknown). */
+  downloaded_at?: number;
+  /** Nodes whose desired_version still points at this version. */
+  refs?: number;
 }
 
 export interface SingboxStatus {
@@ -250,10 +256,119 @@ export interface SingboxStatus {
   updated_at: number;
 }
 
+// --- server-side artifact cache + one-click batch update (design §9.2) ---
+
+/** GET /api/singbox/cache — one cached release on the server's disk. */
+export interface SingboxCacheVersion {
+  version: string;
+  sha256?: string;
+  /** Binary size in bytes. */
+  size: number;
+  /** When the version was cached, unix seconds. */
+  downloaded_at: number;
+  /** Nodes whose desired_version points at this version. */
+  refs: number;
+  /** True for the newest cached release (the one "update" defaults to). */
+  is_latest: boolean;
+}
+
+/** Startup auto-download state written by the server (settings singbox.cache_status). */
+export interface SingboxCacheStatus {
+  state: 'ok' | 'disabled' | 'failed' | 'pending' | string;
+  version?: string;
+  updated_at?: number;
+  error?: string;
+  auto_download: boolean;
+}
+
+/** Per-node bucket of a batch update (mirrors internal/server/singboxupdate). */
+export type SingboxUpdateOutcome = 'already_current' | 'pushed' | 'offline_pending' | 'failed';
+
+export interface SingboxUpdateNodeResult {
+  node_id: string;
+  name?: string;
+  online: boolean;
+  outcome: SingboxUpdateOutcome | string;
+  reason?: string;
+  version?: string;
+  desired_version?: string;
+  /** Set by the 15-minute convergence check. */
+  converged?: boolean;
+  checked_at?: number;
+}
+
+export interface SingboxUpdateCounts {
+  total: number;
+  already_current: number;
+  pushed: number;
+  offline_pending: number;
+  failed: number;
+}
+
+/** One distribution batch (settings singbox.last_update). */
+export interface SingboxUpdateJob {
+  id: string;
+  state: 'pending' | 'downloading' | 'pushing' | 'done' | 'failed' | string;
+  requested?: string;
+  target_version?: string;
+  started_at: number;
+  finished_at?: number;
+  /** When the convergence re-check is due, unix seconds. */
+  deadline?: number;
+  error?: string;
+  actor?: string;
+  source_ip?: string;
+  nodes: SingboxUpdateNodeResult[];
+  counts: SingboxUpdateCounts;
+  convergence_checked: boolean;
+  checked_at?: number;
+  /** Node ids that had not converged at the deadline. */
+  stale?: string[];
+  stale_alerted?: boolean;
+}
+
+/** One affected node in the pre-flight confirmation list. */
+export interface SingboxImpactNode {
+  node_id: string;
+  name?: string;
+  online: boolean;
+  status?: string;
+  version?: string;
+  desired_version?: string;
+  already_current: boolean;
+}
+
+/** GET /api/singbox/update/impact — the confirmation dialog's data. */
+export interface SingboxImpact {
+  target_version: string;
+  requested?: string;
+  cached: boolean;
+  download_needed: boolean;
+  count: number;
+  online: number;
+  offline: number;
+  already_current: number;
+  nodes: SingboxImpactNode[];
+}
+
+/** GET /api/singbox/cache — everything the settings section renders. */
+export interface SingboxCache {
+  dl_dir: string;
+  versions: SingboxCacheVersion[];
+  latest_cached: string;
+  auto_download: boolean;
+  mount_ok: boolean;
+  mount_applicable: boolean;
+  cache_status: SingboxCacheStatus | null;
+  last_update: SingboxUpdateJob | null;
+}
+
 export interface WsEvent {
   kind: string;
   ref: string;
   ts: number;
+  /** Optional payload (singbox_update carries the full Job snapshot). */
+  data?: unknown;
 }
 
 // Browser terminal WebSocket envelopes. The server stamps the authoritative

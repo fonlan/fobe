@@ -20,7 +20,11 @@ import type {
   RegTokenRow,
   SessionRow,
   SettingView,
+  SingboxCache,
+  SingboxCacheStatus,
+  SingboxImpact,
   SingboxStatus,
+  SingboxUpdateJob,
   SingboxVersion,
   SubAccessRow,
   SubscriptionRow,
@@ -509,6 +513,43 @@ export function singboxSetPort(id: string, port: number): Promise<{ ok: boolean;
     method: 'PUT',
     body: { port },
   });
+}
+
+// --- server artifact cache + one-click batch update (design §9.2) -------------
+
+/** Cached releases, startup download state, mount verdict and the last batch. Local-only. */
+export function singboxCache(): Promise<SingboxCache> {
+  return request('/api/singbox/cache');
+}
+
+/** Manual retry behind a failed startup download; the download runs in the background. */
+export function singboxRetryCache(): Promise<{ ok: boolean; status: SingboxCacheStatus }> {
+  return request('/api/singbox/cache/retry', { method: 'POST' });
+}
+
+/** Affected nodes for a target ("latest" or an explicit cached version). */
+export function singboxUpdateImpact(target: string): Promise<SingboxImpact> {
+  const v = target.trim() === '' ? 'latest' : target.trim();
+  return request(`/api/singbox/update/impact?version=${encodeURIComponent(v)}`);
+}
+
+/**
+ * Start a distribution batch. confirm is the second gate behind the dialog:
+ * the backend refuses without it. Returns the job to render progress from.
+ */
+export function singboxUpdate(body: { version?: string; latest?: boolean; confirm: true }): Promise<{ job: SingboxUpdateJob }> {
+  return request('/api/singbox/update', { method: 'POST', body });
+}
+
+/** Progress of one job id (a mismatch 404s, guarding against a stale page). */
+export function singboxUpdateStatus(jobId: string): Promise<{ job: SingboxUpdateJob }> {
+  return request(`/api/singbox/update/${encodeURIComponent(jobId)}`);
+}
+
+/** Delete a cached release; force is required while nodes still reference it. */
+export function deleteSingboxVersion(version: string, force = false): Promise<{ ok: boolean; version: string }> {
+  const q = force ? '?force=1' : '';
+  return request(`/api/singbox/versions/${encodeURIComponent(version)}${q}`, { method: 'DELETE' });
 }
 
 // --- per-node SSH credentials (design §11; secrets are write-only) -----------

@@ -5,6 +5,7 @@ package httpapi
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net"
@@ -14,6 +15,8 @@ import (
 	"github.com/fobe-panel/fobe/internal/server/geoip"
 	"github.com/fobe-panel/fobe/internal/server/hub"
 	"github.com/fobe-panel/fobe/internal/server/security"
+	"github.com/fobe-panel/fobe/internal/server/singboxcache"
+	"github.com/fobe-panel/fobe/internal/server/singboxupdate"
 	"github.com/fobe-panel/fobe/internal/server/store"
 )
 
@@ -29,6 +32,29 @@ type Server struct {
 	Version         string
 	InstallTmplPath string // optional override of scripts/install.sh.tmpl
 	AIHTTPClient    *http.Client
+
+	// sing-box release cache (§9.2). Empty values fall back to the upstream
+	// defaults (api.github.com / github.com) inside singboxdl.
+	SingboxAPIBase      string
+	SingboxDownloadBase string
+
+	// SingboxAutoDownload mirrors FOBE_SINGBOX_AUTO_DOWNLOAD for the cache view
+	// (a persisted cache status wins when it carries its own copy).
+	SingboxAutoDownload bool
+
+	// SingboxUpdate is the §9.2 one-click batch updater. It is built lazily
+	// from the fields above when nil, so tests can substitute their own and the
+	// API-only dev mode still works.
+	SingboxUpdate *singboxupdate.Manager
+	sbUpdOnce     sync.Once
+
+	// SingboxCache is the §9.2 startup artifact downloader. The settings page
+	// uses it to retry a failed download (design §9.2 手动重试); optional.
+	SingboxCache *singboxcache.Manager
+
+	// Background is the long-lived context for work a handler starts but whose
+	// response does not wait for it (the cache retry). nil = context.Background().
+	Background context.Context
 
 	// GeoIP (§14): where MMDB uploads are written and the live resolver to
 	// reload afterwards. An empty path disables the upload endpoint.
@@ -102,6 +128,13 @@ func (s *Server) Handler() http.Handler {
 
 	// sing-box lifecycle (§9): desired-state management + release manifest
 	mux.HandleFunc("GET /api/singbox/versions", s.requireSession(s.handleSingboxVersions))
+	// §9.2 server-side artifact cache + §9.2 one-click batch update
+	mux.HandleFunc("GET /api/singbox/cache", s.requireSession(s.handleSingboxCache))
+	mux.HandleFunc("POST /api/singbox/cache/retry", s.requireSession(s.handleSingboxCacheRetry))
+	mux.HandleFunc("GET /api/singbox/update/impact", s.requireSession(s.handleSingboxUpdateImpact))
+	mux.HandleFunc("POST /api/singbox/update", s.requireSession(s.handleSingboxUpdate))
+	mux.HandleFunc("GET /api/singbox/update/{job}", s.requireSession(s.handleSingboxUpdateStatus))
+	mux.HandleFunc("DELETE /api/singbox/versions/{version}", s.requireSession(s.handleSingboxDeleteVersion))
 	mux.HandleFunc("GET /api/nodes/{id}/singbox", s.requireSession(s.handleGetNodeSingbox))
 	mux.HandleFunc("POST /api/nodes/{id}/singbox/install", s.requireSession(s.handleSingboxInstall))
 	mux.HandleFunc("POST /api/nodes/{id}/singbox/{action}", s.requireSession(s.handleSingboxAction))

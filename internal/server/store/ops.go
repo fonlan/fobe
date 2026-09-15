@@ -323,6 +323,67 @@ func (s *Store) UpsertNodeSingbox(n *NodeSingbox) error {
 	return err
 }
 
+// SingboxDesiredVersionRefs counts node_singbox rows per non-empty
+// desired_version. The panel uses it to annotate the cached release list
+// (§9.2: deleting a version that nodes still point at needs a warning).
+func (s *Store) SingboxDesiredVersionRefs() (map[string]int, error) {
+	rows, err := s.db.Query(
+		`SELECT desired_version, COUNT(*) FROM node_singbox
+		 WHERE desired_version <> '' GROUP BY desired_version`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var version string
+		var n int
+		if err := rows.Scan(&version, &n); err != nil {
+			return nil, err
+		}
+		out[version] = n
+	}
+	return out, rows.Err()
+}
+
+// SingboxTarget is one node the panel already manages sing-box on (its
+// desired_version is set). It is the input to the §9.2 batch update: a node
+// without a desired state is not touched.
+type SingboxTarget struct {
+	NodeID         string
+	Name           string
+	Status         string
+	Version        string
+	DesiredVersion string
+	Port           int
+	LastError      string
+}
+
+// ListSingboxTargets lists every node whose desired_version is non-empty,
+// joined with the node's name/status so a distribution batch can bucket its
+// per-node outcome without a second query per node.
+func (s *Store) ListSingboxTargets() ([]SingboxTarget, error) {
+	rows, err := s.db.Query(
+		`SELECT n.id, n.name, n.status, sb.version, sb.desired_version, sb.port, sb.last_error
+		 FROM node_singbox sb JOIN nodes n ON n.id = sb.node_id
+		 WHERE sb.desired_version <> '' ORDER BY n.created_at, n.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SingboxTarget{}
+	for rows.Next() {
+		var t SingboxTarget
+		if err := rows.Scan(&t.NodeID, &t.Name, &t.Status, &t.Version, &t.DesiredVersion,
+			&t.Port, &t.LastError); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // SetNodeSingboxFirewallHint mirrors the agent's firewall hint (§9.2) into
 // node_singbox without disturbing the other columns (the agent owns the
 // value; the empty string clears it once the port is allowed). Creates the row if absent.

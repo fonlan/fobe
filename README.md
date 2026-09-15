@@ -182,7 +182,10 @@ environment:
 | `FOBE_ADMIN_PASSWORD` | 无 | 管理员密码准绳：设置后每次启动同步为该值（变更会吊销全部旧会话）；未设置则不动现有密码 |
 | `FOBE_DB` | `/data/fobe.db` | SQLite 路径（放挂载卷，勿放容器层） |
 | `FOBE_WEB_DIR` | `/srv/web` | 前端 `dist` 目录 |
-| `FOBE_DL_DIR` | `/srv/dl` | agent 与 sing-box 产物目录 |
+| `FOBE_DL_DIR` | `/srv/dl` | agent 与 sing-box 产物目录（**必须是挂载卷/绑定挂载**，见「数据与备份」） |
+| `FOBE_SINGBOX_AUTO_DOWNLOAD` | `1` | 启动时若 `<FOBE_DL_DIR>/singbox` 里没有任何有效版本，后台自动下载当时的最新**稳定版**；已有缓存则完全不联网；置 `0` 关闭。失败不阻塞启动，只记 WARN 并把状态与原因写进设置页 |
+| `FOBE_SINGBOX_API_BASE` | `https://api.github.com` | sing-box release 列表来源（GitHub 兼容 API）；镜像源/离线环境改这里 |
+| `FOBE_SINGBOX_DOWNLOAD_BASE` | `https://github.com` | sing-box 产物下载根地址（asset 没带下载 URL 时用它拼路径） |
 | `FOBE_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128,172.16.0.0/12` | 可信上游网段（决定 XFF 是否被采信，见上文拓扑 C） |
 | `FOBE_LISTEN` | `0.0.0.0:8080` | 容器内监听地址（对外由 compose 的端口绑定决定） |
 
@@ -203,10 +206,15 @@ https://panel.example.com
 ```
 data/
 ├─ sqlite/fobe.db     # 全部状态；WAL 模式，勿多实例同时挂载
-├─ dl/                # agent / sing-box 产物
+├─ dl/                # agent / sing-box 产物（容器内是 /srv/dl）
+│  ├─ agent/<version>/    # agent 二进制 + manifest.json
+│  └─ singbox/<version>/  # 面板可选的 sing-box 版本（服务端自动下载，或你手动投放）
 └─ backup/            # 每日 VACUUM INTO 快照，保留 14 份
 ```
 
+- `data/dl/`（容器内的 `/srv/dl`）**必须挂载**：它存放 agent 产物与自动下载的 sing-box 版本。跑在容器里且没有独立挂载点时，服务端会打一条 WARN 并在设置页标红（`singbox.dl_mount_ok=false`）——升级/重建容器会把这些版本全部丢掉。
+- **sing-box 版本从哪来**：默认由服务端自己在启动时下载（仅当 `data/dl/singbox/` 里一个有效版本都没有；已有缓存则完全不联网）。也可以不联网：按上面的布局手动放一份 `singbox/<version>/{linux-amd64,linux-amd64.sha256,manifest.json}` 进去即可。
+- **批量更新**：面板「设置 → sing-box → 更新 sing-box」，会先列出受影响节点并要求二次确认，然后异步把新版本写进各节点的期望版本；15 分钟后仍未生效的节点会汇总发一条告警。旧版本不会自动删，按钮旁边显示占用与引用节点数。
 - 恢复：停服 → 用快照替换 `data/sqlite/fobe.db` → 起服。
 - 探针节点无需重建：agent 用落盘的 machine-id 重连即复用原节点。
 - 换了 `FOBE_MASTER_KEY` = 已加密的 AI key / SSH 凭据 / Bot Token 全部失效，需要重填（节点与指标数据不受影响）。
@@ -283,3 +291,6 @@ export default defineConfig({
 | 模板/GeoIP 上传 413 | `client_max_body_size` |
 | 安装命令里域名不对 | nginx 没传 `Host` |
 | 装完 agent 连不上、反复重连 | 探针能否解析并连通你的域名（DNS 污染 / 出网限制）；`journalctl -u fobe-agent` 或 OpenWrt 上 `logread` |
+| **升级容器后 sing-box 没了**（设置页版本列表空、节点更新失败） | `/srv/dl` 没挂成独立卷，重建容器把已下载版本留在了旧容器层。核对 `docker compose config` 里的 `./data/dl:/srv/dl`，以及设置页/日志里的 `singbox.dl_mount_ok=false` 警告；恢复做法是重新下载（设置页「重试」）或手动把产物放回 `data/dl/singbox/<version>/` |
+| **拉不到 GitHub / 自动下载失败**（设置页显示失败原因） | 服务端出网受限。三选一：① 配镜像源 `FOBE_SINGBOX_API_BASE` + `FOBE_SINGBOX_DOWNLOAD_BASE`（GitHub 兼容即可）后点「重试」；② 手动把 `linux-amd64` 与 `linux-amd64.sha256` 放进 `data/dl/singbox/<version>/`；③ 用 `FOBE_SINGBOX_AUTO_DOWNLOAD=0` 关掉自动下载，完全手动管理。注意**校验失败会拒绝安装**（fail-closed），不会留半成品 |
+| 一键更新后个别节点没生效 | 离线节点要等重连后由 `hello_ack` 自动收敛（结果表里是"离线待生效"）；15 分钟后仍未收敛会发一条 `singbox_update_stale` 告警，逐台查 `journalctl -u fobe-agent` / agent 侧的 sing-box 日志 |

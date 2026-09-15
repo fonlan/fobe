@@ -44,5 +44,8 @@ ENV FOBE_DB=/data/fobe.db \
     FOBE_LISTEN=0.0.0.0:8080 \
     FOBE_BACKUP_DIR=/backup
 EXPOSE 8080
-VOLUME ["/data", "/backup"]
+# /srv/dl holds the agent artifacts plus the auto-downloaded sing-box versions;
+# without a volume/bind mount an image upgrade drops them (the server warns
+# about this at startup inside a container).
+VOLUME ["/data", "/backup", "/srv/dl"]
 ENTRYPOINT ["/usr/local/bin/fobe-server"]

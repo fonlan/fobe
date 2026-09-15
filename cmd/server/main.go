@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +29,8 @@ import (
 	"github.com/fobe-panel/fobe/internal/server/notify"
 	"github.com/fobe-panel/fobe/internal/server/scheduler"
 	"github.com/fobe-panel/fobe/internal/server/security"
+	"github.com/fobe-panel/fobe/internal/server/singboxcache"
+	"github.com/fobe-panel/fobe/internal/server/singboxdl"
 	"github.com/fobe-panel/fobe/internal/server/store"
 )
 
@@ -82,6 +85,11 @@ func runServer() {
 	st := mustStore()
 	defer st.Close()
 
+	// Startup work that must not block serving (the sing-box artifact
+	// download) hangs off this context and stops with the server.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+
 	crypt, err := security.NewCryptor(key)
 	if err != nil {
 		log.Error("master key", "err", err)
@@ -105,8 +113,17 @@ func runServer() {
 	api := httpapi.NewServer(st, h, trust, crypt, log)
 	api.Version = version
 	api.WebDir = env("FOBE_WEB_DIR", "")
-	api.DLDir = env("FOBE_DL_DIR", "")
+	dlDir := env("FOBE_DL_DIR", "")
+	api.DLDir = dlDir
+	// Release source overrides (§9.2): mirrors and air-gapped installs point
+	// these at a GitHub-compatible API / download root.
+	api.SingboxAPIBase = env("FOBE_SINGBOX_API_BASE", "")
+	api.SingboxDownloadBase = env("FOBE_SINGBOX_DOWNLOAD_BASE", "")
 	api.InstallTmplPath = os.Getenv("FOBE_INSTALL_TMPL")
+	// The settings page shows this switch next to the artifact cache (§9.2).
+	api.SingboxAutoDownload = singboxAutoDownloadEnabled()
+	// Long-lived context for work a handler starts but does not wait for.
+	api.Background = bgCtx
 	// The MMDB upload endpoint (§14) writes geoPath and Reload()s this handle
 	// right away; the hub's chain resolver picks the file up on its next
 	// lookup via its own stat-based reload. Both views share the same file.
@@ -138,6 +155,17 @@ func runServer() {
 	sched.Start(stop)
 	go h.PumpCommands(2 * time.Second)
 
+	// Server-side sing-box artifact cache (§9.2): download the current stable
+	// release when the cache is empty, record the verdict in settings for the
+	// panel, and warn when the artifact directory would not survive a container
+	// upgrade. It never blocks startup.
+	api.SingboxCache = startSingboxCache(bgCtx, st, log, dlDir)
+
+	// §9.2 one-click batch update: build the manager now and re-arm the
+	// convergence check of a job that was still pending when the process last
+	// stopped (the deadline is persisted with the job).
+	api.SingboxUpdater().Start(bgCtx)
+
 	addr := env("FOBE_LISTEN", "0.0.0.0:8080")
 	srv := &http.Server{
 		Addr:              addr,
@@ -157,10 +185,50 @@ func runServer() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Info("shutting down")
+	bgCancel() // abort an in-flight sing-box download
 	close(stop)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
+}
+
+// startSingboxCache wires the server-side sing-box artifact cache (design
+// §9.2, §17).
+//
+// When <FOBE_DL_DIR>/singbox holds no valid version and auto-download is on,
+// the current stable release is fetched in the background: a slow or
+// unreachable release host must never delay the panel, and a warm cache never
+// touches the network at all. The outcome lands in settings
+// (singbox.cache_status) so the panel can show the state, the cached version
+// and the failure reason, and offer a manual retry; a container whose
+// FOBE_DL_DIR is not on a mount of its own is flagged in
+// singbox.dl_mount_ok (upgrading such a container loses downloaded versions).
+func startSingboxCache(ctx context.Context, st *store.Store, log *slog.Logger, dlDir string) *singboxcache.Manager {
+	mgr := singboxcache.New(singboxcache.Config{
+		DL: singboxdl.New(singboxdl.Config{
+			DLDir:        dlDir,
+			APIBase:      env("FOBE_SINGBOX_API_BASE", ""),
+			DownloadBase: env("FOBE_SINGBOX_DOWNLOAD_BASE", ""),
+			Log:          log,
+		}),
+		Settings:     st,
+		Log:          log,
+		AutoDownload: singboxAutoDownloadEnabled(),
+	})
+	mgr.Start(ctx)
+	return mgr
+}
+
+// singboxAutoDownloadEnabled reports whether the startup download runs.
+// FOBE_SINGBOX_AUTO_DOWNLOAD=0 (or false/off/no) turns it off; anything else,
+// including unset, keeps the default on (design §9.2).
+func singboxAutoDownloadEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FOBE_SINGBOX_AUTO_DOWNLOAD"))) {
+	case "0", "false", "off", "no":
+		return false
+	default:
+		return true
+	}
 }
 
 // ensureAdminUser makes FOBE_ADMIN_PASSWORD the source of truth for the

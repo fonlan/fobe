@@ -23,3 +23,9 @@ services:
       FOBE_WEB_DIR: /srv/web
       FOBE_DL_DIR: /srv/dl
       FOBE_TRUSTED_PROXIES: "127.0.0.1/32,::1/128,172.16.0.0/12"
+      # sing-box artifact cache (design §9.2): download the current stable
+      # release when the cache is empty; override the bases for mirrors or
+      # air-gapped installs.
+      FOBE_SINGBOX_AUTO_DOWNLOAD: "${FOBE_SINGBOX_AUTO_DOWNLOAD:-1}"
+      FOBE_SINGBOX_API_BASE: "${FOBE_SINGBOX_API_BASE:-}"
+      FOBE_SINGBOX_DOWNLOAD_BASE: "${FOBE_SINGBOX_DOWNLOAD_BASE:-}"

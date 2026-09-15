@@ -314,10 +314,16 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执行"
 ```
 
-- 版本**必须显式指定**（面板展示可选版本，来自服务端 release 清单），不追 latest。
-- 产物来源：优先面板 `/dl/singbox/<version>/linux-amd64`（服务端缓存，规避国内拉 GitHub 的问题），失败回退官方地址。
+- 版本**必须显式指定**（面板展示可选版本，来自服务端 release 清单），不追 latest。一键批量更新里的 `latest` 只在**点击那一刻**解析成具体版本号并固化后下发，不变量不被破坏（见 §9.5）。
+- 产物来源：优先面板 `/dl/singbox/<version>/linux-amd64`（服务端缓存，规避国内拉 GitHub 的问题），失败回退官方地址。**缓存由服务端进程自己填充**（启动时/手动重试，见 §9.5）——agent 侧只拉面板、不补官方回退。
 - agent 自更新走同一条链路（同样三道闸门 + 保留上一版）。
 - 每次变更写 `audit_logs`，并在面板节点页显示"当前版本 / 期望版本 / 上次操作结果"。
+
+> **实现修订 2026-09-15（服务端产物缓存 + 一键批量更新）**：本节原本假定"版本清单里总是有货"，但从没有一条链路负责**把货取回来**——服务端只直出 `/dl` 目录里已有的文件，agent 也只会从面板拉取。本次补齐这条链路，并且**不新增任何安装路径**：
+>
+> - **服务端产物缓存**：server 在启动时（仅当 `<FOBE_DL_DIR>/singbox` 里没有任何有效版本）后台下载"当时最新稳定版"到 `<FOBE_DL_DIR>/singbox/<version>/`，已有缓存则**完全不联网**；可用 `FOBE_SINGBOX_AUTO_DOWNLOAD=0` 关闭。下载校验 **fail-closed**，失败只记 WARN + 设置页状态 + 手动重试，不阻塞启动。
+> - **一键批量更新**：设置页点「更新 sing-box」→ 先展示受影响节点名单 → 二次确认 → 把目标版本写进每个已启用 sing-box 节点的 `desired_version`（保持端口与配置不变）→ 复用 agent 现有的三道闸门与 `hello_ack` 收敛。异步 job + SSE 进度 + 每节点结果表；分发后 15 分钟未收敛的节点汇总成一条告警。
+> - 详细规则、接口与错误码见 **§9.5**；目录与卷见 **§17**。
 
 ### 9.3 anytls 与自签证书
 
@@ -344,6 +350,67 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
   }
 }
 ```
+
+### 9.5 服务端产物缓存与批量更新（实现修订 2026-09-15）
+
+> 背景：§9.2 假定"面板能列出可选版本"，但**从来没有任何一条链路负责把产物取回来**——`/dl` 只是直出 `<FOBE_DL_DIR>` 里已有的文件，`GET /api/singbox/versions` 只读 `<FOBE_DL_DIR>/singbox/<version>/manifest.json`。缓存空的部署里，面板永远只有一个空版本列表。本节补齐"取货"与"分发"两段，且**不新增安装路径**：agent 侧的下载 → 校验 → 备份 → 三道闸门 → 回滚完全不变，批量更新只是把 `desired_version` 批量改掉。
+
+#### 9.5.1 缓存布局与下载源
+
+```
+<FOBE_DL_DIR>/singbox/<version>/          # version 去掉前导 "v"，如 1.10.0
+├─ linux-amd64                            # 0755，官方单文件静态二进制（agent 既有的下载 URL）
+├─ linux-amd64.sha256                     # "<hex>  linux-amd64"（两个空格，sha256sum 格式）
+└─ manifest.json                          # 版本/大小/sha256/来源 asset/下载时间，供面板与 /dl 阅读
+```
+
+- **下载源**：GitHub Release（默认 `SagerNet/sing-box`）。`FOBE_SINGBOX_API_BASE`（默认 `https://api.github.com`）覆盖 release 列表来源，`FOBE_SINGBOX_DOWNLOAD_BASE`（默认 `https://github.com`）用于拼路径；两者都指向 GitHub 兼容镜像即可在拉不到 GitHub 的环境里工作。
+- **选版本**：只认**稳定版**——跳过 draft，跳过 prerelease；语义化版本比较（`1.10.0 > 1.9.9`，不是字典序）。
+- **产物变体固定为 `linux-amd64-musl`**：官方标准构建是 tar.gz 且带 `libcronet.so`，而 agent 的安装路径是**单文件二进制**（下载 → sha256 → 直接写 `/usr/local/bin/sing-box`），两者不兼容。musl 变体是同一个 tar.gz 里唯一的静态单文件产物，装到常规发行版也能跑（无 glibc 依赖），代价是失去 cronet 相关能力（fobe 只用 anytls 入站，不受影响）。
+
+#### 9.5.2 校验：fail-closed
+
+校验值来源按顺序回退，**任何一步取不到就拒绝安装**（fail-closed，绝不"跳过校验先装上"）：
+
+1. GitHub API asset 的 `digest`（`sha256:<hex>`，新 release 才有）；
+2. 同目录的 `<asset>.sha256`（镜像/离线源常见做法）。
+
+不匹配（`singboxdl: sha256 mismatch`）或解包不出 sing-box 二进制（`singboxdl: sing-box binary not found in archive`）时：**中止，且不污染缓存**——下载与解包全程在 `<FOBE_DL_DIR>/singbox/.tmp-*` 里进行，只有校验通过才 `rename` 进 `<version>/`；半成品目录对 `ScanCache` 不可见，并由清理例程回收。
+
+#### 9.5.3 启动自动下载、开关与状态
+
+- **仅在缓存为空时联网**：`<FOBE_DL_DIR>/singbox` 里已有任何**有效**版本（存在 `linux-amd64` 文件的目录）就完全不请求上游，升级/重启不会重复下载。
+- **开关**：`FOBE_SINGBOX_AUTO_DOWNLOAD`（默认开，置 `0`/`false`/`off`/`no` 关闭）。关闭或未配置 `FOBE_DL_DIR` 时状态为 `disabled` 并记录原因。
+- **不阻塞启动**：下载在后台 goroutine 里跑，服务端进程该起就起；失败只写 WARN 日志 + 状态，面板设置页显示失败原因与「重试」按钮（`POST /api/singbox/cache/retry`，后台执行，结果经 `/ws/events` 的 `singbox_cache` 事件回归）。开发模式的"面板拉不到 GitHub"因此不会拖垮整个 UI。
+- **状态落库**（服务端自有设置，客户端不可写）：
+  - `singbox.cache_status` = `{state: ok|disabled|failed|pending, version, updated_at, error, auto_download}`
+  - `singbox.dl_mount_ok` = `"true"`/`"false"`，**仅容器内**写入：检测到 `/.dockerenv` 或 cgroup 标记时，检查 `FOBE_DL_DIR` 是否为 `/proc/self/mountinfo` 中的独立挂载点；不是则以 WARN 提示"升级容器会丢失已下载版本"并在设置页标红。非容器环境跳过（避免 dev 噪声）。
+- **旧版本不自动删**：缓存里的历史版本一直保留；设置页显示每个版本的占用、下载时间与被多少节点引用，手动删除（`DELETE /api/singbox/versions/{version}`），仍被 `desired_version` 引用时需要显式 force。
+
+#### 9.5.4 一键批量更新
+
+```
+设置页「更新 sing-box」
+  → GET  /api/singbox/update/impact        列出受影响节点（已启用 sing-box、desired_version 非空）
+  → 二次确认（强制，不可跳过；弹窗列出节点名单与目标版本）
+  → POST /api/singbox/update {version|latest, confirm:true}   → 返回 job id
+  → GET  /api/singbox/update/{job}         进度 + 每节点结果（页面刷新后仍可见）
+  → /ws/events 的 singbox_update 事件      实时进度（不必轮询）
+  → 15 分钟后复查收敛，未收敛节点汇总为一条告警
+```
+
+- **目标版本**：请求可以是 `latest`，也可以是一个具体版本号（缓存里没有就先把它下载下来）。`latest` **在点击那一刻**经上游解析成具体版本号并固化——落库、审计、下发的都是具体版本号，因此 §9.2 的"版本必须显式指定、不追 latest"不变量**不被破坏**（追 latest 的只是"点击"这个动作，不是 agent 的常态行为）。目标版本不在缓存里时，job 先下载它（同样 fail-closed），下载失败则整个 job 失败且不写任何 `desired_version`。
+- **改写期望状态而非发命令**：对每个目标节点写 `desired_version`（**保持既有端口与配置不变**），然后对在线节点 `pushDesired`；离线节点什么都不发，等它重连时由 `hello_ack` 全量下发自然收敛（§7 声明式期望状态）。
+- **结果分档**（每档逐节点带原因）：`already_current`（本来就已是该版本且期望一致）/ `pushed`（已写入并推送成功）/ `offline_pending`（已写入，agent 离线，待重连收敛）/ `failed`（写入或推送失败，附原因）。
+- **job 持久化**：状态写在 `settings.singbox.last_update`，页面刷新、甚至服务端重启后都能看到同一次更新的进度与结果；服务端重启时按持久化的 deadline **重新武装**收敛检查（未完成的 job 标记为失败）。
+- **审计**：每一次更新、重试、删除版本都写 `audit_logs`。
+- **15 分钟收敛告警**：分发后 15 分钟（`DefaultConvergeAfter`）复查各目标节点上报的 `node_singbox.version`，仍未等于目标版本的节点**汇总成一条**告警（kind `singbox_update_stale`），走既有的 `deliverAlerts` → Telegram/Webhook 通道，并在 1 小时窗口内去重。告警只提示、不自动回滚（同 §0 决策 7 的取向）。
+
+#### 9.5.5 边界与取舍
+
+- **不暴露给 AI 助手**：本节新增的接口不在 §12.2 工具集内。批量更新影响面覆盖所有节点，不适合落进"默认放行"的模型执行路径；单节点更新仍可用既有的 `update_singbox` 工具。
+- **保持 panel-only**：agent 侧**不补官方回退**——§9.2 里"失败回退官方地址"这句对 agent 依然不成立，产物只从面板拉。理由：让"探针从哪里拿二进制"只有一个答案，出问题时可复现；服务端缓存本身已经承担了规避 GitHub 不可达的职责（镜像源/手动投放）。
+- **本机手动投放**：把产物按上面 9.5.1 的布局放进 `<FOBE_DL_DIR>/singbox/<version>/` 即可，无需联网——这也是完全离线环境的兜底用法。
 
 ---
 
@@ -400,6 +467,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 | `install_singbox` / `update_singbox` | 变更 | 指定版本 |
 | `set_singbox_port` / `set_anytls_password` | 变更 | 影响面大 |
 | `run_shell` | 变更 | 裸 shell |
+
+**不在工具集里**：§9.5 的服务端产物缓存与**一键批量更新**接口（`/api/singbox/cache*`、`/api/singbox/update*`、`DELETE /api/singbox/versions/{version}`）。它们影响面覆盖全部节点、且会写服务端缓存，不适合落进"默认放行"的执行路径；单节点更新仍走上面的 `update_singbox`（需显式版本）。
 
 ### 12.3 执行策略（⚠ 你签下的风险）
 
@@ -458,6 +527,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 | 流量阈值 | 周期使用率 | 80% / 100% |
 | 探针离线 | 90s 无心跳 | — |
 | sing-box 异常 | 进程退出 / 端口不可连 / 回滚发生 | 立即 |
+| sing-box 批量更新未收敛 | 分发后 15 分钟仍未报告目标版本（§9.5.4） | 15 分钟 |
 | 计数器重置 | 流量计数回绕 | 立即（信息级） |
 
 通道：**Telegram Bot** + **通用 Webhook**（JSON POST，HMAC 签名头）。
@@ -489,7 +559,10 @@ fobe/
 │  └─ agent/main.go           # 探针 agent
 ├─ internal/
 │  ├─ protocol/               # 共享消息定义、版本、校验（server 与 agent 共用）
-│  ├─ server/{http,ws,hub,store,sub,singbox,ai,scheduler,security}
+│  ├─ server/{httpapi,hub,store,quota,geoip,notify,scheduler,security,singbox}
+│  │  ├─ singboxdl/           # §9.5 产物下载/校验/落盘（GitHub release → <DLDir>/singbox/<ver>/）
+│  │  ├─ singboxcache/        # §9.5 启动自动下载策略 + 容器挂载校验 + 状态落库
+│  │  └─ singboxupdate/       # §9.5 一键批量更新 job + 15 分钟收敛告警
 │  └─ agent/{collect,singbox,latency,ssh,pty,cert,service,netinfo}
 ├─ web/                       # React + TS + Vite（src/、vite.config.ts、产物 dist/）
 ├─ deploy/
@@ -500,7 +573,12 @@ fobe/
 │  └─ install.sh.tmpl         # 安装脚本文本模板（服务端注入 token 后下发）
 ├─ data/                      # 宿主挂载（gitignore）
 │  ├─ sqlite/fobe.db
-│  ├─ dl/                     # agent 与 sing-box 产物
+│  ├─ dl/                     # → 容器内 /srv/dl（**必须挂载**，见下）
+│  │  ├─ agent/<version>/     # agent 产物 + manifest.json
+│  │  └─ singbox/<version>/   # §9.5 服务端自动下载的 sing-box 产物
+│  │     ├─ linux-amd64
+│  │     ├─ linux-amd64.sha256
+│  │     └─ manifest.json
 │  └─ backup/
 └─ docs/design.md
 ```
@@ -523,9 +601,15 @@ services:
       FOBE_WEB_DIR: /srv/web
       FOBE_DL_DIR: /srv/dl
       FOBE_TRUSTED_PROXIES: "127.0.0.1/32,::1/128,172.16.0.0/12"
+      # §9.5 产物缓存：缓存为空才联网下载当时的最新稳定版；置 0 可关闭。
+      # 镜像源/离线环境改 API 与下载根地址（GitHub 兼容即可）。
+      FOBE_SINGBOX_AUTO_DOWNLOAD: "1"
+      FOBE_SINGBOX_API_BASE: ""          # 缺省 https://api.github.com
+      FOBE_SINGBOX_DOWNLOAD_BASE: ""     # 缺省 https://github.com
 ```
 
 - **没有 nginx 服务，也没有证书卷**：接入层完全外部化（见 §3 与 `README.md`）。
+- **`/data`、`/backup`、`/srv/dl` 三个卷一个都不能少**（`Dockerfile.server` 已 `VOLUME` 声明）。`/srv/dl` 尤其容易漏：它存 agent 产物与 §9.5 自动下载的 sing-box 版本，**没有独立挂载点时升级/重建容器会把这些版本全部丢掉**。服务端在容器内会自检 `FOBE_DL_DIR` 是否为 `/proc/self/mountinfo` 里的独立挂载点，不是就写 WARN 并置 `singbox.dl_mount_ok=false`（设置页标红）。症状与处置见 `README.md` 排障表。
 - **前端产物在镜像里，不挂载**：`Dockerfile.server` 的 node 阶段产出 `web/dist` 并 `COPY` 到 `/srv/web`。改前端 = 重新 `docker compose build`，不存在"改了源码忘了构建/挂载路径写错"这类事故。
 - 注意：即使你从宿主机 `127.0.0.1` 发起请求，容器内看到的源地址通常是 Docker 网关（如 `172.17.0.1`），所以 `FOBE_TRUSTED_PROXIES` 默认包含 Docker 私网段。
 

@@ -2,10 +2,24 @@ import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'reac
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
+import Modal from '../components/Modal';
 import { useI18n } from '../i18n';
 import { useTheme, type ThemeMode } from '../theme';
-import { fmtTime } from '../format';
-import type { BlacklistRow, SessionRow, SettingView, AuditRow, ImportStats } from '../types';
+import { fmtBytes, fmtTime } from '../format';
+import type {
+  BlacklistRow,
+  SessionRow,
+  SettingView,
+  AuditRow,
+  ImportStats,
+  SingboxCache,
+  SingboxCacheVersion,
+  SingboxImpact,
+  SingboxUpdateJob,
+} from '../types';
+
+/** Job states that mean the batch is over (mirrors internal/server/singboxupdate). */
+const SINGBOX_JOB_TERMINAL = new Set(['done', 'failed']);
 
 const SERVER_KEYS = ['server.public_url'] as const;
 const AI_KEYS = ['ai.base_url', 'ai.model', 'ai.api_key', 'ai.default_policy'] as const;
@@ -217,6 +231,7 @@ export default function Settings() {
         <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(PROXY_KEYS)} label={t('save')} />
       </section>
 
+      <SingboxCacheCard />
       <BackupCard />
       <GeoIPCard />
       <BlacklistCard />
@@ -281,6 +296,407 @@ function FileButton({
         }}
       />
     </>
+  );
+}
+
+// --- sing-box artifact cache + one-click batch update (design §9.2) ---
+
+/** Select value that asks the server to resolve the current stable release. */
+const SINGBOX_LATEST = 'latest';
+
+/**
+ * Settings section for the server-side artifact cache: cached versions, the
+ * startup auto-download state (with a manual retry), the container mount
+ * warning, and the one-click batch update — impact list, second confirmation,
+ * then per-node progress pushed over /ws/events.
+ */
+function SingboxCacheCard() {
+  const { t } = useI18n();
+  const [cache, setCache] = useState<SingboxCache | null>(null);
+  const [job, setJob] = useState<SingboxUpdateJob | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [target, setTarget] = useState<string>(SINGBOX_LATEST);
+  const [impact, setImpact] = useState<SingboxImpact | null>(null);
+  const [impactBusy, setImpactBusy] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const c = await api.singboxCache();
+      setCache(c);
+      setJob(c.last_update ?? null);
+      setErr(null);
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Live progress: the server pushes a full job snapshot for every node it
+  // handles (SSE singbox_update) and pings singbox_cache when the disk changes.
+  useEffect(() => {
+    const close = api.openEvents((ev) => {
+      if (ev.kind === 'singbox_update' && ev.data) {
+        setJob(ev.data as SingboxUpdateJob);
+      } else if (ev.kind === 'singbox_cache') {
+        void load();
+      }
+    });
+    return close;
+  }, [load]);
+
+  const jobId = job?.id;
+  const jobState = job?.state;
+
+  // Polling fallback while a job runs: a dropped socket must not freeze the
+  // progress table.
+  useEffect(() => {
+    if (!jobId || !jobState || SINGBOX_JOB_TERMINAL.has(jobState)) return;
+    const h = window.setInterval(() => {
+      api
+        .singboxUpdateStatus(jobId)
+        .then((r) => setJob(r.job))
+        .catch(() => {
+          /* superseded job: the next cache reload picks up the real one */
+        });
+    }, 2000);
+    return () => window.clearInterval(h);
+  }, [jobId, jobState]);
+
+  // A finished job may have downloaded a new version and moved node references.
+  useEffect(() => {
+    if (jobState === 'done') void load();
+  }, [jobState, load]);
+
+  // A deleted version must not linger as the selected target (a stale <select>
+  // value would render blank).
+  useEffect(() => {
+    if (target !== SINGBOX_LATEST && cache && !cache.versions.some((v) => v.version === target)) {
+      setTarget(SINGBOX_LATEST);
+    }
+  }, [cache, target]);
+
+  const label = (prefix: string, value: string) => {
+    const key = prefix + value;
+    const v = t(key);
+    return v === key ? value : v;
+  };
+
+  const retry = async () => {
+    setBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      await api.singboxRetryCache();
+      setMsg(t('sb_cache_retry_queued'));
+      await load();
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const delVersion = async (v: SingboxCacheVersion) => {
+    const force = v.refs > 0;
+    const question = force
+      ? t('sb_cache_delete_refs_confirm', { version: v.version, n: v.refs })
+      : t('sb_cache_delete_confirm', { version: v.version, size: fmtBytes(v.size) });
+    if (!window.confirm(question)) return;
+    setBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      await api.deleteSingboxVersion(v.version, force);
+      setMsg(t('sb_cache_deleted', { version: v.version }));
+      await load();
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const checkImpact = async () => {
+    if (impactBusy) return;
+    setImpactBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      setImpact(await api.singboxUpdateImpact(target));
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setImpactBusy(false);
+    }
+  };
+
+  const confirmUpdate = async () => {
+    if (!impact || submitting) return;
+    setSubmitting(true);
+    setErr(null);
+    try {
+      const r = await api.singboxUpdate(
+        target === SINGBOX_LATEST ? { latest: true, confirm: true } : { version: target, confirm: true },
+      );
+      setJob(r.job);
+      setImpact(null);
+      setMsg(t('sb_update_submitted'));
+      await load();
+    } catch (e) {
+      // A running job is not an error to hide: reload so its progress shows.
+      if (e instanceof api.ApiError && e.code === 'update_in_progress') void load();
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const versions = cache?.versions ?? [];
+  const status = cache?.cache_status ?? null;
+  const totalSize = versions.reduce((sum, v) => sum + (v.size || 0), 0);
+  const handled = job
+    ? job.counts.already_current + job.counts.pushed + job.counts.offline_pending + job.counts.failed
+    : 0;
+
+  return (
+    <section className="card">
+      <div className="row-between">
+        <h3>{t('sec_singbox_cache')}</h3>
+        {cache && (
+          <span className={'chip' + (cache.auto_download ? '' : ' status-timeout')}>
+            {cache.auto_download ? t('sb_cache_auto_on') : t('sb_cache_auto_off')}
+          </span>
+        )}
+      </div>
+      <p className="hint">{t('sb_cache_desc')}</p>
+      {err && <div className="form-error">{err}</div>}
+      {msg && <div className="form-ok">{msg}</div>}
+      {cache?.mount_applicable && !cache.mount_ok && <p className="form-error">{t('sb_mount_warn')}</p>}
+
+      <div className="tile-grid">
+        <div className="tile">
+          <div className="tile-label">{t('sb_cache_status')}</div>
+          <div className="tile-value">
+            {status ? label('sb_cache_state_', status.state) : t('sb_cache_state_empty')}
+            {status?.version ? ' · ' + status.version : ''}
+          </div>
+          <div className="tile-sub">{status?.updated_at ? fmtTime(status.updated_at) : '-'}</div>
+        </div>
+        <div className="tile">
+          <div className="tile-label">{t('sb_cache_latest')}</div>
+          <div className="tile-value mono">{cache?.latest_cached || '-'}</div>
+          <div className="tile-sub">
+            {t('sb_cache_col_size')}: {fmtBytes(totalSize)}
+          </div>
+        </div>
+        <div className="tile">
+          <div className="tile-label">{t('sb_cache_dir')}</div>
+          <div className="tile-value mono">{cache?.dl_dir || '-'}</div>
+        </div>
+      </div>
+
+      {status && status.state !== 'ok' && status.state !== 'pending' && (
+        <div className="row-wrap" style={{ marginTop: 10 }}>
+          {status.error && <span className="form-error">{status.error}</span>}
+          <button type="button" className="btn small" disabled={busy} onClick={() => void retry()}>
+            {busy ? '…' : t('sb_cache_retry')}
+          </button>
+        </div>
+      )}
+
+      {versions.length === 0 ? (
+        <div className="hint" style={{ marginTop: 12 }}>
+          {t('sb_cache_empty')}
+        </div>
+      ) : (
+        <table className="table" style={{ marginTop: 12 }}>
+          <thead>
+            <tr>
+              <th>{t('sb_cache_col_version')}</th>
+              <th>{t('sb_cache_col_size')}</th>
+              <th>{t('sb_cache_col_downloaded')}</th>
+              <th>{t('sb_cache_col_refs')}</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {versions.map((v) => (
+              <tr key={v.version}>
+                <td className="mono">
+                  {v.version}
+                  {v.is_latest && <span className="chip primary-chip">{t('sb_cache_latest')}</span>}
+                </td>
+                <td className="mono nowrap">{fmtBytes(v.size)}</td>
+                <td className="mono nowrap">{fmtTime(v.downloaded_at)}</td>
+                <td className="mono">{v.refs}</td>
+                <td className="nowrap">
+                  <button type="button" className="btn small danger" disabled={busy} onClick={() => void delVersion(v)}>
+                    {t('sb_cache_delete')}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="row-wrap" style={{ marginTop: 12 }}>
+        <label className="field inline">
+          <span>{t('sb_update_target')}</span>
+          <select value={target} onChange={(e) => setTarget(e.target.value)}>
+            <option value={SINGBOX_LATEST}>{t('sb_update_latest_opt')}</option>
+            {versions.map((v) => (
+              <option key={v.version} value={v.version}>
+                {v.version}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button type="button" className="btn primary" disabled={impactBusy} onClick={() => void checkImpact()}>
+          {impactBusy ? t('sb_update_checking') : t('sb_update')}
+        </button>
+      </div>
+
+      {job && <SingboxJobView job={job} handled={handled} label={label} />}
+
+      {impact && (
+        <Modal title={t('sb_update_impact_title')} onClose={() => setImpact(null)} wide>
+          <p>
+            <strong className="mono">{impact.target_version}</strong> —{' '}
+            {t('sb_update_impact_count', { n: impact.count, online: impact.online, offline: impact.offline })}
+          </p>
+          {impact.count === 0 && <p className="form-error">{t('err_no_targets')}</p>}
+          {impact.already_current > 0 && <p className="hint">{t('sb_update_impact_current', { n: impact.already_current })}</p>}
+          {impact.download_needed && <p className="hint">{t('sb_update_download_needed')}</p>}
+          {impact.count > 0 && <p className="hint">{t('sb_update_confirm_hint')}</p>}
+          {impact.nodes.length > 0 && (
+            <div style={{ maxHeight: 240, overflow: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>{t('name')}</th>
+                    <th>{t('sb_current')}</th>
+                    <th>{t('sb_desired')}</th>
+                    <th>{t('alert_status')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {impact.nodes.map((n) => (
+                    <tr key={n.node_id}>
+                      <td>
+                        {n.name || n.node_id}
+                        <span className="hint mono"> {n.node_id}</span>
+                      </td>
+                      <td className="mono">{n.version || '-'}</td>
+                      <td className="mono">{n.desired_version || '-'}</td>
+                      <td className="nowrap">
+                        <span className={'chip' + (n.online ? ' status-ok' : '')}>
+                          {n.online ? t('sb_update_node_online') : t('sb_update_node_offline')}
+                        </span>
+                        {n.already_current && <span className="chip">{t('sb_update_outcome_already_current')}</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="row-end">
+            <button type="button" className="btn" onClick={() => setImpact(null)}>
+              {t('cancel')}
+            </button>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={submitting || impact.count === 0}
+              onClick={() => void confirmUpdate()}
+            >
+              {submitting ? '…' : t('sb_update_confirm')}
+            </button>
+          </div>
+        </Modal>
+      )}
+    </section>
+  );
+}
+
+function SingboxJobView({
+  job,
+  handled,
+  label,
+}: {
+  job: SingboxUpdateJob;
+  handled: number;
+  label: (prefix: string, value: string) => string;
+}) {
+  const { t } = useI18n();
+  const stateCls = job.state === 'failed' ? 'status-failed' : job.state === 'done' ? 'status-ok' : 'status-timeout';
+  const outcomeCls = (o: string) =>
+    'chip' + (o === 'failed' ? ' status-failed' : o === 'pushed' ? ' status-ok' : o === 'offline_pending' ? ' status-timeout' : '');
+  return (
+    <div className="stack" style={{ marginTop: 14 }}>
+      <div className="row-between">
+        <h4>{t('sb_update_job')}</h4>
+        <span className={'chip ' + stateCls}>{label('sb_update_job_state_', job.state)}</span>
+      </div>
+      <div className="hint">
+        {job.target_version ? <span className="mono">{job.target_version} · </span> : null}
+        {t('sb_update_started', { time: fmtTime(job.started_at) })}
+        {(job.deadline ?? 0) > 0 ? ' · ' + t('sb_update_deadline', { time: fmtTime(job.deadline) }) : ''}
+      </div>
+      {job.state !== 'failed' && job.counts.total > 0 && (
+        <div className="hint">
+          {t('sb_update_progress_count', { done: handled, total: job.counts.total })} · {t('sb_update_outcome_pushed')}{' '}
+          {job.counts.pushed} · {t('sb_update_outcome_offline_pending')} {job.counts.offline_pending} ·{' '}
+          {t('sb_update_outcome_failed')} {job.counts.failed}
+        </div>
+      )}
+      {job.error && <div className="form-error mono">{job.error}</div>}
+      {job.stale && job.stale.length > 0 && (
+        <div className="form-error">{t('sb_update_stale', { nodes: job.stale.join(', ') })}</div>
+      )}
+      {job.nodes.length > 0 && (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>{t('name')}</th>
+              <th>{t('sb_current')}</th>
+              <th>{t('alert_status')}</th>
+              <th>{t('audit_detail')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {job.nodes.map((n) => (
+              <tr key={n.node_id}>
+                <td>
+                  {n.name || n.node_id}
+                  <span className="hint mono"> {n.node_id}</span>
+                </td>
+                <td className="mono">{n.version || '-'}</td>
+                <td className="nowrap">
+                  <span className={outcomeCls(n.outcome)}>{label('sb_update_outcome_', n.outcome)}</span>
+                  {job.convergence_checked && n.converged !== undefined && (
+                    <span className={'chip' + (n.converged ? ' status-ok' : ' status-failed')}>
+                      {n.converged ? t('sb_update_converged') : t('sb_update_not_converged')}
+                    </span>
+                  )}
+                </td>
+                <td>{n.reason || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {job.state === 'done' && !job.convergence_checked && (
+        <div className="hint">{t('sb_update_unchecked')}</div>
+      )}
+    </div>
   );
 }
 

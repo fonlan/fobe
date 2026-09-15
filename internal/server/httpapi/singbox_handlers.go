@@ -1,17 +1,14 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
-	"os"
-	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 
 	"github.com/fobe-panel/fobe/internal/protocol"
 	"github.com/fobe-panel/fobe/internal/server/singbox"
+	"github.com/fobe-panel/fobe/internal/server/singboxdl"
 	"github.com/fobe-panel/fobe/internal/server/store"
 )
 
@@ -26,40 +23,55 @@ var singboxVersionRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 type SingboxVersion struct {
 	Version string `json:"version"`
 	SHA256  string `json:"sha256,omitempty"`
+	// Size is the cached binary size in bytes.
+	Size int64 `json:"size"`
+	// DownloadedAt is when the version was cached (unix seconds).
+	DownloadedAt int64 `json:"downloaded_at"`
+	// Refs counts nodes whose desired_version is this version.
+	Refs int `json:"refs"`
 }
 
-// singboxVersions lists <DLDir>/singbox/<version>/manifest.json entries.
-// An unset DLDir yields an empty list (the panel then cannot offer installs;
-// the agent-side fallback to the official source still exists).
+// singboxDL builds the release-cache client used by panel reads. The upstream
+// bases are overridable (s.SingboxAPIBase / s.SingboxDownloadBase) so a mirror
+// or an air-gapped test server can be pointed at; Refs annotates each version
+// with the nodes that still point at it.
+func (s *Server) singboxDL() *singboxdl.Client {
+	refs := map[string]int{}
+	if s.Store != nil {
+		if m, err := s.Store.SingboxDesiredVersionRefs(); err == nil {
+			refs = m
+		}
+	}
+	return singboxdl.New(singboxdl.Config{
+		DLDir:        s.DLDir,
+		APIBase:      s.SingboxAPIBase,
+		DownloadBase: s.SingboxDownloadBase,
+		Log:          s.Log,
+		Refs:         func(v string) int { return refs[v] },
+	})
+}
+
+// singboxVersions lists <DLDir>/singbox/<version>/ entries, newest first by
+// semver. An unset DLDir yields an empty list (the panel then cannot offer
+// installs).
 func (s *Server) singboxVersions() []SingboxVersion {
 	out := []SingboxVersion{}
 	if s.DLDir == "" {
 		return out
 	}
-	entries, err := os.ReadDir(filepath.Join(s.DLDir, "singbox"))
+	cached, err := s.singboxDL().ScanCache()
 	if err != nil {
 		return out
 	}
-	for _, e := range entries {
-		if !e.IsDir() || !singboxVersionRE.MatchString(e.Name()) {
-			continue
-		}
-		v := SingboxVersion{Version: e.Name()}
-		if raw, err := os.ReadFile(filepath.Join(s.DLDir, "singbox", e.Name(), "manifest.json")); err == nil {
-			var m struct {
-				Version string `json:"version"`
-				SHA256  string `json:"sha256"`
-			}
-			if json.Unmarshal(raw, &m) == nil {
-				if m.Version != "" {
-					v.Version = m.Version
-				}
-				v.SHA256 = m.SHA256
-			}
-		}
-		out = append(out, v)
+	for _, cv := range cached {
+		out = append(out, SingboxVersion{
+			Version:      cv.Version,
+			SHA256:       cv.SHA256,
+			Size:         cv.Size,
+			DownloadedAt: cv.DownloadedAt,
+			Refs:         cv.Refs,
+		})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Version > out[j].Version })
 	return out
 }
 
@@ -269,10 +281,12 @@ func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, versi
 
 // pushDesired sends the current desired state to an online agent. Offline
 // nodes receive it inside hello_ack after reconnect (§7) — nothing to replay.
-func (s *Server) pushDesired(nodeID string) {
+// It reports whether the frame reached a connected agent (false covers both
+// "offline" and "the agent vanished between the online check and the send").
+func (s *Server) pushDesired(nodeID string) bool {
 	sb, err := s.Store.GetNodeSingbox(nodeID)
 	if err != nil || sb.DesiredVersion == "" {
-		return
+		return false
 	}
 	desired := protocol.DesiredState{Singbox: &protocol.SingboxDesired{
 		Version: sb.DesiredVersion,
@@ -281,7 +295,7 @@ func (s *Server) pushDesired(nodeID string) {
 	if cfg, err := s.Store.GetSetting("singbox_config:" + nodeID); err == nil {
 		desired.Singbox.ConfigJSON = cfg
 	}
-	s.Hub.Send(nodeID, protocol.NewEnvelope(protocol.TypeDesired, "", desired))
+	return s.Hub.Send(nodeID, protocol.NewEnvelope(protocol.TypeDesired, "", desired))
 }
 
 var errAnytlsPasswordUnset = errors.New("anytls_password not configured")

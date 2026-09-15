@@ -32,8 +32,18 @@ func sameOrigin(r *http.Request) bool {
 }
 
 // publishEvent fans an event out to all connected panels.
-func (s *Server) publishEvent(kind, ref string) {
-	payload, _ := json.Marshal(map[string]any{"kind": kind, "ref": ref, "ts": nowUnix()})
+func (s *Server) publishEvent(kind, ref string) { s.publishEventData(kind, ref, nil) }
+
+// publishEventData is publishEvent with an optional payload under "data".
+// Batch-update progress rides here (kind singbox_update, data = job snapshot),
+// so a panel that keeps /ws/events open renders progress without polling; the
+// "ref" field still carries the node/job id the event is about.
+func (s *Server) publishEventData(kind, ref string, data any) {
+	body := map[string]any{"kind": kind, "ref": ref, "ts": nowUnix()}
+	if data != nil {
+		body["data"] = data
+	}
+	payload, _ := json.Marshal(body)
 	s.evMu.Lock()
 	defer s.evMu.Unlock()
 	for ch := range s.evSubs {
