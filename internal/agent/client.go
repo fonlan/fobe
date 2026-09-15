@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -118,7 +119,7 @@ func Run(cfg *Config, configPath string, log *slog.Logger) error {
 	backoff := backoffStart
 	for {
 		started := time.Now()
-		err := connectAndServe(cfg, coll, sbx, updater, metricsEvery, log)
+		err := connectAndServe(cfg, configPath, coll, sbx, updater, metricsEvery, log)
 		if err != nil {
 			log.Warn("agent link lost", "err", err)
 		}
@@ -135,7 +136,7 @@ func Run(cfg *Config, configPath string, log *slog.Logger) error {
 	}
 }
 
-func connectAndServe(cfg *Config, coll *collect.Collector, sbx *singboxManager, updater *selfUpdater, metricsEvery time.Duration, log *slog.Logger) error {
+func connectAndServe(cfg *Config, configPath string, coll *collect.Collector, sbx *singboxManager, updater *selfUpdater, metricsEvery time.Duration, log *slog.Logger) error {
 	wsURL := wsEndpoint(cfg.ServerURL)
 	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
 	reqHeader := http.Header{
@@ -149,7 +150,7 @@ func connectAndServe(cfg *Config, coll *collect.Collector, sbx *singboxManager, 
 	defer ws.Close()
 	log.Info("agent connected", "server", wsURL, "version", Version)
 
-	session := newSession(cfg, coll, ws, sbx, updater, log)
+	session := newSession(cfg, configPath, coll, ws, sbx, updater, log)
 	defer session.shutdown("agent websocket disconnected")
 	session.hello()
 	session.reportOnce() // fresh nodes appear immediately
@@ -165,6 +166,7 @@ func connectAndServe(cfg *Config, coll *collect.Collector, sbx *singboxManager, 
 
 type agentSession struct {
 	cfg          *Config
+	configPath   string
 	coll         *collect.Collector
 	ws           *websocket.Conn
 	log          *slog.Logger
@@ -177,6 +179,7 @@ type agentSession struct {
 	updater      *selfUpdater
 
 	probeMetrics atomic.Bool   // §16: stream 5s samples while a detail page is open
+	trafficIface atomic.Value  // string: empty = agent-detected default route
 	cadence      chan struct{} // nudges reportLoop to re-arm its ticker (buffered 1)
 
 	latencyInterval atomic.Int64
@@ -186,9 +189,10 @@ type agentSession struct {
 	execMu          chan struct{} // one command at a time; also serves as idempotency guard
 }
 
-func newSession(cfg *Config, coll *collect.Collector, ws *websocket.Conn, sbx *singboxManager, updater *selfUpdater, log *slog.Logger) *agentSession {
+func newSession(cfg *Config, configPath string, coll *collect.Collector, ws *websocket.Conn, sbx *singboxManager, updater *selfUpdater, log *slog.Logger) *agentSession {
 	s := &agentSession{
 		cfg:            cfg,
+		configPath:     configPath,
 		coll:           coll,
 		ws:             ws,
 		log:            log,
@@ -199,6 +203,7 @@ func newSession(cfg *Config, coll *collect.Collector, ws *websocket.Conn, sbx *s
 		cadence:        make(chan struct{}, 1),
 		latencyCadence: make(chan struct{}, 1),
 	}
+	s.trafficIface.Store(cfg.Iface)
 	s.latencyInterval.Store(int64(defaultLatencyInterval / time.Second))
 	s.sbx = sbx
 	s.updater = updater
@@ -226,7 +231,8 @@ func (s *agentSession) hello() {
 			// the panel tells "will follow" from "needs a reinstall".
 			SelfUpdate: selfUpdateSupported(),
 		},
-		IPs: LocalIPs(),
+		IPs:        LocalIPs(),
+		Interfaces: collect.NetworkInterfaces(),
 	}
 	s.sendEnvelope(protocol.NewEnvelope(protocol.TypeHello, "", hello))
 }
@@ -355,10 +361,11 @@ func (s *agentSession) stateChangeLoop() {
 }
 
 func (s *agentSession) reportOnce() {
-	snap := s.coll.Read(s.cfg.Iface)
+	iface, _ := s.trafficIface.Load().(string)
+	snap := s.coll.Read(iface)
 	if snap.HasIface {
 		s.sendEnvelope(protocol.NewEnvelope(protocol.TypeTraffic, "", protocol.Traffic{
-			Iface: s.cfg.Iface, Rx: snap.TrafficRx, Tx: snap.TrafficTx,
+			Iface: snap.TrafficIface, Rx: snap.TrafficRx, Tx: snap.TrafficTx,
 		}))
 	}
 	s.sendEnvelope(protocol.NewEnvelope(protocol.TypeMetrics, "", snap.Metrics))
@@ -366,9 +373,10 @@ func (s *agentSession) reportOnce() {
 
 func (s *agentSession) sendState() {
 	s.sendEnvelope(protocol.NewEnvelope(protocol.TypeState, "", protocol.State{
-		IPs:     LocalIPs(),
-		BootID:  collect.BootID(),
-		Singbox: s.sbx.Snapshot(), // nil while sing-box is unmanaged (§9)
+		IPs:        LocalIPs(),
+		Interfaces: collect.NetworkInterfaces(),
+		BootID:     collect.BootID(),
+		Singbox:    s.sbx.Snapshot(), // nil while sing-box is unmanaged (§9)
 	}))
 }
 
@@ -426,6 +434,9 @@ func (s *agentSession) applyDesired(desired protocol.DesiredState) {
 			"version", desired.Singbox.Version, "port", desired.Singbox.Port)
 	}
 	s.sbx.SetDesired(desired.Singbox)
+	if desired.TrafficIface != nil {
+		s.setTrafficIface(*desired.TrafficIface)
+	}
 	// §5.5: the same declaration carries the agent build this server wants, so
 	// an operator retry can arrive as a plain desired frame.
 	if s.updater != nil {
@@ -438,6 +449,21 @@ func (s *agentSession) applyDesired(desired protocol.DesiredState) {
 // the frame may be dropped while the socket is being torn down by the very
 // restart it announces, and the definitive evidence is the version the new
 // binary reports at its next handshake.
+func (s *agentSession) setTrafficIface(iface string) {
+	current, _ := s.trafficIface.Load().(string)
+	if current == iface {
+		return
+	}
+	s.trafficIface.Store(iface)
+	s.cfg.Iface = iface
+	if err := SaveConfig(s.configPath, s.cfg); err != nil {
+		s.log.Warn("persist traffic interface", "err", err)
+	}
+	// Make the newly selected interface visible immediately instead of waiting
+	// for the next scheduled report.
+	s.reportOnce()
+}
+
 func (s *agentSession) reportAgentUpdate(target, phase, class string, attempts int, errMsg string) {
 	s.sendEnvelope(protocol.NewEnvelope(protocol.TypeAgentUpdate, "", protocol.AgentUpdate{
 		Target: target, Phase: phase, Class: class, Error: errMsg, Attempts: attempts,
@@ -480,17 +506,38 @@ func hostname() string {
 	return h
 }
 
-// localTZ resolves the IANA zone name; OpenWrt keeps it in /etc/TZ.
+// localTZ resolves an IANA zone name. OpenWrt keeps it in /etc/TZ; common
+// Linux distributions point /etc/localtime into zoneinfo instead.
 func localTZ() string {
-	if tz := os.Getenv("TZ"); tz != "" {
+	if tz := validTZ(os.Getenv("TZ")); tz != "" {
 		return tz
 	}
 	for _, path := range []string{"/etc/TZ", "/etc/timezone"} {
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-			return string(trimBytes(data))
+			if tz := validTZ(string(trimBytes(data))); tz != "" {
+				return tz
+			}
+		}
+	}
+	if target, err := os.Readlink("/etc/localtime"); err == nil {
+		if idx := strings.Index(target, "/zoneinfo/"); idx >= 0 {
+			if tz := validTZ(target[idx+len("/zoneinfo/"):]); tz != "" {
+				return tz
+			}
 		}
 	}
 	return "UTC"
+}
+
+func validTZ(tz string) string {
+	tz = strings.TrimSpace(tz)
+	if tz == "" {
+		return ""
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return ""
+	}
+	return tz
 }
 
 func trimBytes(b []byte) []byte {

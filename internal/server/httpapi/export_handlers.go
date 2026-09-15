@@ -31,23 +31,29 @@ type exportFile struct {
 }
 
 type exportNode struct {
-	MachineID string         `json:"machine_id"`
-	Name      string         `json:"name"`
-	Note      string         `json:"note"`
-	CreatedAt int64          `json:"created_at"`
-	Network   *exportNetwork `json:"network,omitempty"`
-	Billing   *exportBilling `json:"billing,omitempty"`
-	IPs       []exportIP     `json:"ips,omitempty"`
-	Singbox   *exportSingbox `json:"singbox,omitempty"` // metadata only, never cert_pem
+	MachineID    string              `json:"machine_id"`
+	Name         string              `json:"name"`
+	Note         string              `json:"note"`
+	CreatedAt    int64               `json:"created_at"`
+	Network      *exportNetwork      `json:"network,omitempty"`
+	TrafficCycle *exportTrafficCycle `json:"traffic_cycle,omitempty"`
+	Billing      *exportBilling      `json:"billing,omitempty"`
+	IPs          []exportIP          `json:"ips,omitempty"`
+	Singbox      *exportSingbox      `json:"singbox,omitempty"` // metadata only, never cert_pem
 }
 
 type exportNetwork struct {
 	Iface      string `json:"iface"`
 	Mode       string `json:"mode"`
 	QuotaBytes *int64 `json:"quota_bytes"`
-	CycleDays  *int64 `json:"cycle_days"`
-	AnchorAt   *int64 `json:"anchor_at"`
-	TZ         string `json:"tz"`
+	// Legacy fields preserve imports created before traffic cycles became a
+	// distinct object. Current exports leave them empty.
+	AnchorAt *int64 `json:"anchor_at,omitempty"`
+}
+
+type exportTrafficCycle struct {
+	CycleType   string `json:"cycle_type"`
+	NextResetAt *int64 `json:"next_reset_at"`
 }
 
 type exportBilling struct {
@@ -135,8 +141,8 @@ func (s *Server) buildExport() (*exportFile, error) {
 		if net, err := s.Store.GetNodeNetwork(n.ID); err == nil {
 			en.Network = &exportNetwork{
 				Iface: net.Iface, Mode: net.Mode, QuotaBytes: net.QuotaBytes,
-				CycleDays: net.CycleDays, AnchorAt: net.AnchorAt, TZ: net.TZ,
 			}
+			en.TrafficCycle = &exportTrafficCycle{CycleType: net.CycleType, NextResetAt: net.NextResetAt}
 		}
 		if b, err := s.Store.GetNodeBilling(n.ID); err == nil {
 			en.Billing = &exportBilling{
@@ -317,11 +323,20 @@ func (s *Server) mergeNode(id string, en *exportNode) {
 // mergeNodeConfig applies the snapshot's network / billing rows.
 func (s *Server) mergeNodeConfig(id string, en *exportNode) {
 	if en.Network != nil {
-		_ = s.Store.UpsertNodeNetwork(&store.NodeNetwork{
+		net := &store.NodeNetwork{
 			NodeID: id, Iface: en.Network.Iface, Mode: en.Network.Mode,
-			QuotaBytes: en.Network.QuotaBytes, CycleDays: en.Network.CycleDays,
-			AnchorAt: en.Network.AnchorAt, TZ: en.Network.TZ,
-		})
+			QuotaBytes: en.Network.QuotaBytes, CycleType: "none",
+		}
+		if en.TrafficCycle != nil {
+			net.CycleType = en.TrafficCycle.CycleType
+			net.NextResetAt = en.TrafficCycle.NextResetAt
+		} else if en.Network.AnchorAt != nil {
+			// Older v1 exports used a monthly traffic anchor in the network
+			// object. Interpret it as the new cycle's reset anchor.
+			net.CycleType = "month"
+			net.NextResetAt = en.Network.AnchorAt
+		}
+		_ = s.Store.UpsertNodeNetwork(net)
 	}
 	if en.Billing != nil {
 		_ = s.Store.UpsertNodeBilling(&store.NodeBilling{

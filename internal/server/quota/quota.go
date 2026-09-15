@@ -4,39 +4,56 @@ package quota
 
 import "time"
 
-// PeriodStart computes the current quota-cycle start from the rolling anchor.
-// Explicit cycle_days when set; otherwise calendar months keeping the anchor's
-// day-of-month, clamped to month length (design §0.14 月末边界).
-func PeriodStart(anchorAt, cycleDays *int64, tz string, now time.Time) int64 {
+// PeriodStart computes the current traffic-cycle start from the configured
+// next reset. A disabled cycle intentionally uses the all-time start (0): a
+// quota without a reset is a lifetime quota, not an implicit calendar month.
+func PeriodStart(cycleType string, nextResetAt *int64, tz string, now time.Time) int64 {
+	start, _ := CycleWindow(cycleType, nextResetAt, tz, now)
+	return start
+}
+
+// NextReset computes the effective future reset time for a configured cycle.
+// The stored next reset is an anchor: past values roll forward automatically.
+func NextReset(cycleType string, nextResetAt *int64, tz string, now time.Time) *int64 {
+	_, next := CycleWindow(cycleType, nextResetAt, tz, now)
+	return next
+}
+
+// CycleWindow returns the beginning of the active window and the effective
+// upcoming reset. Calendar arithmetic preserves the original day-of-month and
+// time-of-day, clamping short months without permanently changing later months.
+func CycleWindow(cycleType string, nextResetAt *int64, tz string, now time.Time) (int64, *int64) {
 	loc := loadTZ(tz)
 	now = now.In(loc)
-	if anchorAt == nil || *anchorAt == 0 {
-		return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc).Unix()
+	if (cycleType != "month" && cycleType != "year") || nextResetAt == nil || *nextResetAt <= 0 {
+		return 0, nil
 	}
-	anchor := time.Unix(*anchorAt, 0).In(loc)
+	anchor := time.Unix(*nextResetAt, 0).In(loc)
 	if anchor.After(now) {
-		anchor = now
+		next := truncateToSec(anchor, loc)
+		return truncateToSec(cycleAt(anchor, cycleType, -1), loc), &next
 	}
-	if cycleDays != nil && *cycleDays > 0 {
-		days := *cycleDays
-		elapsed := int64(now.Sub(anchor).Hours() / 24)
-		start := anchor.AddDate(0, 0, int(elapsed/days*days))
-		return truncateToSec(start, loc)
+
+	step := 0
+	for candidate := cycleAt(anchor, cycleType, step); !candidate.After(now); candidate = cycleAt(anchor, cycleType, step) {
+		step++
 	}
-	// monthly: most recent occurrence of the anchor's day-of-month, clamped
-	// to the month length ("Feb 31" must not normalize into March, §0.14)
-	day := anchor.Day()
-	cand := monthDay(now.Year(), now.Month(), day, anchor, loc)
-	if cand.After(now) {
-		y, m := now.Year(), now.Month()
-		if m == time.January {
-			y, m = y-1, time.December
-		} else {
-			m--
-		}
-		cand = monthDay(y, m, day, anchor, loc)
+	next := truncateToSec(cycleAt(anchor, cycleType, step), loc)
+	start := truncateToSec(cycleAt(anchor, cycleType, step-1), loc)
+	return start, &next
+}
+
+func cycleAt(anchor time.Time, cycleType string, step int) time.Time {
+	loc := anchor.Location()
+	year, month := anchor.Year(), anchor.Month()
+	if cycleType == "year" {
+		year += step
+	} else {
+		totalMonths := year*12 + int(month) - 1 + step
+		year = totalMonths / 12
+		month = time.Month(totalMonths%12 + 1)
 	}
-	return cand.Unix()
+	return monthDay(year, month, anchor.Day(), anchor, loc)
 }
 
 // monthDay builds day `day` of (year, month) at the anchor's time of day,

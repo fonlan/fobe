@@ -84,15 +84,14 @@ func alertKinds(t *testing.T, st *store.Store) map[string]int {
 
 func setNetwork(t *testing.T, st *store.Store, nodeID string, quotaBytes *int64, rx, tx int64) {
 	t.Helper()
-	cycleDays := int64(30)
-	anchor := time.Now().AddDate(0, 0, -10).Unix()
+	nextReset := time.Now().AddDate(0, 1, 0).Unix()
 	err := st.UpsertNodeNetwork(&store.NodeNetwork{
-		NodeID:     nodeID,
-		Iface:      "eth0",
-		Mode:       "both",
-		QuotaBytes: quotaBytes,
-		CycleDays:  &cycleDays,
-		AnchorAt:   &anchor,
+		NodeID:      nodeID,
+		Iface:       "eth0",
+		Mode:        "both",
+		QuotaBytes:  quotaBytes,
+		CycleType:   "month",
+		NextResetAt: &nextReset,
 	})
 	if err != nil {
 		t.Fatalf("upsert node_network: %v", err)
@@ -178,8 +177,7 @@ func TestCheckTrafficSkipsNoQuotaAndNoNetwork(t *testing.T) {
 	addNode(t, st, "n2", "no-quota")
 
 	// n2 has a network row but quota_bytes is NULL → §8.3: no percent
-	cycleDays := int64(30)
-	if err := st.UpsertNodeNetwork(&store.NodeNetwork{NodeID: "n2", Mode: "both", CycleDays: &cycleDays}); err != nil {
+	if err := st.UpsertNodeNetwork(&store.NodeNetwork{NodeID: "n2", Mode: "both", CycleType: "none"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.AddTrafficDaily("n2", time.Now().UTC().Format("2006-01-02"), 100000, 100000); err != nil {

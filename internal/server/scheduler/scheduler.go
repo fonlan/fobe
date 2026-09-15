@@ -217,7 +217,7 @@ func (s *Scheduler) checkTraffic() {
 		if net.QuotaBytes == nil || *net.QuotaBytes <= 0 { // §8.3: no quota → no percent
 			continue
 		}
-		start := quota.PeriodStart(net.AnchorAt, net.CycleDays, net.TZ, now)
+		start := quota.PeriodStart(net.CycleType, net.NextResetAt, net.TZ, now)
 		rx, tx, err := s.store.SumTrafficSince(n.ID, quota.LocalDate(start, net.TZ))
 		if err != nil {
 			s.log.Warn("sum traffic", "node", n.ID, "err", err)

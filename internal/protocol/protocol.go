@@ -65,16 +65,17 @@ var Now = func() int64 { return time.Now().Unix() }
 
 // Hello is the first frame after the WSS handshake authenticates the node.
 type Hello struct {
-	MachineID string   `json:"machine_id"`
-	Hostname  string   `json:"hostname"`
-	Version   string   `json:"version"`
-	OS        string   `json:"os"`
-	Arch      string   `json:"arch"`
-	Kernel    string   `json:"kernel"`
-	CPUCores  int      `json:"cpu_cores"`
-	TZ        string   `json:"tz"` // IANA name, e.g. Asia/Shanghai
-	Caps      Caps     `json:"caps"`
-	IPs       []IPInfo `json:"ips"`
+	MachineID  string             `json:"machine_id"`
+	Hostname   string             `json:"hostname"`
+	Version    string             `json:"version"`
+	OS         string             `json:"os"`
+	Arch       string             `json:"arch"`
+	Kernel     string             `json:"kernel"`
+	CPUCores   int                `json:"cpu_cores"`
+	TZ         string             `json:"tz"` // IANA name, e.g. Asia/Shanghai
+	Caps       Caps               `json:"caps"`
+	IPs        []IPInfo           `json:"ips"`
+	Interfaces []NetworkInterface `json:"interfaces"`
 	// SelfCheck marks the bypass handshake of a freshly downloaded binary
 	// (§5.5). The server answers hello_ack and closes without registering the
 	// connection or touching last_seen/agent_version — a plain handshake would
@@ -101,6 +102,13 @@ type IPInfo struct {
 	Family    int    `json:"family"` // 4 | 6
 	Scope     string `json:"scope"`  // "public" | "private"
 	IsPrimary bool   `json:"is_primary,omitempty"`
+}
+
+// NetworkInterface is a selectable traffic interface discovered by the agent.
+// Default marks the host's default-route interface; the panel may override it.
+type NetworkInterface struct {
+	Name    string `json:"name"`
+	Default bool   `json:"default,omitempty"`
 }
 
 // Metrics is the 60s hardware sample (design §8.1).
@@ -148,9 +156,10 @@ type LatencySample struct {
 
 // State is the slow-moving node info (design §7 `state`).
 type State struct {
-	IPs     []IPInfo      `json:"ips"`
-	BootID  string        `json:"boot_id"`
-	Singbox *SingboxState `json:"singbox,omitempty"`
+	IPs        []IPInfo           `json:"ips"`
+	Interfaces []NetworkInterface `json:"interfaces"`
+	BootID     string             `json:"boot_id"`
+	Singbox    *SingboxState      `json:"singbox,omitempty"`
 }
 
 // SingboxState is what the agent actually observes locally. Optional fields
@@ -245,6 +254,10 @@ type HelloAck struct {
 // DesiredState is declarative (design §7): the agent converges to this.
 type DesiredState struct {
 	Singbox *SingboxDesired `json:"singbox,omitempty"`
+	// TrafficIface is nil for servers released before interface selection was
+	// declarative. A non-nil empty string means "use the detected default";
+	// any other value is the panel-selected interface.
+	TrafficIface *string `json:"traffic_iface,omitempty"`
 	// Agent self-update target (§5.5). These mirror the flat HelloAck fields so
 	// an operator retry can nudge an online agent with a plain `desired` frame
 	// instead of waiting for its next handshake. Both carriers are always

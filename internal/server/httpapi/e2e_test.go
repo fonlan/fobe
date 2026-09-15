@@ -212,6 +212,10 @@ func TestFullAgentPath(t *testing.T) {
 		MachineID: "m-test-1", Hostname: "testhost", Version: "dev",
 		OS: "linux", Arch: "amd64", CPUCores: 4, TZ: "Asia/Shanghai",
 		IPs: []protocol.IPInfo{{IP: "203.0.113.10", Family: 4, Scope: "public", IsPrimary: true}},
+		Interfaces: []protocol.NetworkInterface{
+			{Name: "eth0", Default: true},
+			{Name: "eth1"},
+		},
 	})
 	readType(protocol.TypeHelloAck)
 
@@ -229,13 +233,55 @@ func TestFullAgentPath(t *testing.T) {
 	}
 
 	// 6. traffic accounting — configure the interface FIRST so reports land
-	updReq, _ := http.NewRequest("PATCH", srv.URL+"/api/nodes/"+nodeID, bytes.NewReader([]byte(
-		`{"network":{"iface":"eth0","mode":"both","quota_bytes":1000000,"tz":"Asia/Shanghai"}}`)))
+	reset := time.Now().AddDate(0, 1, 0).Unix()
+	updReq, _ := http.NewRequest("PATCH", srv.URL+"/api/nodes/"+nodeID, bytes.NewReader([]byte(fmt.Sprintf(
+		`{"network":{"iface":"eth0","mode":"both","quota_bytes":1000000},"traffic_cycle":{"cycle_type":"month","next_reset_at":%d}}`, reset))))
 	updReq.Header.Set("Cookie", cookie)
 	if ur, err := authClient.Do(updReq); err != nil || ur.StatusCode != 200 {
 		t.Fatalf("network update: %v %d", err, statusCode(ur))
 	} else {
 		ur.Body.Close()
+	}
+	desiredEnv := readType(protocol.TypeDesired)
+	var desired protocol.DesiredState
+	if err := json.Unmarshal(desiredEnv.Payload, &desired); err != nil {
+		t.Fatalf("decode traffic desired: %v", err)
+	}
+	if desired.TrafficIface == nil || *desired.TrafficIface != "eth0" {
+		t.Fatalf("traffic interface not pushed: %+v", desired)
+	}
+
+	// the detail response exposes agent-discovered interfaces, an agent-owned
+	// timezone, and an independently configured traffic reset.
+	reqDetail, _ := http.NewRequest("GET", srv.URL+"/api/nodes/"+nodeID, nil)
+	reqDetail.Header.Set("Cookie", cookie)
+	detail, err := authClient.Do(reqDetail)
+	if err != nil {
+		t.Fatalf("node detail: %v", err)
+	}
+	var detailResp struct {
+		Node struct {
+			TZ string `json:"tz"`
+		} `json:"node"`
+		Interfaces []struct {
+			Name      string `json:"name"`
+			IsDefault bool   `json:"default"`
+		} `json:"interfaces"`
+		TrafficCycle struct {
+			CycleType   string `json:"cycle_type"`
+			NextResetAt *int64 `json:"next_reset_at"`
+		} `json:"traffic_cycle"`
+	}
+	if err := json.NewDecoder(detail.Body).Decode(&detailResp); err != nil {
+		detail.Body.Close()
+		t.Fatalf("decode node detail: %v", err)
+	}
+	detail.Body.Close()
+	if detailResp.Node.TZ != "Asia/Shanghai" || len(detailResp.Interfaces) != 2 || !detailResp.Interfaces[0].IsDefault {
+		t.Fatalf("detected node configuration missing: %+v", detailResp)
+	}
+	if detailResp.TrafficCycle.CycleType != "month" || detailResp.TrafficCycle.NextResetAt == nil {
+		t.Fatalf("traffic cycle missing: %+v", detailResp.TrafficCycle)
 	}
 
 	sendPayload(protocol.TypeMetrics, "", protocol.Metrics{

@@ -28,6 +28,7 @@ type nodeView struct {
 	PrimaryIP    string  `json:"primary_ip"`
 	CountryCode  string  `json:"country_code"`
 	AgentVersion string  `json:"agent_version"`
+	TZ           string  `json:"tz"`
 	LastSeen     *int64  `json:"last_seen,omitempty"`
 	CPU          float64 `json:"cpu"`
 	MemUsed      int64   `json:"mem_used"`
@@ -84,6 +85,7 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 		Note: n.Note, OS: n.OS, Arch: n.Arch, Hostname: n.Hostname,
 		CPUCores: n.CPUCores, PrimaryIP: n.PrimaryIP, CountryCode: n.CountryCode,
 		AgentVersion: n.AgentVersion,
+		TZ:           n.TZ,
 		PeriodPct:    -1,
 
 		AgentTargetVersion:  n.AgentTargetVersion,
@@ -124,7 +126,7 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 		v.Iface = net.Iface
 		v.Mode = net.Mode
 		v.QuotaBytes = net.QuotaBytes
-		start := quota.PeriodStart(net.AnchorAt, net.CycleDays, net.TZ, time.Now())
+		start := quota.PeriodStart(net.CycleType, net.NextResetAt, net.TZ, time.Now())
 		v.PeriodStart = &start
 		sinceDate := quota.LocalDate(start, net.TZ)
 		if rx, tx, err := s.Store.SumTrafficSince(n.ID, sinceDate); err == nil {
@@ -201,6 +203,10 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if net, err := s.Store.GetNodeNetwork(id); err == nil {
 		resp["network"] = net
+		resp["traffic_cycle"] = trafficCycleView(net, time.Now())
+	}
+	if interfaces, err := s.Store.ListNodeInterfaces(id); err == nil {
+		resp["interfaces"] = interfaces
 	}
 	if b, err := s.Store.GetNodeBilling(id); err == nil {
 		resp["billing"] = b
@@ -211,20 +217,35 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateNodeReq struct {
-	Name             *string     `json:"name,omitempty"`
-	Note             *string     `json:"note,omitempty"`
-	Network          *networkReq `json:"network,omitempty"`
-	Billing          *billingReq `json:"billing,omitempty"`
-	LatencyTargetIDs *[]int64    `json:"latency_target_ids,omitempty"`
+	Name             *string          `json:"name,omitempty"`
+	Note             *string          `json:"note,omitempty"`
+	Network          *networkReq      `json:"network,omitempty"`
+	TrafficCycle     *trafficCycleReq `json:"traffic_cycle,omitempty"`
+	Billing          *billingReq      `json:"billing,omitempty"`
+	LatencyTargetIDs *[]int64         `json:"latency_target_ids,omitempty"`
 }
 
 type networkReq struct {
 	Iface      string `json:"iface"`
 	Mode       string `json:"mode"`
 	QuotaBytes *int64 `json:"quota_bytes"`
-	CycleDays  *int64 `json:"cycle_days"`
-	AnchorAt   *int64 `json:"anchor_at"`
-	TZ         string `json:"tz"`
+}
+
+type trafficCycleReq struct {
+	CycleType   string `json:"cycle_type"`
+	NextResetAt *int64 `json:"next_reset_at"`
+}
+
+type trafficCycleResp struct {
+	CycleType   string `json:"cycle_type"`
+	NextResetAt *int64 `json:"next_reset_at"`
+}
+
+func trafficCycleView(net *store.NodeNetwork, now time.Time) trafficCycleResp {
+	return trafficCycleResp{
+		CycleType:   net.CycleType,
+		NextResetAt: quota.NextReset(net.CycleType, net.NextResetAt, net.TZ, now),
+	}
 }
 
 type billingReq struct {
@@ -255,18 +276,58 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	if req.Note != nil {
 		_ = s.Store.SetNodeNote(id, *req.Note)
 	}
-	if req.Network != nil {
-		mode := req.Network.Mode
-		switch mode {
-		case quota.ModeIn, quota.ModeOut, quota.ModeBoth, quota.ModeMax:
-		default:
-			mode = quota.ModeBoth
+	networkChanged := req.Network != nil || req.TrafficCycle != nil
+	if req.Network != nil || req.TrafficCycle != nil {
+		net, err := s.Store.GetNodeNetwork(id)
+		if errors.Is(err, store.ErrNotFound) {
+			net = &store.NodeNetwork{NodeID: id, Mode: quota.ModeBoth, CycleType: "none"}
+		} else if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
 		}
-		_ = s.Store.UpsertNodeNetwork(&store.NodeNetwork{
-			NodeID: id, Iface: req.Network.Iface, Mode: mode,
-			QuotaBytes: req.Network.QuotaBytes, CycleDays: req.Network.CycleDays,
-			AnchorAt: req.Network.AnchorAt, TZ: req.Network.TZ,
-		})
+		if req.Network != nil {
+			net.Iface = strings.TrimSpace(req.Network.Iface)
+			mode := req.Network.Mode
+			switch mode {
+			case quota.ModeIn, quota.ModeOut, quota.ModeBoth, quota.ModeMax:
+			default:
+				mode = quota.ModeBoth
+			}
+			net.Mode = mode
+			net.QuotaBytes = req.Network.QuotaBytes
+			if net.Iface != "" {
+				interfaces, err := s.Store.ListNodeInterfaces(id)
+				if err != nil {
+					writeErr(w, http.StatusInternalServerError, "internal")
+					return
+				}
+				if len(interfaces) > 0 && !containsInterface(interfaces, net.Iface) {
+					writeErr(w, http.StatusBadRequest, "interface_not_reported")
+					return
+				}
+			}
+		}
+		if req.TrafficCycle != nil {
+			switch req.TrafficCycle.CycleType {
+			case "none":
+				net.CycleType = "none"
+				net.NextResetAt = nil
+			case "month", "year":
+				if req.TrafficCycle.NextResetAt == nil || *req.TrafficCycle.NextResetAt <= 0 {
+					writeErr(w, http.StatusBadRequest, "next_reset_required")
+					return
+				}
+				net.CycleType = req.TrafficCycle.CycleType
+				net.NextResetAt = req.TrafficCycle.NextResetAt
+			default:
+				writeErr(w, http.StatusBadRequest, "invalid_cycle_type")
+				return
+			}
+		}
+		if err := s.Store.UpsertNodeNetwork(net); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
 	}
 	if req.Billing != nil {
 		_ = s.Store.UpsertNodeBilling(&store.NodeBilling{
@@ -275,7 +336,13 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	if req.LatencyTargetIDs != nil {
-		_ = s.Store.SetNodeLatencyTargets(id, *req.LatencyTargetIDs)
+		if err := s.Store.SetNodeLatencyTargets(id, *req.LatencyTargetIDs); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
+	if networkChanged {
+		s.Hub.PushDesired(id)
 	}
 	s.Store.InsertAudit(&store.AuditEntry{Actor: "panel", NodeID: id, Action: "node_updated", SourceIP: s.Trust.RealIP(r)})
 	s.publishEvent("node_updated", id)
@@ -317,7 +384,7 @@ func (s *Server) handleNodeTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	var rx, tx int64
 	if net, err := s.Store.GetNodeNetwork(id); err == nil {
-		start := quota.PeriodStart(net.AnchorAt, net.CycleDays, net.TZ, time.Now())
+		start := quota.PeriodStart(net.CycleType, net.NextResetAt, net.TZ, time.Now())
 		rx, tx, _ = s.Store.SumTrafficSince(id, quota.LocalDate(start, net.TZ))
 	} else {
 		// No cycle configured yet: the window the chart shows is the only
@@ -325,6 +392,15 @@ func (s *Server) handleNodeTraffic(w http.ResponseWriter, r *http.Request) {
 		rx, tx, _ = s.Store.SumTrafficSince(id, fromDate)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"daily": daily, "period_rx": rx, "period_tx": tx})
+}
+
+func containsInterface(interfaces []store.NodeInterface, want string) bool {
+	for _, iface := range interfaces {
+		if iface.Name == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleNodeLatency(w http.ResponseWriter, r *http.Request) {

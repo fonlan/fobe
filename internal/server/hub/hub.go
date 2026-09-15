@@ -367,7 +367,7 @@ func (h *Hub) PushLatencyConfig() {
 // is what keeps that nudge from accidentally clearing sing-box management.
 func (h *Hub) PushDesired(nodeID string) bool {
 	desired := h.buildDesiredState(nodeID)
-	if desired.Singbox == nil && desired.AgentTargetVersion == "" {
+	if desired.Singbox == nil && desired.TrafficIface == nil && desired.AgentTargetVersion == "" {
 		return false
 	}
 	return h.Send(nodeID, protocol.NewEnvelope(protocol.TypeDesired, "", desired))

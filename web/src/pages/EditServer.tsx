@@ -3,7 +3,13 @@ import { Link, useParams } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
-import { datetimeLocalToUnix, dateStrToUnix, fmtTime, toDateString, toDatetimeLocal } from '../format';
+import {
+  datetimeLocalInZoneToUnix,
+  dateStrToUnix,
+  fmtTime,
+  toDateString,
+  toDatetimeLocalInZone,
+} from '../format';
 import type { LatencyTarget, NodeDetailData, SingboxStatus, SingboxVersion } from '../types';
 import Flag from '../components/Flag';
 import Tile from '../components/Tile';
@@ -68,7 +74,7 @@ export default function EditServer() {
 
       <section className="card">
         <h3>{t('sec_edit')}</h3>
-        <NodeSettingsForm data={data} onSaved={() => void load()} />
+        <NodeSettingsForm key={JSON.stringify([data.node, data.network, data.traffic_cycle, data.interfaces])} data={data} onSaved={() => void load()} />
       </section>
 
       <section className="card">
@@ -222,7 +228,7 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
   );
 }
 
-// --- node settings (name / note / network quota / billing) -------------------
+// --- node settings (name / note / network quota / traffic cycle / billing) ---
 
 const MODES = ['in', 'out', 'both', 'max'] as const;
 
@@ -251,6 +257,8 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
   const { t } = useI18n();
   const node = data.node;
   const net = data.network;
+  const trafficCycle = data.traffic_cycle;
+  const interfaces = data.interfaces ?? [];
   const billing = data.billing;
 
   const [name, setName] = useState(node.name);
@@ -260,9 +268,10 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
   const [quotaGb, setQuotaGb] = useState(
     net?.quota_bytes != null ? String(Math.round((net.quota_bytes / 2 ** 30) * 100) / 100) : '',
   );
-  const [cycleDays, setCycleDays] = useState(net?.cycle_days != null ? String(net.cycle_days) : '30');
-  const [anchor, setAnchor] = useState(net?.anchor_at != null ? toDatetimeLocal(net.anchor_at) : '');
-  const [tz, setTz] = useState(net?.tz ?? '');
+  const [trafficCycleType, setTrafficCycleType] = useState<'none' | 'month' | 'year'>(trafficCycle?.cycle_type ?? 'none');
+  const [nextReset, setNextReset] = useState(
+    trafficCycle?.next_reset_at != null ? toDatetimeLocalInZone(trafficCycle.next_reset_at, node.tz) : '',
+  );
   const [cycleType, setCycleType] = useState(billing?.cycle_type || 'none');
   const [billingDays, setBillingDays] = useState(billing?.cycle_days != null ? String(billing.cycle_days) : '');
   const [nextDue, setNextDue] = useState(billing?.next_due_at != null ? toDateString(billing.next_due_at) : '');
@@ -286,9 +295,10 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
           iface: iface.trim(),
           mode,
           quota_bytes: quotaBytes != null && isFinite(quotaBytes) ? quotaBytes : null,
-          cycle_days: cycleDays.trim() === '' ? null : Number(cycleDays),
-          anchor_at: anchor.trim() === '' ? null : datetimeLocalToUnix(anchor),
-          tz: tz.trim(),
+        },
+        traffic_cycle: {
+          cycle_type: trafficCycleType as 'none' | 'month' | 'year',
+          next_reset_at: trafficCycleType === 'none' ? null : datetimeLocalInZoneToUnix(nextReset, node.tz),
         },
         billing: {
           cycle_type: cycleType,
@@ -317,9 +327,24 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
           <span>{t('note')}</span>
           <input value={note} onChange={(e) => setNote(e.target.value)} />
         </label>
+      </div>
+
+      <h4>{t('traffic_cycle')}</h4>
+      <div className="form-grid">
         <label className="field">
           <span>{t('iface')}</span>
-          <input value={iface} placeholder="eth0" onChange={(e) => setIface(e.target.value)} />
+          <select value={iface} onChange={(e) => setIface(e.target.value)} disabled={interfaces.length === 0}>
+            <option value="">{t('iface_auto')}</option>
+            {iface !== '' && !interfaces.some((item) => item.name === iface) && (
+              <option value={iface}>{t('iface_unavailable', { iface })}</option>
+            )}
+            {interfaces.map((item) => (
+              <option key={item.name} value={item.name}>
+                {item.name}{item.default ? ` (${t('iface_default')})` : ''}
+              </option>
+            ))}
+          </select>
+          {interfaces.length === 0 && <small className="hint">{t('iface_waiting')}</small>}
         </label>
         <label className="field">
           <span>{t('mode')}</span>
@@ -336,16 +361,28 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
           <input type="number" min="0" step="any" value={quotaGb} onChange={(e) => setQuotaGb(e.target.value)} />
         </label>
         <label className="field">
-          <span>{t('cycle_days')}</span>
-          <input type="number" min="1" value={cycleDays} onChange={(e) => setCycleDays(e.target.value)} />
-        </label>
-        <label className="field">
-          <span>{t('anchor_at')}</span>
-          <input type="datetime-local" value={anchor} onChange={(e) => setAnchor(e.target.value)} />
-        </label>
-        <label className="field">
           <span>{t('tz')}</span>
-          <input value={tz} placeholder="Asia/Shanghai" onChange={(e) => setTz(e.target.value)} />
+          <input value={node.tz || 'UTC'} readOnly />
+          <small className="hint">{t('tz_agent_readonly')}</small>
+        </label>
+        <label className="field">
+          <span>{t('traffic_cycle_type')}</span>
+          <select value={trafficCycleType} onChange={(e) => setTrafficCycleType(e.target.value as 'none' | 'month' | 'year')}>
+            <option value="none">{t('cycle_none')}</option>
+            <option value="month">{t('cycle_month')}</option>
+            <option value="year">{t('cycle_year')}</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>{t('next_reset_at')}</span>
+          <input
+            type="datetime-local"
+            step="1"
+            value={nextReset}
+            disabled={trafficCycleType === 'none'}
+            onChange={(e) => setNextReset(e.target.value)}
+          />
+          <small className="hint">{t('next_reset_hint', { tz: node.tz || 'UTC' })}</small>
         </label>
       </div>
 

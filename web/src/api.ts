@@ -16,6 +16,7 @@ import type {
   Me,
   MetricsSample,
   NodeDetailData,
+  NodeTrafficCycle,
   NodeView,
   RegTokenInfo,
   RegTokenRow,
@@ -181,10 +182,8 @@ export interface UpdateNodeBody {
     iface: string;
     mode: string;
     quota_bytes: number | null;
-    cycle_days: number | null;
-    anchor_at: number | null;
-    tz: string;
   };
+  traffic_cycle?: NodeTrafficCycle;
   billing?: {
     cycle_type: string;
     cycle_days: number | null;

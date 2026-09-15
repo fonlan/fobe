@@ -94,7 +94,17 @@ CREATE TABLE IF NOT EXISTS node_network (
     quota_bytes INTEGER,                      -- NULL = no quota
     cycle_days INTEGER,                       -- NULL = inherit billing anchor monthly
     anchor_at  INTEGER,                       -- cycle anchor (rolling, design §14)
+    cycle_type TEXT NOT NULL DEFAULT 'none',  -- none|month|year
+    next_reset_at INTEGER,                    -- next automatic traffic reset (unix seconds)
     tz         TEXT NOT NULL DEFAULT 'UTC'
+);
+
+CREATE TABLE IF NOT EXISTS node_interfaces (
+    node_id     TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (node_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS node_billing (

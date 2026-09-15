@@ -76,6 +76,12 @@ export function toDatetimeLocal(unix: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** Unix seconds rendered as a seconds-precise datetime-local in an IANA zone. */
+export function toDatetimeLocalInZone(unix: number, timeZone: string): string {
+  const parts = zonedParts(unix, timeZone);
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
+}
+
 export function toDateString(unix: number): string {
   const d = new Date(unix * 1000);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -93,6 +99,45 @@ export function datetimeLocalToUnix(s: string): number | null {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) return null;
   const t = new Date(s).getTime();
   return isFinite(t) ? Math.floor(t / 1000) : null;
+}
+
+/** Parse a seconds-precise datetime-local value as wall time in an IANA zone. */
+export function datetimeLocalInZoneToUnix(s: string, timeZone: string): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(s);
+  if (!match) return null;
+  const target = {
+    year: Number(match[1]), month: Number(match[2]), day: Number(match[3]),
+    hour: Number(match[4]), minute: Number(match[5]), second: Number(match[6]),
+  };
+  const targetUTC = Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute, target.second);
+  let unix = Math.floor(targetUTC / 1000);
+  // Offset may change around DST. Iteration converges on the instant whose
+  // formatted wall time matches the node timezone without relying on browser TZ.
+  for (let i = 0; i < 3; i++) {
+    const actual = zonedParts(unix, timeZone);
+    const actualUTC = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute, actual.second);
+    const next = unix + Math.round((targetUTC - actualUTC) / 1000);
+    if (next === unix) return unix;
+    unix = next;
+  }
+  return unix;
+}
+
+type ZonedParts = { year: number; month: number; day: number; hour: number; minute: number; second: number };
+
+function zonedParts(unix: number, timeZone: string): ZonedParts {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timeZone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  });
+  const values: Record<string, number> = {};
+  for (const part of formatter.formatToParts(new Date(unix * 1000))) {
+    if (part.type !== 'literal') values[part.type] = Number(part.value);
+  }
+  return {
+    year: values.year, month: values.month, day: values.day,
+    hour: values.hour, minute: values.minute, second: values.second,
+  };
 }
 
 export async function copyText(text: string): Promise<boolean> {

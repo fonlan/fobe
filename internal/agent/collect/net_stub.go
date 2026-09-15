@@ -11,8 +11,10 @@ type netCounters struct {
 	rx, tx uint64
 }
 
-func (c *Collector) readNet(string, *protocol.Metrics) (rx, tx uint64, ok bool) {
-	return 0, 0, false
+func (c *Collector) readNet(string, *protocol.Metrics) (name string, rx, tx uint64, ok bool) {
+	return "", 0, 0, false
 }
 
 func readDisks() []protocol.Disk { return []protocol.Disk{} }
+
+func NetworkInterfaces() []protocol.NetworkInterface { return []protocol.NetworkInterface{} }

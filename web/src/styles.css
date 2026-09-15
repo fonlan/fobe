@@ -270,6 +270,8 @@ section.card { margin-bottom: 0; }
 .field select,
 .cmd-input-row input {
   appearance: none;
+  box-sizing: border-box;
+  height: 38px;
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--text);

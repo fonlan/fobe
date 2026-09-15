@@ -14,8 +14,8 @@
 |---|---|---|---|
 | 1 | 产品闭环 | 面板输出订阅 `/sub/<token>`，sing-box + Clash 双格式 | 需要订阅渲染 + token 生命周期 |
 | 2 | 网络通道 | 外部 nginx 单端口接入，全路径转单一上游；agent 走 WSS | 你必须自备 nginx + 真证书；探针必须能解析面板域名 |
-| 3 | 流量口径 | 整机网卡 `/proc/net/dev`，面板选定网卡（默认默认路由出口） | 配额含系统更新与其他服务流量；需计数器回绕/重启检测 |
-| 4 | 使用率语义 | 分母 = 周期配额；4 模式决定取哪个方向 | 每节点必须落库：配额值、锚点、时区 |
+| 3 | 流量口径 | 整机网卡 `/proc/net/dev`，agent 自动探测默认路由出口并上报全部网卡；面板可选其一 | 配额含系统更新与其他服务流量；需计数器回绕/重启检测 |
+| 4 | 使用率语义 | 分母 = 周期配额；4 模式决定取哪个方向 | 每节点必须落库：配额值、流量周期类型、下次重置时间；时区以 agent 上报为准 |
 | 5 | Web 终端 | 浏览器 → server → agent 本地 PTY（不依赖 sshd、不存凭据）（2026-09-15 修订：原 SSH + 凭据托管方案废弃） | agent 需要 PTY 权限；协议保留 `mode` 字段仅为滚动升级兼容 |
 | 6 | 平台 | x86 Linux + x86 OpenWrt（v1 硬需求） | procd/init.d、musl 静态、flash 写最小化 |
 | 7 | 到期/超量 | 只提醒，不自动停服 | 需要告警通道，且没有自动止损 |
@@ -25,7 +25,7 @@
 | 11 | 数据库 | SQLite（WAL），文件挂载在容器外 | 单写者；指标靠保留期控盘 |
 | 12 | 订阅模型 | 单用户 + 多订阅，每订阅独立节点集与模板文件 | 模板管理 + 双格式引擎 |
 | 13 | 探针凭据 | 一个入站 + 一个**全局共享** anytls 密码 | 无法按订阅吊销代理访问，只能全局轮换 |
-| 14 | 重置锚点 | 循环锚点，填一次自动滚动；缺省继承缴费锚点 | 需处理月末边界与时区 |
+| 14 | 流量重置 | 独立周期类型（无 / 按月 / 按年）+ 下次重置时间；填一次自动滚动 | 需处理月末、闰日边界、秒级时间与探针时区 |
 | 15 | 缴费周期 | 周期类型（无 / 按月 / 按天 / 按年，2026-09-15 增按年）+ 周期长度 + 下次到期日，手动改；**周期长度单位随类型（天/月/年），类型只作记账口径、不参与任何到期计算**；**无续费按钮、无历史** | 查不到"上期什么时候交的" |
 | 16 | 指标保留 | 明细只存 7 天；另存永久「按天流量」表 | 7 天以外的曲线不可得（月曲线靠日表） |
 | 17 | 延迟测量 | 探针**主动**测面板配置的目标；本地测量频率由设置项 `latency.interval_seconds` 控制（默认 5s）、60s 批量上报；ICMP + TCP 握手两种 | 拿不到"用户→探针"的真实延迟 |
@@ -242,9 +242,10 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `ip_blacklist` | ip, reason, fail_count, created_at, expires_at | 持久化 |
 | `settings` | key, value, encrypted | 全局 anytls 密码、AI 配置、Telegram、保留期、延迟测量频率（`latency.interval_seconds`，默认 5）等 |
 | `reg_tokens` | token_hash, note, expires_at, used_at | 单次 |
-| `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, cpu_cores, primary_ip, country_code, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表 |
+| `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, cpu_cores, primary_ip, country_code, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表；`tz` 由 agent 自动探测上报，只读 |
 | `node_ips` | node_id, ip, family, scope, is_primary | 多 IP 全量上报 |
-| `node_network` | node_id, iface, mode(in/out/both/max), quota_bytes, cycle_days, anchor_at, tz | 流量口径与配额 |
+| `node_interfaces` | node_id, name, is_default, updated_at | agent 上报的可选网卡清单与默认路由标记 |
+| `node_network` | node_id, iface, mode(in/out/both/max), quota_bytes, cycle_type(none/month/year), next_reset_at | 流量口径、配额与独立流量周期；空 `iface` 表示 agent 自动选择默认路由 |
 | `node_billing` | node_id, cycle_type(none/month/day/year), cycle_days(单位随 cycle_type), next_due_at, note | 缴费周期 |
 | `traffic_counters` | node_id, iface, direction, last_raw, last_ts, period_start, period_used | 回绕/重启检测 |
 | `traffic_daily` | node_id, date, rx_bytes, tx_bytes | **永久**，月曲线与配额靠它 |
@@ -278,16 +279,16 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 | 方向 | type | 说明 |
 |---|---|---|
-| agent → server | `hello` | machine_id、版本、os/arch、能力位（含 `self_update`，§5.5） |
+| agent → server | `hello` | machine_id、版本、os/arch、时区、网卡清单与能力位（含 `self_update`，§5.5） |
 | | `agent_update` | 自更新逐次上报：phase / class(terminal\|transient) / error / attempts（§5.5） |
 | | `metrics` | 60s 一次；面板打开详情页时服务端可请求 5s 实时流 |
 | | `traffic` | 60s 一次：选定网卡的累计计数 + 日增量 |
 | | `latency` | 60s 一次批量；本地采样点数量按 `latency.interval_seconds`（默认 5s）变化 |
-| | `state` | 节点信息、IP 列表、sing-box 实际状态 |
+| | `state` | 节点信息、IP/网卡清单、sing-box 实际状态 |
 | | `cmd_result` | 指令执行结果（stdout/stderr/exit code，截断） |
 | | `terminal` | 终端输出/关闭 |
-| server → agent | `hello_ack` | 期望状态全量下发（含 `agent_target_version` / `agent_update_after`，§5.5） |
-| | `desired` | 增量下发期望状态（sing-box 版本/配置/端口/密码/证书要求） |
+| server → agent | `hello_ack` | 期望状态全量下发（含流量网卡选择、`agent_target_version` / `agent_update_after`，§5.5） |
+| | `desired` | 增量下发期望状态（流量网卡、sing-box 版本/配置/端口/密码/证书要求） |
 | | `cmd` | 一次性命令（AI 执行、面板操作） |
 | | `terminal_open/input/resize/close` | 终端会话 |
 | | `probe_metrics` | 请求临时高频指标采集 5s |
@@ -317,6 +318,8 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | 运行时长 | `/proc/uptime` |
 | 重启检测 | `/proc/sys/kernel/random/boot_id` + 累计计数回绕双重判定 |
 
+网卡通过 `/proc/net/dev` 与 `/proc/net/route` 探测；agent 将完整可选清单及默认路由出口随 `hello`/`state` 上报。面板的「自动」不猜网卡，始终由 agent 选择默认路由；人工选择只允许该探针已上报的网卡，并以 `desired` 即时下发到 agent。时区同样由 agent 自动上报到 `nodes.tz`，面板只读显示，不允许人工覆盖。
+
 ### 8.2 流量累计与重启处理
 
 1. 每次上报 `(last_raw_rx, last_raw_tx)`。
@@ -338,6 +341,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 - 模式是**每台探针**独立配置；切换模式只影响计算与展示，原始数据始终两个方向都存。
 - 未设配额（`quota_bytes = NULL`）时，只显示累计用量与实时速率，不显示百分比。
 - 达到 80% / 100% 触发告警（阈值可配），**不自动停服**（你的选择）。
+- **流量周期独立于缴费周期**（2026-09-16 修订）：每节点设置 `none|month|year` 与「下次重置时间」（Unix 秒，表单精确至秒）。`none` 不隐式回退到自然月，按累计流量计算；月/年模式将已到期的下次重置时间依探针时区向前滚动，保留设置时的日、时、分、秒。月末和 2 月 29 日落到不存在日期时钳制到该月最后一天，下一次仍以原始日期规则计算。缴费周期仅用于到期提醒，与流量统计互不驱动。
 
 ---
 
@@ -624,7 +628,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - **本地开发不走容器**：前端 `npm run dev`（Vite dev server，把 `/api`、`/ws`、`/sub`、`/install.sh`、`/dl` 代理到 `http://127.0.0.1:8080`，**WebSocket 代理必须开 `ws: true`**），后端 `go run ./cmd/server`。此时把 `FOBE_WEB_DIR` 留空 → server 进 **API-only 模式**：`/` 返回一句"请访问 Vite dev server"的提示（不 404、不白屏），其余接口行为与生产一致。
 - **`scripts/dev.sh` 与自更新（2026-09-15 修订）**：dev.sh 现在除 server 外还交叉编译 linux/amd64 的 agent 产物，并给两端注入同一个内容寻址版本号 `dev-<哈希>`（§5.5 实现修订），所以本机 dev 也能真跑"探针跟随服务端"；`go run ./cmd/server` 没有 `-ldflags`、版本仍是 `dev`，不会下发目标。降级演练用 `FOBE_VERSION=<旧号> scripts/dev.sh`；改后端必须重启 dev.sh 这条老规矩不变，但版本号只在 agent 源码真的变了才变——重启本身不再惊动探针。
 - 页面：登录 / 概览（卡片墙）/ 节点详情（**只读监控**：指标 + 图表 + 流量 + 延迟历史 + 命令）/ 订阅与模板 / 延迟目标 / 告警 / 终端（全屏）/ AI 助手（侧栏）/ 设置（AI、通知、GeoIP、保留期、主密钥状态、**服务器**）。（2026-09-15 修订）
-- **配置入口收敛（2026-09-15；2026-09-16 列完善）**：设置里新增「服务器」页，表格列出已接入的服务器，明确显示文字状态、主 IP、过期时间、版本，行尾为编辑/删除图标按钮；未配置缴费周期时过期时间留空，已配置时显示距离 `next_due_at` 的剩余或逾期时间。「编辑服务器」页集中承载该服务器的全部配置：节点设置（名称/备注/网卡/配额/账单）、延迟测量端点选择、IP 列表（含手动主 IP）、sing-box 服务端配置（版本/启停/端口）。节点详情页不再承载配置表单与删除按钮——监控与配置分离，删除服务器统一走设置页（带确认）。
+- **配置入口收敛（2026-09-15；2026-09-16 列完善）**：设置里新增「服务器」页，表格列出已接入的服务器，明确显示文字状态、主 IP、过期时间、版本，行尾为编辑/删除图标按钮；未配置缴费周期时过期时间留空，已配置时显示距离 `next_due_at` 的剩余或逾期时间。「编辑服务器」页集中承载该服务器的全部配置：节点设置（名称/备注/agent 上报的网卡下拉/统计模式/配额/只读时区）、**独立的流量周期**（无/按月/按年与秒级下次重置时间）、缴费周期、延迟测量端点选择、IP 列表（含手动主 IP）、sing-box 服务端配置（版本/启停/端口）。节点详情页不再承载配置表单与删除按钮——监控与配置分离，删除服务器统一走设置页（带确认）。
 - 实时（2026-09-15 修订）：`/ws/events` 只覆盖状态类变化（节点增删改、sing-box、订阅、设置、GeoIP）——**常规指标上报不产生任何事件**，所以数据新鲜度必须靠「轮询 + 高频上报」两条腿：
   - **概览**：挂载且标签页可见期间，对每个在线节点打开 §16 的 5s 探测流，并 5s 拉一次列表。打开探测流是必要的：不打开就只能等 60s 基线节奏，卡片墙看起来像「不自动更新」。
   - **详情**：5s 拉节点快照（与探测流对齐），30s 拉图表 / 流量 / 延迟曲线（重查询）。

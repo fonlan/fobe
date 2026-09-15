@@ -18,10 +18,11 @@ import (
 
 // Snapshot is one observation of the collector.
 type Snapshot struct {
-	Metrics   protocol.Metrics
-	TrafficRx uint64 // cumulative counters of the selected iface
-	TrafficTx uint64
-	HasIface  bool
+	Metrics      protocol.Metrics
+	TrafficIface string
+	TrafficRx    uint64 // cumulative counters of the selected iface
+	TrafficTx    uint64
+	HasIface     bool
 }
 
 // Collector keeps the previous /proc samples needed for deltas.
@@ -49,8 +50,8 @@ func (c *Collector) Read(iface string) Snapshot {
 
 	m := c.readMetrics()
 	snap := Snapshot{Metrics: m}
-	rx, tx, ok := c.readNet(iface, &snap.Metrics)
-	snap.TrafficRx, snap.TrafficTx, snap.HasIface = rx, tx, ok
+	name, rx, tx, ok := c.readNet(iface, &snap.Metrics)
+	snap.TrafficIface, snap.TrafficRx, snap.TrafficTx, snap.HasIface = name, rx, tx, ok
 	return snap
 }
 

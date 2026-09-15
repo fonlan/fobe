@@ -5,6 +5,7 @@ package collect
 import (
 	"bufio"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -14,25 +15,20 @@ import (
 )
 
 // readNet returns the cumulative rx/tx counters of iface (per /proc/net/dev),
-// and updates the rate fields from the delta since the previous read.
-// Empty iface picks the first interface with non-zero counters.
-func (c *Collector) readNet(iface string, m *protocol.Metrics) (rx, tx uint64, ok bool) {
+// and updates the rate fields from the delta since the previous read. Empty
+// iface means the default-route interface, never an unstable map iteration.
+func (c *Collector) readNet(iface string, m *protocol.Metrics) (name string, rx, tx uint64, ok bool) {
 	counters := parseNetDev()
 	if len(counters) == 0 {
-		return 0, 0, false
+		return "", 0, 0, false
 	}
-	name := iface
+	name = iface
 	if name == "" {
-		for n, ct := range counters {
-			if n != "lo" && (ct.rx > 0 || ct.tx > 0) {
-				name = n
-				break
-			}
-		}
+		name = defaultInterface(counters)
 	}
 	ct, found := counters[name]
 	if !found {
-		return 0, 0, false
+		return "", 0, 0, false
 	}
 
 	if prev, seen := c.prevNet[name]; seen && c.lastNet.IsZero() == false {
@@ -48,7 +44,7 @@ func (c *Collector) readNet(iface string, m *protocol.Metrics) (rx, tx uint64, o
 	}
 	c.prevNet[name] = ct
 	c.lastNet = time.Now()
-	return ct.rx, ct.tx, true
+	return name, ct.rx, ct.tx, true
 }
 
 type netCounters struct {
@@ -83,6 +79,75 @@ func parseNetDev() map[string]netCounters {
 		out[name] = netCounters{rx: rx, tx: tx}
 	}
 	return out
+}
+
+// NetworkInterfaces is the stable inventory sent to the panel. It intentionally
+// reads procfs rather than invoking ip(8), which is absent or inconsistent on
+// OpenWrt installations (design §5.1).
+func NetworkInterfaces() []protocol.NetworkInterface {
+	counters := parseNetDev()
+	if len(counters) == 0 {
+		return []protocol.NetworkInterface{}
+	}
+	defaultName := defaultInterface(counters)
+	names := make([]string, 0, len(counters))
+	for name := range counters {
+		if name != "lo" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	out := make([]protocol.NetworkInterface, 0, len(names))
+	for _, name := range names {
+		out = append(out, protocol.NetworkInterface{Name: name, Default: name == defaultName})
+	}
+	return out
+}
+
+func defaultInterface(counters map[string]netCounters) string {
+	if route, ok := defaultRouteInterface(); ok {
+		if _, present := counters[route]; present && route != "lo" {
+			return route
+		}
+	}
+	names := make([]string, 0, len(counters))
+	for name, ct := range counters {
+		if name != "lo" && (ct.rx > 0 || ct.tx > 0) {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		for name := range counters {
+			if name != "lo" {
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
+}
+
+func defaultRouteInterface() (string, bool) {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 4 || fields[1] != "00000000" {
+			continue
+		}
+		flags, err := strconv.ParseUint(fields[3], 16, 64)
+		if err == nil && flags&0x1 != 0 {
+			return fields[0], true
+		}
+	}
+	return "", false
 }
 
 // readDisks statfs's every real mount point (§8.1: no external commands).

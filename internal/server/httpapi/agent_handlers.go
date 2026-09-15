@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fobe-panel/fobe/internal/server/security"
 	"github.com/fobe-panel/fobe/internal/server/store"
@@ -312,7 +313,11 @@ func defaultNodeName(candidates ...string) string {
 }
 
 func tzOrDefault(tz string) string {
+	tz = strings.TrimSpace(tz)
 	if tz == "" {
+		return "UTC"
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
 		return "UTC"
 	}
 	return tz

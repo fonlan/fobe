@@ -94,6 +94,8 @@ func (s *Store) migrateAdditive() error {
 		{"nodes", "agent_update_error", `ALTER TABLE nodes ADD COLUMN agent_update_error TEXT NOT NULL DEFAULT ''`},
 		{"nodes", "agent_update_planned_at", `ALTER TABLE nodes ADD COLUMN agent_update_planned_at INTEGER NOT NULL DEFAULT 0`},
 		{"nodes", "agent_update_done_at", `ALTER TABLE nodes ADD COLUMN agent_update_done_at INTEGER NOT NULL DEFAULT 0`},
+		{"node_network", "cycle_type", `ALTER TABLE node_network ADD COLUMN cycle_type TEXT NOT NULL DEFAULT 'none'`},
+		{"node_network", "next_reset_at", `ALTER TABLE node_network ADD COLUMN next_reset_at INTEGER`},
 	}
 	for _, m := range migrations {
 		if s.columnExists(m.table, m.column) {
@@ -102,6 +104,12 @@ func (s *Store) migrateAdditive() error {
 		if _, err := s.db.Exec(m.ddl); err != nil {
 			return fmt.Errorf("migrate %s.%s: %w", m.table, m.column, err)
 		}
+	}
+	// Existing anchors were monthly by default. Preserve that behaviour for
+	// upgraded panels while new rows explicitly default to no traffic cycle.
+	if _, err := s.db.Exec(`UPDATE node_network SET cycle_type = 'month', next_reset_at = anchor_at
+		WHERE cycle_type = 'none' AND next_reset_at IS NULL AND anchor_at IS NOT NULL`); err != nil {
+		return fmt.Errorf("migrate legacy traffic cycles: %w", err)
 	}
 	return nil
 }

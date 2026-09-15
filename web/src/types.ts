@@ -18,6 +18,7 @@ export interface NodeView {
   primary_ip: string;
   country_code: string;
   agent_version: string;
+  tz: string;
   last_seen?: number | null;
   cpu: number;
   mem_used: number;
@@ -72,9 +73,16 @@ export interface NodeNetwork {
   iface: string;
   mode: string; // in | out | both | max
   quota_bytes: number | null;
-  cycle_days: number | null;
-  anchor_at: number | null;
-  tz: string;
+}
+
+export interface NodeTrafficCycle {
+  cycle_type: 'none' | 'month' | 'year';
+  next_reset_at: number | null;
+}
+
+export interface NodeInterface {
+  name: string;
+  default: boolean;
 }
 
 export interface NodeBilling {
@@ -100,6 +108,8 @@ export interface NodeDetailData {
   online_now: boolean;
   singbox?: SingboxInfo | null;
   network?: NodeNetwork | null;
+  traffic_cycle?: NodeTrafficCycle | null;
+  interfaces?: NodeInterface[];
   billing?: NodeBilling | null;
   latency_targets?: LatencyTarget[];
 }

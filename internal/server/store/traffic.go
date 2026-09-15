@@ -9,20 +9,22 @@ import (
 // --- node_network / node_billing (design §8.3, §0.14/15) ---
 
 type NodeNetwork struct {
-	NodeID     string `json:"node_id"`
-	Iface      string `json:"iface"`
-	Mode       string `json:"mode"`        // in|out|both|max
-	QuotaBytes *int64 `json:"quota_bytes"` // nil = no quota
-	CycleDays  *int64 `json:"cycle_days"`
-	AnchorAt   *int64 `json:"anchor_at"`
-	TZ         string `json:"tz"`
+	NodeID      string `json:"node_id"`
+	Iface       string `json:"iface"`
+	Mode        string `json:"mode"`        // in|out|both|max
+	QuotaBytes  *int64 `json:"quota_bytes"` // nil = no quota
+	CycleType   string `json:"cycle_type"`  // none|month|year
+	NextResetAt *int64 `json:"next_reset_at"`
+	TZ          string `json:"tz"`
 }
 
 func (s *Store) GetNodeNetwork(nodeID string) (*NodeNetwork, error) {
 	n := &NodeNetwork{NodeID: nodeID}
 	err := s.db.QueryRow(
-		`SELECT iface, mode, quota_bytes, cycle_days, anchor_at, tz FROM node_network WHERE node_id = ?`, nodeID,
-	).Scan(&n.Iface, &n.Mode, &n.QuotaBytes, &n.CycleDays, &n.AnchorAt, &n.TZ)
+		`SELECT nn.iface, nn.mode, nn.quota_bytes, nn.cycle_type, nn.next_reset_at,
+		        COALESCE(NULLIF(n.tz, ''), 'UTC')
+		 FROM node_network nn JOIN nodes n ON n.id = nn.node_id WHERE nn.node_id = ?`, nodeID,
+	).Scan(&n.Iface, &n.Mode, &n.QuotaBytes, &n.CycleType, &n.NextResetAt, &n.TZ)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -35,17 +37,81 @@ func (s *Store) GetNodeNetwork(nodeID string) (*NodeNetwork, error) {
 // UpsertNodeNetwork creates the row with defaults if missing.
 func (s *Store) UpsertNodeNetwork(n *NodeNetwork) error {
 	_, err := s.db.Exec(
-		`INSERT INTO node_network (node_id, iface, mode, quota_bytes, cycle_days, anchor_at, tz)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO node_network (node_id, iface, mode, quota_bytes, cycle_type, next_reset_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(node_id) DO UPDATE SET
 		   iface = excluded.iface, mode = excluded.mode, quota_bytes = excluded.quota_bytes,
-		   cycle_days = excluded.cycle_days, anchor_at = excluded.anchor_at, tz = excluded.tz`,
-		n.NodeID, n.Iface, n.Mode, n.QuotaBytes, n.CycleDays, n.AnchorAt, n.TZ,
+		   cycle_type = excluded.cycle_type, next_reset_at = excluded.next_reset_at`,
+		n.NodeID, n.Iface, n.Mode, n.QuotaBytes, n.CycleType, n.NextResetAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert node_network: %w", err)
 	}
 	return nil
+}
+
+type NodeInterface struct {
+	Name      string `json:"name"`
+	IsDefault bool   `json:"default"`
+}
+
+// ReplaceNodeInterfaces stores the complete interface inventory reported by a
+// probe. It is a snapshot, just like the node IP inventory.
+func (s *Store) ReplaceNodeInterfaces(nodeID string, interfaces []NodeInterface) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin replace node interfaces: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM node_interfaces WHERE node_id = ?`, nodeID); err != nil {
+		return fmt.Errorf("delete node interfaces: %w", err)
+	}
+	for _, iface := range interfaces {
+		if iface.Name == "" {
+			continue
+		}
+		isDefault := 0
+		if iface.IsDefault {
+			isDefault = 1
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO node_interfaces (node_id, name, is_default, updated_at) VALUES (?, ?, ?, ?)`,
+			nodeID,
+			iface.Name,
+			isDefault,
+			now(),
+		); err != nil {
+			return fmt.Errorf("insert node interface: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit node interfaces: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListNodeInterfaces(nodeID string) ([]NodeInterface, error) {
+	rows, err := s.db.Query(
+		`SELECT name, is_default FROM node_interfaces WHERE node_id = ? ORDER BY is_default DESC, name`, nodeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list node interfaces: %w", err)
+	}
+	defer rows.Close()
+	out := []NodeInterface{}
+	for rows.Next() {
+		var iface NodeInterface
+		var isDefault int
+		if err := rows.Scan(&iface.Name, &isDefault); err != nil {
+			return nil, fmt.Errorf("scan node interface: %w", err)
+		}
+		iface.IsDefault = isDefault != 0
+		out = append(out, iface)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate node interfaces: %w", err)
+	}
+	return out, nil
 }
 
 type NodeBilling struct {

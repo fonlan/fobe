@@ -22,7 +22,7 @@ func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 		h.log.Warn("touch node", "node", c.nodeID, "err", err)
 	}
 	if err := h.store.UpdateNodeInfo(c.nodeID, hello.OS, hello.Arch, hello.Kernel,
-		hello.Hostname, hello.TZ, hello.CPUCores); err != nil {
+		hello.Hostname, agentTZ(hello.TZ), hello.CPUCores); err != nil {
 		h.log.Warn("update node info", "node", c.nodeID, "err", err)
 	}
 	caps, _ := json.Marshal(hello.Caps)
@@ -54,8 +54,20 @@ func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 			}
 		}
 	}
+	h.replaceInterfaces(c.nodeID, hello.Interfaces)
 	_ = h.store.RecoverAlert("node_offline", c.nodeID)
 	h.log.Debug("node hello", "node", c.nodeID, "version", hello.Version)
+}
+
+func agentTZ(tz string) string {
+	tz = strings.TrimSpace(tz)
+	if tz == "" {
+		return "UTC"
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return "UTC"
+	}
+	return tz
 }
 
 func (h *Hub) onMetrics(nodeID string, ts int64, m *protocol.Metrics) {
@@ -100,13 +112,16 @@ func (h *Hub) onTraffic(nodeID string, ts int64, t *protocol.Traffic) {
 		// early here (the previous behaviour) left traffic_counters and
 		// traffic_daily permanently empty — the daily-traffic chart and the
 		// card's "today" numbers had no data at all.
-		net = &store.NodeNetwork{NodeID: nodeID, Iface: t.Iface, Mode: quota.ModeBoth, TZ: "UTC"}
+		net = &store.NodeNetwork{NodeID: nodeID, Iface: t.Iface, Mode: quota.ModeBoth, CycleType: "none", TZ: "UTC"}
 		if n, err := h.store.GetNode(nodeID); err == nil && n.TZ != "" {
 			net.TZ = n.TZ // daily buckets follow the probe's clock (§8.2.3)
 		}
 	} else if err != nil {
 		h.log.Warn("get node network", "node", nodeID, "err", err)
 		return
+	}
+	if net.Iface == "" {
+		net.Iface = t.Iface // automatic mode follows the agent-detected default
 	}
 	if t.Iface != "" && t.Iface != net.Iface {
 		return // report for an interface the panel doesn't track
@@ -122,7 +137,7 @@ func (h *Hub) accumulate(nodeID string, net *store.NodeNetwork, ts int64, direct
 		_ = h.store.UpsertTrafficCounter(&store.TrafficCounter{
 			NodeID: nodeID, Iface: net.Iface, Direction: direction,
 			LastRaw: raw, LastTS: ts,
-			PeriodStart: quota.PeriodStart(net.AnchorAt, net.CycleDays, net.TZ, time.Unix(ts, 0)),
+			PeriodStart: quota.PeriodStart(net.CycleType, net.NextResetAt, net.TZ, time.Unix(ts, 0)),
 		})
 		return
 	}
@@ -137,7 +152,7 @@ func (h *Hub) accumulate(nodeID string, net *store.NodeNetwork, ts int64, direct
 	counter := &store.TrafficCounter{
 		NodeID: nodeID, Iface: net.Iface, Direction: direction,
 		LastRaw: raw, LastTS: ts,
-		PeriodStart: quota.PeriodStart(net.AnchorAt, net.CycleDays, net.TZ, time.Unix(ts, 0)),
+		PeriodStart: quota.PeriodStart(net.CycleType, net.NextResetAt, net.TZ, time.Unix(ts, 0)),
 		PeriodUsed:  prev.PeriodUsed + delta,
 	}
 	// period rolled since the last report: restart the cache
@@ -220,8 +235,22 @@ func (h *Hub) onState(nodeID string, st *protocol.State) {
 			}
 		}
 	}
+	h.replaceInterfaces(nodeID, st.Interfaces)
 	if st.Singbox != nil {
 		h.recordSingboxState(nodeID, st.Singbox)
+	}
+}
+
+func (h *Hub) replaceInterfaces(nodeID string, interfaces []protocol.NetworkInterface) {
+	if interfaces == nil {
+		return // old agents omit this field; retain their last known inventory
+	}
+	rows := make([]store.NodeInterface, 0, len(interfaces))
+	for _, iface := range interfaces {
+		rows = append(rows, store.NodeInterface{Name: iface.Name, IsDefault: iface.Default})
+	}
+	if err := h.store.ReplaceNodeInterfaces(nodeID, rows); err != nil {
+		h.log.Warn("replace node interfaces", "node", nodeID, "err", err)
 	}
 }
 
@@ -351,6 +380,10 @@ func truncate(s string, n int) string {
 // buildDesiredState assembles the current desired state for a node (§7).
 func (h *Hub) buildDesiredState(nodeID string) protocol.DesiredState {
 	desired := protocol.DesiredState{}
+	if net, err := h.store.GetNodeNetwork(nodeID); err == nil {
+		iface := net.Iface
+		desired.TrafficIface = &iface
+	}
 	if sb, err := h.store.GetNodeSingbox(nodeID); err == nil && sb.DesiredVersion != "" {
 		desired.Singbox = &protocol.SingboxDesired{
 			Version: sb.DesiredVersion,
