@@ -94,6 +94,13 @@ func readDisks() []protocol.Disk {
 			continue
 		}
 		seen[mp] = true
+		// §8.1 主分区:挂载点必须是目录。单文件 bind mount(/etc/hosts、
+		// /etc/resolv.conf、bind 进来的 agent 二进制)不是分区,底层还可能是
+		// FUSE/virtiofs 这种容量乱报的文件系统——实测一个 bind 进来的文件报出
+		// 254 TB,直接把服务端"取最大"的主分区选歪。
+		if info, err := os.Stat(mp); err != nil || !info.IsDir() {
+			continue
+		}
 		var st syscall.Statfs_t
 		if err := syscall.Statfs(mp, &st); err != nil {
 			continue
@@ -114,29 +121,14 @@ func readDisks() []protocol.Disk {
 	return out
 }
 
+// readMounts lists the mount points worth statfs'ing. The parsing/pseudo-fs
+// policy lives in collect.go: it is portable, so it can be unit-tested on a dev
+// machine (no /proc/mounts there).
 func readMounts() []string {
 	f, err := os.Open("/proc/mounts")
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
-	skipFS := map[string]bool{
-		"proc": true, "sysfs": true, "devtmpfs": true, "tmpfs": true,
-		"devpts": true, "mqueue": true, "cgroup": true, "cgroup2": true,
-		"squashfs": true, "overlay": true, "ramfs": true, "cgroupfs": true,
-	}
-	out := []string{}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		fields := strings.Fields(sc.Text())
-		if len(fields) < 3 {
-			continue
-		}
-		fstype, mp := fields[1], fields[2]
-		if skipFS[fstype] {
-			continue
-		}
-		out = append(out, mp)
-	}
-	return out
+	return parseMounts(f)
 }

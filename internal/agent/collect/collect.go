@@ -6,6 +6,7 @@ package collect
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -180,6 +181,51 @@ func readUptime() uint64 {
 	}
 	v, _ := strconv.ParseFloat(fields[0], 64)
 	return uint64(v)
+}
+
+// parseMounts extracts the mount points worth statfs'ing from /proc/mounts.
+//
+// The line format is "<source> <mountpoint> <fstype> <options> <dump> <pass>".
+// Reading fstype/mountpoint one field off (the original bug: fields[1] as the
+// fstype, fields[2] as the mount point) meant every statfs targeted another
+// mount's *fstype* as a relative path — i.e. a path that almost never exists —
+// so readDisks returned an empty list on every platform and the panel showed a
+// permanent 0% disk. The few paths that did resolve (a cwd-relative "proc")
+// were pseudo filesystems with total = 0 and got dropped on that check anyway.
+func parseMounts(r io.Reader) []string {
+	out := []string{}
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 3 {
+			continue
+		}
+		mp, fstype := fields[1], fields[2]
+		if skipFSType(fstype) {
+			continue
+		}
+		out = append(out, mp)
+	}
+	return out
+}
+
+// skipFSType reports filesystems that carry no capacity of their own, so the
+// §8.1 "main partition" pick can never land on a pseudo mount.
+//
+// "overlay" is deliberately NOT in this set. A container rootfs and an OpenWrt
+// root ("overlayfs:/overlay /") are both overlay mounts; skipping them left
+// probes with an empty disk list, and the server turns a missing disk into
+// disk_total=0 — the panel then showed a permanently empty disk tile/chart.
+// "squashfs" stays skipped because it is the read-only lower half of that very
+// overlay root: the overlay entry above it reports the real partition.
+func skipFSType(fstype string) bool {
+	return pseudoFSTypes[fstype]
+}
+
+var pseudoFSTypes = map[string]bool{
+	"proc": true, "sysfs": true, "devtmpfs": true, "tmpfs": true,
+	"devpts": true, "mqueue": true, "cgroup": true, "cgroup2": true,
+	"squashfs": true, "ramfs": true, "cgroupfs": true,
 }
 
 // BootID identifies the current boot for restart detection (§8.1).
