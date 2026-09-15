@@ -1,0 +1,25 @@
+/data/
+web/node_modules/
+web/dist/
+.env
+*.db
+*.db-wal
+*.db-shm
+/dist/
+/agent/
+/server
+fobe-agent
+fobe-server
+.DS_Store
+
+# Vite/TypeScript generated config outputs
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+
+# Local build products and ZCode workspace metadata
+agent
+agent.exe
+.zcode/
+.mem/
+.agents/

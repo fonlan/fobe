@@ -1,0 +1,364 @@
+package store
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+)
+
+// --- node_network / node_billing (design §8.3, §0.14/15) ---
+
+type NodeNetwork struct {
+	NodeID     string `json:"node_id"`
+	Iface      string `json:"iface"`
+	Mode       string `json:"mode"`        // in|out|both|max
+	QuotaBytes *int64 `json:"quota_bytes"` // nil = no quota
+	CycleDays  *int64 `json:"cycle_days"`
+	AnchorAt   *int64 `json:"anchor_at"`
+	TZ         string `json:"tz"`
+}
+
+func (s *Store) GetNodeNetwork(nodeID string) (*NodeNetwork, error) {
+	n := &NodeNetwork{NodeID: nodeID}
+	err := s.db.QueryRow(
+		`SELECT iface, mode, quota_bytes, cycle_days, anchor_at, tz FROM node_network WHERE node_id = ?`, nodeID,
+	).Scan(&n.Iface, &n.Mode, &n.QuotaBytes, &n.CycleDays, &n.AnchorAt, &n.TZ)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get node_network: %w", err)
+	}
+	return n, nil
+}
+
+// UpsertNodeNetwork creates the row with defaults if missing.
+func (s *Store) UpsertNodeNetwork(n *NodeNetwork) error {
+	_, err := s.db.Exec(
+		`INSERT INTO node_network (node_id, iface, mode, quota_bytes, cycle_days, anchor_at, tz)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(node_id) DO UPDATE SET
+		   iface = excluded.iface, mode = excluded.mode, quota_bytes = excluded.quota_bytes,
+		   cycle_days = excluded.cycle_days, anchor_at = excluded.anchor_at, tz = excluded.tz`,
+		n.NodeID, n.Iface, n.Mode, n.QuotaBytes, n.CycleDays, n.AnchorAt, n.TZ,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert node_network: %w", err)
+	}
+	return nil
+}
+
+type NodeBilling struct {
+	NodeID    string
+	CycleType string
+	CycleDays *int64
+	NextDueAt *int64
+	Note      string
+}
+
+func (s *Store) GetNodeBilling(nodeID string) (*NodeBilling, error) {
+	b := &NodeBilling{NodeID: nodeID}
+	err := s.db.QueryRow(
+		`SELECT cycle_type, cycle_days, next_due_at, note FROM node_billing WHERE node_id = ?`, nodeID,
+	).Scan(&b.CycleType, &b.CycleDays, &b.NextDueAt, &b.Note)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return b, err
+}
+
+func (s *Store) UpsertNodeBilling(b *NodeBilling) error {
+	_, err := s.db.Exec(
+		`INSERT INTO node_billing (node_id, cycle_type, cycle_days, next_due_at, note)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(node_id) DO UPDATE SET
+		   cycle_type = excluded.cycle_type, cycle_days = excluded.cycle_days,
+		   next_due_at = excluded.next_due_at, note = excluded.note`,
+		b.NodeID, b.CycleType, b.CycleDays, b.NextDueAt, b.Note,
+	)
+	return err
+}
+
+// --- traffic counters & daily rollup (design §8.2) ---
+
+type TrafficCounter struct {
+	NodeID      string
+	Iface       string
+	Direction   string // rx|tx
+	LastRaw     int64
+	LastTS      int64
+	PeriodStart int64
+	PeriodUsed  int64
+}
+
+func (s *Store) GetTrafficCounter(nodeID, iface, direction string) (*TrafficCounter, error) {
+	c := &TrafficCounter{NodeID: nodeID, Iface: iface, Direction: direction}
+	err := s.db.QueryRow(
+		`SELECT last_raw, last_ts, period_start, period_used FROM traffic_counters
+		 WHERE node_id = ? AND iface = ? AND direction = ?`, nodeID, iface, direction,
+	).Scan(&c.LastRaw, &c.LastTS, &c.PeriodStart, &c.PeriodUsed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return c, err
+}
+
+// UpsertTrafficCounter writes the new baseline after reset detection.
+func (s *Store) UpsertTrafficCounter(c *TrafficCounter) error {
+	_, err := s.db.Exec(
+		`INSERT INTO traffic_counters (node_id, iface, direction, last_raw, last_ts, period_start, period_used)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(node_id, iface, direction) DO UPDATE SET
+		   last_raw = excluded.last_raw, last_ts = excluded.last_ts,
+		   period_start = excluded.period_start, period_used = excluded.period_used`,
+		c.NodeID, c.Iface, c.Direction, c.LastRaw, c.LastTS, c.PeriodStart, c.PeriodUsed,
+	)
+	return err
+}
+
+// AddTrafficDaily adds delta bytes to the node's day bucket (date in node tz).
+func (s *Store) AddTrafficDaily(nodeID, date string, rxDelta, txDelta int64) error {
+	_, err := s.db.Exec(
+		`INSERT INTO traffic_daily (node_id, date, rx_bytes, tx_bytes) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(node_id, date) DO UPDATE SET
+		   rx_bytes = rx_bytes + excluded.rx_bytes, tx_bytes = tx_bytes + excluded.tx_bytes`,
+		nodeID, date, rxDelta, txDelta,
+	)
+	return err
+}
+
+func (s *Store) SumTrafficSince(nodeID, sinceDate string) (rx, tx int64, err error) {
+	err = s.db.QueryRow(
+		`SELECT COALESCE(SUM(rx_bytes),0), COALESCE(SUM(tx_bytes),0)
+		 FROM traffic_daily WHERE node_id = ? AND date >= ?`, nodeID, sinceDate,
+	).Scan(&rx, &tx)
+	return
+}
+
+type TrafficDay struct {
+	Date    string `json:"date"`
+	RxBytes int64  `json:"rx_bytes"`
+	TxBytes int64  `json:"tx_bytes"`
+}
+
+func (s *Store) ListTrafficDaily(nodeID, fromDate string) ([]TrafficDay, error) {
+	rows, err := s.db.Query(
+		`SELECT date, rx_bytes, tx_bytes FROM traffic_daily WHERE node_id = ? AND date >= ? ORDER BY date`,
+		nodeID, fromDate,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TrafficDay{}
+	for rows.Next() {
+		var d TrafficDay
+		if err := rows.Scan(&d.Date, &d.RxBytes, &d.TxBytes); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// --- metrics_samples (7d retention, design §16.4) ---
+
+type MetricsSample struct {
+	TS        int64   `json:"ts"`
+	CPU       float64 `json:"cpu"`
+	MemUsed   int64   `json:"mem_used"`
+	MemTotal  int64   `json:"mem_total"`
+	DiskUsed  int64   `json:"disk_used"`
+	DiskTotal int64   `json:"disk_total"`
+	NetRxRate float64 `json:"net_rx_rate"`
+	NetTxRate float64 `json:"net_tx_rate"`
+	Load1     float64 `json:"load1"`
+	Uptime    int64   `json:"uptime"`
+}
+
+func (s *Store) InsertMetricsSample(nodeID string, m *MetricsSample) error {
+	_, err := s.db.Exec(
+		`INSERT INTO metrics_samples
+		 (node_id, ts, cpu, mem_used, mem_total, disk_used, disk_total, net_rx_rate, net_tx_rate, load1, uptime)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		nodeID, m.TS, m.CPU, m.MemUsed, m.MemTotal, m.DiskUsed, m.DiskTotal,
+		m.NetRxRate, m.NetTxRate, m.Load1, m.Uptime,
+	)
+	return err
+}
+
+func (s *Store) ListMetrics(nodeID string, fromTS int64) ([]MetricsSample, error) {
+	rows, err := s.db.Query(
+		`SELECT ts, cpu, mem_used, mem_total, disk_used, disk_total, net_rx_rate, net_tx_rate, load1, uptime
+		 FROM metrics_samples WHERE node_id = ? AND ts >= ? ORDER BY ts`, nodeID, fromTS,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MetricsSample{}
+	for rows.Next() {
+		var m MetricsSample
+		if err := rows.Scan(&m.TS, &m.CPU, &m.MemUsed, &m.MemTotal, &m.DiskUsed, &m.DiskTotal,
+			&m.NetRxRate, &m.NetTxRate, &m.Load1, &m.Uptime); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) LatestMetrics(nodeID string) (*MetricsSample, error) {
+	m := &MetricsSample{}
+	err := s.db.QueryRow(
+		`SELECT ts, cpu, mem_used, mem_total, disk_used, disk_total, net_rx_rate, net_tx_rate, load1, uptime
+		 FROM metrics_samples WHERE node_id = ? ORDER BY ts DESC LIMIT 1`, nodeID,
+	).Scan(&m.TS, &m.CPU, &m.MemUsed, &m.MemTotal, &m.DiskUsed, &m.DiskTotal,
+		&m.NetRxRate, &m.NetTxRate, &m.Load1, &m.Uptime)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return m, err
+}
+
+// PruneOlderThan deletes retention-expired rows, returns rows removed.
+func (s *Store) PruneOlderThan(table string, cutoffTS int64) (int64, error) {
+	// table names come only from our own scheduler; still validated here.
+	allowed := map[string]bool{"metrics_samples": true, "latency_samples": true}
+	if !allowed[table] {
+		return 0, fmt.Errorf("table %q is not prunable", table)
+	}
+	res, err := s.db.Exec(fmt.Sprintf(`DELETE FROM %s WHERE ts < ?`, table), cutoffTS)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// --- latency (design §13) ---
+
+type LatencyTarget struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+func (s *Store) CreateLatencyTarget(name, kind, host string, port int) (int64, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO latency_targets (name, kind, host, port, created_at) VALUES (?, ?, ?, ?, ?)`,
+		name, kind, host, port, now(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *Store) DeleteLatencyTarget(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM latency_targets WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) ListLatencyTargets() ([]LatencyTarget, error) {
+	rows, err := s.db.Query(`SELECT id, name, kind, host, port FROM latency_targets ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []LatencyTarget{}
+	for rows.Next() {
+		var t LatencyTarget
+		if err := rows.Scan(&t.ID, &t.Name, &t.Kind, &t.Host, &t.Port); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetNodeLatencyTargets(nodeID string, targetIDs []int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM node_latency_targets WHERE node_id = ?`, nodeID); err != nil {
+		return err
+	}
+	for _, id := range targetIDs {
+		if _, err := tx.Exec(
+			`INSERT INTO node_latency_targets (node_id, target_id) VALUES (?, ?)`, nodeID, id,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// TargetsForNode returns the enabled target specs for a node.
+func (s *Store) TargetsForNode(nodeID string) ([]LatencyTarget, error) {
+	rows, err := s.db.Query(
+		`SELECT t.id, t.name, t.kind, t.host, t.port FROM latency_targets t
+		 JOIN node_latency_targets n ON n.target_id = t.id WHERE n.node_id = ? ORDER BY t.id`, nodeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []LatencyTarget{}
+	for rows.Next() {
+		var t LatencyTarget
+		if err := rows.Scan(&t.ID, &t.Name, &t.Kind, &t.Host, &t.Port); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) InsertLatencySamples(nodeID string, samples []LatencySampleRow) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, sm := range samples {
+		if _, err := tx.Exec(
+			`INSERT INTO latency_samples (node_id, target_id, ts, icmp_ms, tcp_ms, loss) VALUES (?, ?, ?, ?, ?, ?)`,
+			nodeID, sm.TargetID, sm.TS, sm.ICMPMs, sm.TCPMs, sm.Loss,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+type LatencySampleRow struct {
+	TargetID int64
+	TS       int64
+	ICMPMs   float64
+	TCPMs    float64
+	Loss     float64
+}
+
+func (s *Store) ListLatency(nodeID string, targetID int64, fromTS int64) ([]LatencySampleRow, error) {
+	rows, err := s.db.Query(
+		`SELECT target_id, ts, icmp_ms, tcp_ms, loss FROM latency_samples
+		 WHERE node_id = ? AND target_id = ? AND ts >= ? ORDER BY ts`, nodeID, targetID, fromTS,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []LatencySampleRow{}
+	for rows.Next() {
+		var r LatencySampleRow
+		if err := rows.Scan(&r.TargetID, &r.TS, &r.ICMPMs, &r.TCPMs, &r.Loss); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

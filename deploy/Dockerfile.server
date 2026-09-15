@@ -1,0 +1,48 @@
+# fobe production image (design.md §17): three build stages —
+#   1. node:    compile the React frontend into web/dist
+#   2. golang:  build fobe-server + fobe-agent (linux/amd64, CGO off)
+#   3. runtime: server binary + /srv/web + /srv/dl + install script template
+# No nginx inside: TLS and reverse proxying are the operator's external job.
+
+FROM node:22-alpine AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json* ./
+RUN npm ci || npm install
+COPY web/ ./
+RUN npm run build
+
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+RUN apk add --no-cache git
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ cmd/
+COPY internal/ internal/
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags "-X main.version=$VERSION" -o /out/fobe-server ./cmd/server \
+ && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+      -ldflags "-s -w -X github.com/fobe-panel/fobe/internal/agent.Version=$VERSION" \
+      -o /out/dl/agent/$VERSION/linux-amd64 ./cmd/agent \
+ && sha256sum /out/dl/agent/$VERSION/linux-amd64 | awk '{print $1}' > /out/dl/agent/$VERSION/linux-amd64.sha256 \
+ && printf '{"version":"%s","artifacts":[{"os":"linux","arch":"amd64","file":"linux-amd64"}]}\n' "$VERSION" \
+      > /out/dl/agent/$VERSION/manifest.json \
+ && mkdir -p /out/dl/agent/latest \
+ && ln -sf ../$VERSION/linux-amd64 /out/dl/agent/latest/linux-amd64 \
+ && ln -sf ../$VERSION/linux-amd64.sha256 /out/dl/agent/latest/linux-amd64.sha256 \
+ && ln -sf ../$VERSION/manifest.json /out/dl/agent/latest/manifest.json
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+COPY --from=build /out/fobe-server /usr/local/bin/fobe-server
+COPY --from=build /out/dl/ /srv/dl/
+COPY --from=web /src/web/dist/ /srv/web/
+COPY scripts/install.sh.tmpl /srv/install.sh.tmpl
+
+ENV FOBE_DB=/data/fobe.db \
+    FOBE_WEB_DIR=/srv/web \
+    FOBE_DL_DIR=/srv/dl \
+    FOBE_LISTEN=0.0.0.0:8080 \
+    FOBE_BACKUP_DIR=/backup
+EXPOSE 8080
+VOLUME ["/data", "/backup"]
+ENTRYPOINT ["/usr/local/bin/fobe-server"]

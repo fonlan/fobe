@@ -1,0 +1,577 @@
+# fobe — 探针面板设计方案 v1
+
+> 单用户、单端口、Docker Compose 自托管的多探针管理面板：集成 sing-box 服务端生命周期、流量与硬件监控、延迟测量、Web 终端、AI 助手、订阅输出。
+>
+> **接入层不在本仓库范围内**：反向代理、TLS 终止与证书签发/续期由你自备的 nginx 完成，fobe 只监听一个普通 HTTP 端口。nginx 该怎么配见 `README.md`。
+>
+> 本文档由 `/grill-me` 四轮盘问收敛而成，**每条决定后面都标了它绑定的代价**。标 ⚠ 的是已接受但仍需你知道的风险。
+
+---
+
+## 0. 关键决策速览
+
+| # | 决策 | 选择 | 绑定的代价 |
+|---|---|---|---|
+| 1 | 产品闭环 | 面板输出订阅 `/sub/<token>`，sing-box + Clash 双格式 | 需要订阅渲染 + token 生命周期 |
+| 2 | 网络通道 | 外部 nginx 单端口接入，全路径转单一上游；agent 走 WSS | 你必须自备 nginx + 真证书；探针必须能解析面板域名 |
+| 3 | 流量口径 | 整机网卡 `/proc/net/dev`，面板选定网卡（默认默认路由出口） | 配额含系统更新与其他服务流量；需计数器回绕/重启检测 |
+| 4 | 使用率语义 | 分母 = 周期配额；4 模式决定取哪个方向 | 每节点必须落库：配额值、锚点、时区 |
+| 5 | Web 终端 | SSH 到探针（凭据面板托管），可回退 agent 本地 PTY | 凭据托管在单密码面板里 |
+| 6 | 平台 | x86 Linux + x86 OpenWrt（v1 硬需求） | procd/init.d、musl 静态、flash 写最小化 |
+| 7 | 到期/超量 | 只提醒，不自动停服 | 需要告警通道，且没有自动止损 |
+| 8 | AI 模型 | OpenAI 兼容 API，自填 base_url + key，服务端加密存储 | key 在服务端；服务端需能出网 |
+| 9 | AI 执行权 ⚠ | **默认放行**：AI 自评有风险才弹确认 | 见 §12，间接提示注入可静默拿到探针 root |
+| 10 | 构建形态 | server / agent 分开编译；前端**不嵌入 Go 二进制**但**编进生产镜像**；agent 产物进服务端镜像 | 共享 protocol 模块 + 产物分发链路；镜像构建多一个前端 stage |
+| 11 | 数据库 | SQLite（WAL），文件挂载在容器外 | 单写者；指标靠保留期控盘 |
+| 12 | 订阅模型 | 单用户 + 多订阅，每订阅独立节点集与模板文件 | 模板管理 + 双格式引擎 |
+| 13 | 探针凭据 | 一个入站 + 一个**全局共享** anytls 密码 | 无法按订阅吊销代理访问，只能全局轮换 |
+| 14 | 重置锚点 | 循环锚点，填一次自动滚动；缺省继承缴费锚点 | 需处理月末边界与时区 |
+| 15 | 缴费周期 | 周期类型 + 下次到期日，手动改；**无续费按钮、无历史** | 查不到"上期什么时候交的" |
+| 16 | 指标保留 | 明细只存 7 天；另存永久「按天流量」表 | 7 天以外的曲线不可得（月曲线靠日表） |
+| 17 | 延迟测量 | 探针**主动**测面板配置的目标；5s 本地测、60s 批量上报；ICMP + TCP 握手两种 | 拿不到"用户→探针"的真实延迟 |
+| 18 | 登录加固 | 失败 3 次拉黑 IP（持久化）+ CLI 解封；**不做 2FA** | 黑名单依赖 XFF 信任链；无第二因子 |
+| 19 | 告警 | Telegram Bot + 通用 Webhook | 没装 Telegram 就收不到 |
+| 20 | 接入层 | **不在 fobe 内实现**：外部 nginx 提供 TLS 与反代，证书自备自管 | fobe 不碰证书；你必须让 nginx 传对 XFF 与 Upgrade 头（见 §3 与 README） |
+
+---
+
+## 1. 范围
+
+**v1 做**：单用户面板；探针注册与心跳；硬件/网络指标；流量配额与四种口径；缴费与重置周期；sing-box 安装/更新/回滚/启停；anytls 自签证书服务端；订阅渲染（sing-box / Clash 模板）；Web 终端；延迟测量；IP 与国旗；Telegram/Webhook 告警；中英双语；明暗主题；AI 助手；**外部接入文档（README 给出可直接复制的 nginx 配置）**。
+
+**v1 不做**：**反向代理与证书签发/续期（由你自备的外部 nginx 负责，fobe 内不含任何反代组件）**；多用户与权限体系；在线支付；到期自动停服；TOTP；非 x86 架构；除 anytls 以外的协议；探针集群编排；Prometheus 导出。
+
+---
+
+## 2. 系统架构
+
+```
+        外部 nginx（不在本仓库，你自备；配置见 README.md）
+                 ┌──────────────── 公网 :443（唯一暴露端口）────────────────┐
+  浏览器 ────────►│ TLS 终止 + 证书签发续期（你自己管）                       │
+                 │ location / → 单一上游 http://127.0.0.1:8080（原样透传）   │
+                 └───────────────────────────────┬───────────────────────────┘
+                                                 │
+                                        ┌────────▼─────────┐
+                                        │  server (Go)     │  SQLite(WAL) 挂载在 /data
+                                        │  ├ /api  /ws/*   │  AI key / SSH 凭据 AES-GCM 加密
+                                        │  ├ /sub /install │
+                                        │  ├ /dl → /srv/dl │  agent 与 sing-box 产物直出
+                                        │  ├ /   → /srv/web│  前端 dist（镜像内直出）
+                                        │  + scheduler     │
+                                        │  + CLI admin     │
+                                        └────────┬─────────┘
+                                                 │ WSS（探针主动外连，无需开放入站）
+        ┌────────────────────────────────────────┼───────────────────────────────────┐
+        │                                        │                                   │
+   ┌────▼─────┐                            ┌─────▼────┐                        ┌─────▼────┐
+   │ probe A  │                            │ probe B  │                        │ probe C  │
+   │ fobe-agent (root)                      │ ...      │                        │ x86 OpenWrt │
+   │ ├ 指标采集 /proc                        └──────────┘                        └──────────┘
+   │ ├ sing-box 生命周期 + 健康闸门
+   │ ├ 自签证书生成（私钥不出探针）
+   │ ├ 延迟测量（ICMP / TCP）
+   │ └ SSH 客户端 + 本地 PTY
+   └──────────┘
+```
+
+要点：
+
+- **探针永不监听控制端口**，只主动外连面板 → 不需要在探针上开管理端口，NAT 后面也能用。
+- **单端口**：所有控制面流量都是普通 HTTPS/WSS 的路径，外部 nginx 只需一个 `location /` 透传，不需要 stream 模块做协议嗅探。
+- **server 只绑定回环端口**（`127.0.0.1:8080`），对外唯一入口是你自备的 nginx；fobe 仓库内不含任何反代组件，也不生成/管理证书。
+- 前端编译产物**在镜像构建阶段打进镜像**（`/srv/web`）由 **server 直出**（不嵌入 Go 二进制，避免体积膨胀；也不做宿主机挂载）。
+
+---
+
+## 3. 接入层（外部 nginx，不在本仓库范围内）
+
+fobe **不实现**反向代理，也**不做**证书签发与续期。它只做一件事：监听一个普通 HTTP 端口（默认 `8080`），把上面列出的全部路径都当作自己的职责——静态前端、订阅、产物下载、WebSocket 全由 server 自己处理。
+
+**外部 nginx 必须满足的四件事**（完整可复制配置与逐条解释见 `README.md`）：
+
+1. **单端口承接**：一个 `server` 块（同一域名、同一 `443`）收下全部流量，`location /` 原样透传到 `http://127.0.0.1:8080`。路径不需要任何分发规则。
+2. **WebSocket 升级**：`proxy_http_version 1.1` + `Upgrade`/`Connection` 头 + `proxy_read_timeout 3600s`。少任何一条，探针长连接或浏览器终端就连不上（表现是登录正常、节点永远离线）。
+3. **真实 IP 传递**：`Host` / `X-Real-IP` / `X-Forwarded-For` / `X-Forwarded-Proto`。传错的话，黑名单会封错对象，安装命令与订阅里生成的域名也会错。
+4. **体量与缓存**：`client_max_body_size` 放宽（模板上传），`/sub/` 关闭缓存（否则客户端换了订阅还是旧节点）。
+
+**信任链**：server 只信任 `FOBE_TRUSTED_PROXIES`（默认 `127.0.0.1/32,::1/128,172.16.0.0/12`）范围的上游所传的 `X-Forwarded-For`，并且只取最左侧地址；上游不在白名单内时**忽略 XFF，改用 socket 源地址**。若你日后在前面再叠一层 CDN/反代（Cloudflare 等），必须把它的回源网段加进来。
+
+**替代做法（可选）**：若你想让 nginx 直接吐静态文件，需自己产出前端文件（`cd web && npm run build`，或 `docker cp <容器>:/srv/web ./dist`），再把 `location /` 指向该目录，但**必须保留** `/api`、`/ws/`、`/sub/`、`/install.sh`、`/dl/` 转发到 server。默认推荐前者：配置最短，且不存在"静态文件与 API 走不同域名导致 Cookie/WS 跨域"的坑。
+
+---
+
+## 4. 认证与安全模型
+
+### 4.1 面板
+
+- 单用户，密码 `argon2id` 存库。
+- 会话：HttpOnly + Secure + SameSite=Lax Cookie，服务端存 session 表，可一键吊销全部。
+- **不做 2FA**（你的选择）。补偿：登录失败黑名单（见 4.3）+ 强制 HTTPS + 绑域名。
+- CLI 逃生口（进容器执行，不依赖 Web）：
+  - `fobe-server admin unblock <ip|all>` 解封
+  - `fobe-server admin reset-password`
+  - `fobe-server admin list-sessions --revoke`
+  - `fobe-server admin kill-switch on|off`（冻结所有 AI 执行）
+
+### 4.2 探针凭证
+
+- **服务端访问网址**：设置项 `server.public_url`，由用户填写探针可达的完整 `http(s)` 地址；添加节点生成的安装命令和 `/install.sh` 默认值优先使用它，未配置时才回退当前请求的 `Host`。
+- **注册 token**：面板添加节点时生成，**节点名称必填**、单次有效、TTL 30 分钟；token 绑定节点名称与可选备注，探针注册后名称写入 `nodes.name`。
+- 安装脚本用注册 token 调 `POST /api/agent/register`，服务端返回 `node_id` + `node_secret`（只此一次明文下发，服务端只存 hash）。
+- 之后 agent 用 `node_id + node_secret` 建立 WSS，服务端按 `machine_id` 去重：
+  - 已有同一 `machine_id` 且凭证校验通过 → **复用节点**，更新 IP/版本，不产生垃圾节点；
+  - 已存在但凭证不符 → 拒绝注册，面板显示"疑似重复安装"，由你手动选择接管。
+- agent 侧落盘：`/etc/fobe-agent/{config.json,machine-id}`（0600，root）。OpenWrt 上 `/etc` 是 overlay，重启保留。
+
+### 4.3 登录失败黑名单
+
+- 连续 3 次失败 → 拉黑该 IP；持久化到 SQLite（重启不丢）。
+- 真实 IP 来源：`FOBE_TRUSTED_PROXIES` 白名单内上游传来的 `X-Forwarded-For` 最左侧地址；上游不在白名单内 → **忽略 XFF，改用 socket 源地址**（防伪造头绕过或嫁祸）。
+- **防自锁**（三条硬规则）：
+  1. 回环与私有网段（含 Docker 网段、`X-Forwarded-For` 里的内网地址）**永不加黑**；
+  2. 上游代理地址与 `FOBE_TRUSTED_PROXIES` 网段永不加入黑名单；
+  3. 黑名单表带 `expires_at`，CLI 可无条件清空。
+- 面板提供"当前封禁列表 + 一键解封"页面，不逼你非进容器不可（CLI 是兜底）。
+
+### 4.4 密钥托管
+
+- 主密钥 `FOBE_MASTER_KEY`（32 字节，环境变量 / Docker secret）。用它 AES-GCM 加密：AI API Key、探针 SSH 凭据、Telegram Bot Token、订阅模板中的敏感段。
+- 未设置主密钥时，服务端**拒绝启动**并打印生成命令（不静默降级为明文）。
+- 所有审计写 `audit_logs`：谁、何时、对哪个节点、什么动作、命令原文、来源 IP。
+
+---
+
+## 5. 探针 agent
+
+### 5.1 形态
+
+- 单个静态二进制（`CGO_ENABLED=0`，`linux/amd64`，musl 兼容）——**OpenWrt 与常规发行版同一份产物**。
+- **不调用外部命令做采集**：CPU/内存/磁盘/网络全部读 `/proc`、`/sys`、`statfs`。原因：OpenWrt 是 busybox，字段与工具集都可能缺。
+- 需要 root（安装 systemd unit/procd 服务、写 `/etc`、ICMP raw socket）。缺少 `CAP_NET_RAW` 时 ICMP 降级为 TCP-only 并上报能力位。
+
+### 5.2 安装流程
+
+面板"添加节点" → 生成注册 token → 给出一条命令：
+
+```sh
+curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> --server https://panel.example.com
+```
+
+> 命令不带 `sudo`：脚本以当前用户运行，root 直接安装；非 root 且装有 sudo 时自动提权；两者都不满足时明确报错（多数纯净 VPS 的 root 用户没有 sudo）。
+
+`install.sh` 由 server 动态渲染（注入 server URL 与 token），脚本做：
+
+1. 探测架构（v1 只接受 `x86_64`，否则明确报错退出，不做半吊子兼容）；
+2. 从 `https://panel.example.com/dl/agent/<version>/linux-amd64` 下载二进制，**校验 sha256**（校验值由脚本内嵌，来自服务端版本清单）；
+3. 安装到 `/usr/local/bin/fobe-agent`（OpenWrt 用 `/usr/bin/fobe-agent`）；
+4. 写 `/etc/fobe-agent/config.json`；
+5. 注册 → 拿到 `node_id` + `node_secret` 落盘；
+6. 安装并启动系统服务；
+7. 立即上报一次完整信息（IP、系统、CPU 核数、版本）。
+
+### 5.3 服务管理抽象
+
+| 平台 | 检测 | 服务形态 |
+|---|---|---|
+| 常规 Linux | 存在 `/run/systemd/system` | systemd unit（`fobe-agent.service` / `fobe-singbox.service`） |
+| x86 OpenWrt | 存在 `/sbin/procd` 或 `/etc/rc.common` | `/etc/init.d/fobe-agent`、`/etc/init.d/sing-box`（procd，`USE_PROCD=1`） |
+| 兜底（容器/WSL） | 两者皆无 | 前台进程 + pidfile + 看门狗 |
+
+`sing-box` 的服务文件由 agent 自己写（面板只下发期望状态），这样才能保证不同平台一致。
+
+### 5.4 OpenWrt 专项
+
+- 二进制放 `/usr/bin`（overlay 持久），配置 `/etc/sing-box/config.json`，证书 `/etc/sing-box/cert/`。
+- **写放大控制**：指标与日志不落盘（内存环形缓冲），仅上报；错误日志按行数上限写 `/tmp`（tmpfs）。
+- 内存：agent 目标常驻 < 30MB；采集周期在低内存设备上可从 60s 放宽（面板可配）。
+- 首次运行检测 overlay 剩余空间，低于阈值时拒绝安装 sing-box 并给出提示（避免把路由器写满）。
+
+---
+
+## 6. 数据模型（SQLite，WAL）
+
+| 表 | 关键字段 | 说明 |
+|---|---|---|
+| `users` | id, password_hash | 单行 |
+| `sessions` | id, created_at, last_seen, ua, ip, revoked | 可批量吊销 |
+| `ip_blacklist` | ip, reason, fail_count, created_at, expires_at | 持久化 |
+| `settings` | key, value, encrypted | 全局 anytls 密码、AI 配置、Telegram、保留期等 |
+| `reg_tokens` | token_hash, note, expires_at, used_at | 单次 |
+| `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, cpu_cores, primary_ip, country_code, tz | 探针主表 |
+| `node_ips` | node_id, ip, family, scope, is_primary | 多 IP 全量上报 |
+| `node_network` | node_id, iface, mode(in/out/both/max), quota_bytes, cycle_days, anchor_at, tz | 流量口径与配额 |
+| `node_billing` | node_id, cycle_type, cycle_days, next_due_at, note | 缴费周期 |
+| `traffic_counters` | node_id, iface, direction, last_raw, last_ts, period_start, period_used | 回绕/重启检测 |
+| `traffic_daily` | node_id, date, rx_bytes, tx_bytes | **永久**，月曲线与配额靠它 |
+| `metrics_samples` | node_id, ts, cpu, mem_used, mem_total, disk_used, disk_total, net_rx_rate, net_tx_rate, uptime | 保留 7 天 |
+| `latency_targets` | id, name, kind(icmp/tcp), host, port | 面板配置的目标 |
+| `node_latency_targets` | node_id, target_id | 每探针选用的目标集 |
+| `latency_samples` | node_id, target_id, ts, icmp_ms, tcp_ms, loss | 保留 7 天 |
+| `subscriptions` | id, name, token_hash, format, template_id, enabled, ua_filter | 多订阅 |
+| `subscription_nodes` | subscription_id, node_id | |
+| `templates` | id, name, format(singbox/clash), content | 完整配置模板 |
+| `node_singbox` | node_id, version, desired_version, config_hash, status, last_error, rollback_version, cert_pem, cert_sha256, port | sing-box 期望/实际状态 |
+| `commands` | id, node_id, kind, payload, status, created_at, sent_at, finished_at, result | 指令队列 |
+| `audit_logs` | ts, actor, node_id, action, command, risk, source_ip, ai_session_id | |
+| `alerts` | id, kind, node_id, payload, created_at, delivered_at | |
+
+索引要点：`metrics_samples(node_id, ts)`、`latency_samples(node_id, target_id, ts)`、`traffic_daily(node_id, date)`。
+
+**保留策略**：定时任务每 10 分钟删除 `metrics_samples`/`latency_samples` 中超过 7 天的行，并 `PRAGMA incremental_vacuum`。
+
+---
+
+## 7. Agent ↔ Server 协议
+
+传输：单条 WSS（`/ws/agent`），JSON 信封，版本化：
+
+```json
+{ "v": 1, "type": "metrics", "id": "uuid", "ts": 1730000000, "payload": { } }
+```
+
+**核心设计：声明式期望状态（desired state）**。服务端只下发"我要什么"（sing-box 版本、配置、anytls 参数、延迟目标集、终端开关），agent 负责收敛并回报实际状态。好处：agent 离线重连后自动补齐，服务端不需要重放命令序列。
+
+| 方向 | type | 说明 |
+|---|---|---|
+| agent → server | `hello` | machine_id、版本、os/arch、能力位 |
+| | `metrics` | 60s 一次；面板打开详情页时服务端可请求 5s 实时流 |
+| | `traffic` | 60s 一次：选定网卡的累计计数 + 日增量 |
+| | `latency` | 60s 一次，批量（每目标 12 个 5s 采样点） |
+| | `state` | 节点信息、IP 列表、sing-box 实际状态 |
+| | `cmd_result` | 指令执行结果（stdout/stderr/exit code，截断） |
+| | `terminal` | 终端输出/关闭 |
+| server → agent | `hello_ack` | 期望状态全量下发 |
+| | `desired` | 增量下发期望状态（sing-box 版本/配置/端口/密码/证书要求） |
+| | `cmd` | 一次性命令（AI 执行、面板操作） |
+| | `terminal_open/input/resize/close` | 终端会话 |
+| | `probe_metrics` | 请求临时高频采集 5s |
+
+- 心跳：agent 每 15s 一次 `ping`（或空帧），服务端 90s 无心跳判定离线并告警。
+- 重连：指数退避 + 抖动（1s → 5min 上限）。
+- 离线指令：入队 `commands`，重连后下发；TTL 10 分钟，超时标记 `timeout` 并在面板显示（避免你三小时前点的"重启"突然生效）。
+- 所有指令带 `id`，agent 幂等执行（同 id 重复下达只执行一次）。
+
+---
+
+## 8. 指标采集与流量口径
+
+### 8.1 采集项
+
+| 指标 | 来源 |
+|---|---|
+| CPU 使用率 | `/proc/stat` 两次采样取差；核数 `/proc/cpuinfo` |
+| 负载 | `/proc/loadavg` |
+| 内存使用率 | `/proc/meminfo`：优先 `MemAvailable`，缺失时 `MemFree+Buffers+Cached`（OpenWrt 兼容） |
+| 交换 | `SwapTotal/SwapFree` |
+| 磁盘 | `statfs` 遍历挂载点，面板选主分区展示 |
+| 网络累计 | `/proc/net/dev`（选定网卡） |
+| 网络速率 | 累计值差分 / 时间差 |
+| 运行时长 | `/proc/uptime` |
+| 重启检测 | `/proc/sys/kernel/random/boot_id` + 累计计数回绕双重判定 |
+
+### 8.2 流量累计与重启处理
+
+1. 每次上报 `(last_raw_rx, last_raw_tx)`。
+2. `delta = now - last`；若 `delta < 0`（回绕/重启/网卡重置）→ 判定异常，取 `now` 为新基准，**不把负数计入**，并记一条 `counter_reset` 事件供你排查。
+3. `delta` 累加进 `traffic_daily`（按探针时区切日）与 `traffic_counters.period_used`。
+4. 周期用量 = 周期起点至今日表的和（日表是权威，`period_used` 只是缓存）。
+
+### 8.3 四种模式
+
+设周期内 `IN` = 入向累计（rx），`OUT` = 出向累计（tx），配额 = `quota_bytes`：
+
+| 模式 | 已用量 | 使用率 |
+|---|---|---|
+| `in` | IN | IN / quota |
+| `out` | OUT | OUT / quota |
+| `both` | IN + OUT | (IN+OUT) / quota |
+| `max` | max(IN, OUT) | max(IN,OUT) / quota |
+
+- 模式是**每台探针**独立配置；切换模式只影响计算与展示，原始数据始终两个方向都存。
+- 未设配额（`quota_bytes = NULL`）时，只显示累计用量与实时速率，不显示百分比。
+- 达到 80% / 100% 触发告警（阈值可配），**不自动停服**（你的选择）。
+
+---
+
+## 9. sing-box 生命周期与 anytls
+
+### 9.1 期望状态
+
+服务端为每个节点生成完整 `config.json`（inbound + log + 必要的出站），存 `config_hash`；面板改任何参数 → hash 变化 → 下发 → agent 应用。
+
+### 9.2 安装/更新三道闸门
+
+```
+下载 → sha256 校验 → 备份当前二进制为 .prev
+   ↓
+① config:  sing-box check -c config.json        （失败即中止，不动线上）
+   ↓
+② start:   写入新二进制 + 配置 → 启动服务
+   ↓
+③ verify:  30s 观察期：进程存活 && 入站端口 TCP 可连 && TLS 握手成功
+   ↓ 失败
+rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执行"
+```
+
+- 版本**必须显式指定**（面板展示可选版本，来自服务端 release 清单），不追 latest。
+- 产物来源：优先面板 `/dl/singbox/<version>/linux-amd64`（服务端缓存，规避国内拉 GitHub 的问题），失败回退官方地址。
+- agent 自更新走同一条链路（同样三道闸门 + 保留上一版）。
+- 每次变更写 `audit_logs`，并在面板节点页显示"当前版本 / 期望版本 / 上次操作结果"。
+
+### 9.3 anytls 与自签证书
+
+- **私钥永不离开探针**：首次启用时由 agent 用 Go 标准库 `crypto/x509` 现场生成自签证书（不依赖 openssl——OpenWrt 常常没有），存 `/etc/sing-box/cert/{cert.pem,key.pem}`（0600）。
+- agent 上报**证书 PEM + SHA256 指纹 + 有效期**给面板（不含私钥）。
+- 订阅渲染时把证书 PEM 写进客户端的 `tls.certificate` 字段做 **pinning**，而不是让客户端 `insecure: true`。这样自签也不会被中间人。
+- 入站口令 = `settings.anytls_password`（全局共享，见 §11.3 的取舍）。
+- 端口：默认随机高位端口（10000-60000），面板可改；改端口时 agent 尝试自动放行防火墙（ufw / firewalld / nft / OpenWrt fw4），失败则返回需要你手动执行的命令原文。
+
+### 9.4 sing-box 入站模板（生成物示意）
+
+```json
+{
+  "type": "anytls",
+  "tag": "anytls-in",
+  "listen": "::",
+  "listen_port": 23456,
+  "users": [{ "name": "default", "password": "<全局密码>" }],
+  "tls": {
+    "enabled": true,
+    "server_name": "www.bing.com",
+    "certificate_path": "/etc/sing-box/cert/cert.pem",
+    "key_path": "/etc/sing-box/cert/key.pem"
+  }
+}
+```
+
+---
+
+## 10. 订阅与模板
+
+- 路径：`/sub/<token>`；`token` 高熵随机，库中只存 hash。
+- 格式决策：`?format=singbox|clash` 显式指定；缺省按 UA 嗅探（`clash` / `sing-box` / `mihomo` / `surge`），嗅探失败默认 `singbox`。
+- 输出 = **模板渲染**：模板是每格式一份完整配置文件（Clash YAML / sing-box JSON），使用 `{{nodes}}`、`{{rules}}` 占位符；同一模板可被多个订阅复用。
+- **模板中禁止出现可手填的凭据**：节点数据统一由 `{{nodes}}` 注入，密码来自全局设置。这样"轮换密码"才不会漏改。
+- 面板功能：模板编辑器（含语法校验 + 预览渲染结果）、订阅的节点多选、UA 过滤、一键轮换 token、访问日志（时间/IP/UA）。
+- 节点渲染为 anytls outbound：`server`（探针主 IP 或你指定的域名）、`server_port`、`password`、`tls.certificate`（内嵌 PEM pinning）、`tls.server_name`。
+
+### 10.1 共享密码的取舍 ⚠
+
+所有订阅共用一个 anytls 密码 → **订阅 token 只能吊销 URL，吊销不了代理访问**。真泄密时的补救链路是：
+
+```
+面板「轮换代理密码」→ 更新 settings → 批量下发所有节点 desired state
+                    → agent 重载 sing-box（不断开现有连接，新连接用新密码）
+                    → 重新渲染所有订阅 → 客户端重新拉订阅
+```
+
+面板必须在轮换对话框里写明："此操作会要求所有客户端重新拉取订阅，旧密码立即失效"。建议也顺手实现"节点级密码覆盖"字段，方便你以后想隔离时不必重构数据模型（v1 UI 可以先不暴露）。
+
+---
+
+## 11. Web 终端
+
+- 前端 xterm.js ↔ `/ws/terminal?node=<id>` ↔ server 转发 ↔ agent。
+- **两种模式**（面板可切）：
+  1. **SSH 模式（默认）**：agent 内置 Go SSH 客户端连 `127.0.0.1:22`；凭据由面板托管（密码或私钥，加密存储），也支持"使用探针上已有的 root 密钥/免密"。
+  2. **本地 PTY 模式（回退）**：agent 直接用 `creack/pty` 起 shell。适用于禁密码登录的 VPS、dropbear 行为怪异的 OpenWrt、或 SSH 没起来时救急。
+- 会话初始化时记审计：操作者、节点、来源 IP、模式、开始/结束时间。
+- 终端与 AI 执行共用 agent 指令通道 → 审计口径统一。
+- v1 不做 PTY 全量录制（体积与隐私成本高），但保留 `session_id`，便于后续开启录制。
+
+---
+
+## 12. AI 助手
+
+### 12.1 形态
+
+- 服务端代理到 OpenAI 兼容 API：`base_url`、`api_key`（AES-GCM 加密存 `settings`）、`model` 均由面板配置；支持流式输出。
+- 上下文注入（默认）：节点列表、当前指标、流量与配额、延迟、sing-box 版本与状态、最近告警。
+- **默认不注入原始日志**：需要时由你在对话里显式打开"附带日志（最近 N 行）"开关。这既减少 token，也显著缩小注入面——**但不改变你选的默认放行语义**。
+
+### 12.2 工具集
+
+| 工具 | 类型 | 说明 |
+|---|---|---|
+| `list_nodes` / `get_metrics` / `get_traffic` / `get_latency` | 只读 | 结构化查询 |
+| `get_singbox_status` / `tail_logs` | 只读 | 需显式开关日志 |
+| `restart_singbox` / `stop_singbox` / `start_singbox` | 变更 | 走同一闸门 |
+| `install_singbox` / `update_singbox` | 变更 | 指定版本 |
+| `set_singbox_port` / `set_anytls_password` | 变更 | 影响面大 |
+| `run_shell` | 变更 | 裸 shell |
+
+### 12.3 执行策略（⚠ 你签下的风险）
+
+**你的选择：默认放行。** 即：
+
+- 模型返回的 tool_call **直接执行**；
+- 仅当**模型自己**把该动作标记为 risky 时，前端弹出确认框展示完整命令；
+- 确认框不提供"记住选择/不再询问"（不给攻击者一次性扩权到永久的机会）。
+
+我按你的决定实现，同时**无条件**加上这几条补偿控制（它们不改变默认体验，成本极低）：
+
+1. **全量审计**：每条命令的原文、模型给出的理由、风险标记、结果全部落 `audit_logs`；
+2. **全局 Kill Switch**：面板一键冻结所有 AI 执行（CLI 也能开），冻结后 AI 退化为只读；
+3. **速率与影响面熔断**：单节点每分钟命令数上限、连续失败自动暂停该节点的 AI 执行；
+4. **元操作强制确认**：涉及面板密码、主密钥、AI 自身配置、agent 自更新的动作，无论模型怎么判定都强制确认（防"AI 给自己扩权"）；
+5. `run_shell` 的 stdout/stderr 截断入审计，防止把凭据回灌进上下文。
+
+### 12.4 已知未缓解风险（写在这里以便你日后反悔）
+
+> **间接提示注入 → 静默执行 → 探针 root。**
+> 攻击者只要能连上任意一个代理节点，就能影响探针上的日志/进程名/连接来源等文本；这些文本一旦进入模型上下文，模型可能被诱导调用 `run_shell`。由于默认放行，该命令会被静默执行，且以 root 身份。攻击者在拿下第一台探针后，可以横向影响你在面板里配置的其他节点。
+>
+> 缓解到"白名单外默认确认"只需改一个配置项（`ai.default_policy: allow|confirm`），数据模型与工具集都不用动。建议你至少在暴露面扩大（加节点、给别人用订阅）之前重新评估一次。
+
+---
+
+## 13. 延迟测量
+
+- 目标（面板配置，可复用）：`name` + `kind` + `host` + `port`。
+  - `icmp`：ICMP echo RTT（需要 root 或 `CAP_NET_RAW`，缺失则跳过并标记）。
+  - `tcp`：TCP 三次握手 RTT（连接目标 host:port 后立即关闭）。
+- 每台探针选择自己用哪些目标（多选）。
+- 采集：**探针本地每 5s 测一次**，本地保留 60s 窗口，**每 60s 批量上报 12 个采样点**（不是每 5s 上报——否则 10 探针会出现 2 次/秒的常驻写入，且网络抖动会污染测量本身）。
+- 存储：`latency_samples` 保留 7 天。
+- 数据量估算：5s × 7d = 120,960 点 / (探针×目标) 对；10 探针 × 5 目标 ≈ 600 万行，SQLite 可承受（每行 ~40B，约 250MB 量级）。**图表必须降采样**：1h 视图取原始点，24h/7d 视图按 5min/30min 桶取平均 + P95。
+- 前端：折线图 + 丢包率；每探针一张"多目标对比"图。
+
+---
+
+## 14. IP 检测与国旗
+
+- agent 首次启动、网络变化（每 5 分钟检查 IP 集合是否有变化）、以及面板手动触发时，枚举本机地址（`net.Interfaces`，排除 loopback/link-local）→ **全量上报**。
+- 服务端判定：
+  1. 本地 GeoLite2-Country MMDB（离线，面板可上传更新）；
+  2. 未命中且可配置在线 API（ip-api / ipinfo，可选配 key）作为回退。
+- 国旗 = ISO 3166-1 alpha-2 → emoji/图标资源（前端内置，不依赖 CDN）。
+- 主 IP 选择：默认第一个公网 IPv4，否则第一个公网 IPv6；面板可手动指定（`node_ips.is_primary`），订阅渲染使用主 IP（或你填的域名）。
+
+---
+
+## 15. 告警
+
+| 类型 | 触发 | 默认阈值 |
+|---|---|---|
+| 到期提醒 | `node_billing.next_due_at` | 提前 7 / 3 / 1 天 |
+| 流量阈值 | 周期使用率 | 80% / 100% |
+| 探针离线 | 90s 无心跳 | — |
+| sing-box 异常 | 进程退出 / 端口不可连 / 回滚发生 | 立即 |
+| 计数器重置 | 流量计数回绕 | 立即（信息级） |
+
+通道：**Telegram Bot** + **通用 Webhook**（JSON POST，HMAC 签名头）。
+
+- 同类告警去重合并（同一节点同一类型 1 小时内只发一次，恢复时补一条 recovery）。
+- 面板内"通知中心"保留全部历史，`alerts` 表为权威。
+
+---
+
+## 16. 前端
+
+- 技术：**React + TypeScript + Vite**；构建产物输出到 `web/dist`。**生产镜像在构建阶段把产物烤进镜像**（`/srv/web`），由 server 直出（`FOBE_WEB_DIR`）——不嵌入 Go 二进制（避免体积膨胀），也不再依赖宿主机挂载前端目录。若想让外部 nginx 直接吐静态文件，见 §3 末尾的替代做法。
+- **本地开发不走容器**：前端 `npm run dev`（Vite dev server，把 `/api`、`/ws`、`/sub`、`/install.sh`、`/dl` 代理到 `http://127.0.0.1:8080`，**WebSocket 代理必须开 `ws: true`**），后端 `go run ./cmd/server`。此时把 `FOBE_WEB_DIR` 留空 → server 进 **API-only 模式**：`/` 返回一句"请访问 Vite dev server"的提示（不 404、不白屏），其余接口行为与生产一致。
+- 页面：登录 / 概览（卡片墙）/ 节点详情（指标 + 流量 + 延迟 + sing-box）/ 订阅与模板 / 延迟目标 / 告警 / 终端（全屏）/ AI 助手（侧栏）/ 设置（AI、通知、GeoIP、保留期、主密钥状态）。
+- 实时：`/ws/events` 推送；详情页打开时向 agent 要 5s 高频数据，关闭即恢复 60s。
+- 节点卡片展示：名称、国旗、IP、在线状态、CPU%、内存%、磁盘%、CPU 核数、流量使用率（按所选模式）、今日上下行、到期倒计时、延迟摘要。
+- **i18n**：`zh-CN` + `en-US`，前端 i18n 框架；后端只返回错误码与结构化数据，**不出中文文案**（避免后端拼字符串导致双语文案漏翻）。
+- **主题**：CSS 变量 + `prefers-color-scheme` 默认跟随系统 + 手动切换持久化（localStorage 与服务端设置双写，跨设备一致）。
+- 全部静态资源自托管，不引 CDN（离线/内网可用）。
+
+---
+
+## 17. 部署与目录
+
+```
+fobe/
+├─ cmd/
+│  ├─ server/main.go          # 面板服务端 + scheduler + admin CLI
+│  └─ agent/main.go           # 探针 agent
+├─ internal/
+│  ├─ protocol/               # 共享消息定义、版本、校验（server 与 agent 共用）
+│  ├─ server/{http,ws,hub,store,sub,singbox,ai,scheduler,security}
+│  └─ agent/{collect,singbox,latency,ssh,pty,cert,service,netinfo}
+├─ web/                       # React + TS + Vite（src/、vite.config.ts、产物 dist/）
+├─ deploy/
+│  ├─ docker-compose.yml
+│  └─ Dockerfile.server       # 多阶段：node 构建前端 → go 构建 server/agent → 运行镜像（不含 nginx）
+├─ scripts/
+│  ├─ build.sh                # 本地/CI 三件套构建（镜像内自行多阶段构建，不依赖它）
+│  └─ install.sh.tmpl         # 安装脚本文本模板（服务端注入 token 后下发）
+├─ data/                      # 宿主挂载（gitignore）
+│  ├─ sqlite/fobe.db
+│  ├─ dl/                     # agent 与 sing-box 产物
+│  └─ backup/
+└─ docs/design.md
+```
+
+`docker-compose.yml` 要点：
+
+```yaml
+services:
+  server:
+    build: { context: ., dockerfile: deploy/Dockerfile.server }
+    ports:
+      - "127.0.0.1:8080:8080"      # 只让本机 nginx 访问；nginx 不在本机时改绑定并限制来源
+    volumes:
+      - ./data/sqlite:/data
+      - ./data/dl:/srv/dl
+      - ./data/backup:/backup
+    environment:
+      FOBE_MASTER_KEY: ${FOBE_MASTER_KEY:?needed}
+      FOBE_DB: /data/fobe.db
+      FOBE_WEB_DIR: /srv/web
+      FOBE_DL_DIR: /srv/dl
+      FOBE_TRUSTED_PROXIES: "127.0.0.1/32,::1/128,172.16.0.0/12"
+```
+
+- **没有 nginx 服务，也没有证书卷**：接入层完全外部化（见 §3 与 `README.md`）。
+- **前端产物在镜像里，不挂载**：`Dockerfile.server` 的 node 阶段产出 `web/dist` 并 `COPY` 到 `/srv/web`。改前端 = 重新 `docker compose build`，不存在"改了源码忘了构建/挂载路径写错"这类事故。
+- 注意：即使你从宿主机 `127.0.0.1` 发起请求，容器内看到的源地址通常是 Docker 网关（如 `172.17.0.1`），所以 `FOBE_TRUSTED_PROXIES` 默认包含 Docker 私网段。
+
+- **构建管线**：`Dockerfile.server` 是多阶段构建——`node:22-alpine` 阶段构建 React 前端 → `golang` 阶段构建 `server` 与 `agent`（agent 交叉编译 `linux/amd64`，`CGO_ENABLED=0`）→ 运行镜像里同时含：server 二进制、`/srv/web`（前端产物）、`/srv/dl/agent/<version>/`（agent 产物 + 带 sha256 的 `manifest.json`，安装脚本与面板版本选择都读它）。`scripts/build.sh` 提供同一套产物的本地/CI 构建，供不进容器的开发方式使用。
+- **备份**：每日 `VACUUM INTO` 快照到 `./data/backup/fobe-YYYYMMDD.db`（保留 14 份），另提供面板导出/导入 JSON（不含凭据明文）。
+
+---
+
+## 18. 里程碑
+
+| 阶段 | 交付 | 验收标准 |
+|---|---|---|
+| **M1 骨架** | 多阶段镜像（含 React 前端产物）+ compose + SQLite + 登录（含黑名单+CLI）+ agent 注册/心跳 + 节点列表 + **README 外部 nginx 接入文档** | 一条安装命令能在 Debian 上装出节点并出现在面板；按 README 配好外部 nginx 后可从公网访问；本地 `go run` + `npm run dev` 跑通同一套接口 |
+| **M2 监控** | 指标采集 + 实时面板 + 7 天明细 + 日流量表 + 四模式配额 + 重置锚点 + 缴费周期 | 面板 CPU/内存/磁盘/流量数字与 `top`、机房账单对得上 |
+| **M3 sing-box** | 安装/更新/回滚/启停 + anytls 自签 + 证书 pinning + 订阅与模板 | 从零到"手机能导入订阅并连通"；故意写坏配置能自动回滚 |
+| **M4 运维面** | Web 终端（SSH + 本地 PTY）+ IP/国旗 + 延迟测量 + 告警 | 浏览器里能上探针改配置；离线节点 90s 内告警到 Telegram |
+| **M5 AI** | 工具集 + 确认弹窗 + 审计 + Kill Switch + 熔断 | 用自然语言完成"看这台为什么负载高"和"把 sing-box 升到 x.y.z" |
+| **M6 打磨** | i18n + 明暗主题 + OpenWrt 实机验证 + 备份恢复 + 文档 | x86 OpenWrt 软路由上完整跑通 M2–M4 |
+
+每阶段可独立验收，M3 结束即具备"最小可用产品"价值。
+
+---
+
+## 19. 还需你拍板的默认项
+
+以下我按默认写进了方案，**没有异议就照此实现**：
+
+1. 离线探针的指令入队后 TTL **10 分钟**，超时标失败（避免迟到指令突然生效）。
+2. 探针防火墙：agent **尝试自动放行** sing-box 端口（ufw / firewalld / nft / fw4），失败则把需要你手动执行的命令原文返回面板。
+3. 备份：每日 `VACUUM INTO` 快照保留 14 份 + 面板导出/导入。
+4. agent 自更新：与 sing-box 同样三道闸门 + 版本显式指定。
+5. anytls 端口默认随机高位端口，面板可改。
+6. **接入层完全外部化**：fobe 不碰 nginx、不签发也不续期证书；README 提供可直接复制的 nginx 配置（单上游 + WS 升级 + 真实 IP + 超时 + 上传体量）。
+7. 证书 pinning 替代 `insecure`：订阅里内嵌证书 PEM。
+8. 日志默认**不进** AI 上下文，需手动开关。
+9. 节点级 anytls 密码覆盖字段：**数据模型预留**，v1 UI 不暴露。
+10. v1 不做 TOTP（按你的选择），但 `users` 表预留 `totp_secret` 字段。
+11. 首次启动密码：未设置 `FOBE_ADMIN_PASSWORD` 时生成一次性初始密码并打印到服务端日志，登录后强制修改；忘记密码用 `fobe-server admin reset-password`。**（实现修订 2026-09-14：`FOBE_ADMIN_PASSWORD` 从"仅首次生效"升级为密码准绳——每次启动都同步为该值，变更时吊销全部旧会话；不设置则不动现有密码。）**
+12. 前端形态：**React + TS + Vite**；生产镜像内置编译产物，本地开发用 Vite dev server + `go run`（`FOBE_WEB_DIR` 为空时 server 进 API-only 模式）。
+
+---
+
+## 20. 已接受的已知风险（签字区）
+
+1. ⚠ **AI 默认放行 → 间接提示注入可静默执行任意 root 命令**（§12.4）。缓解路径已设计，改一个配置项即可收紧。
+2. ⚠ **登录面只有密码 + IP 黑名单**，无第二因子。黑名单依赖你自备的 nginx 正确传递 XFF、且 `FOBE_TRUSTED_PROXIES` 与实际拓扑一致；**接 CDN 后忘记同步回源网段 = 要么封不到人，要么把真实用户全封了**。
+3. ⚠ **共享 anytls 密码**：无法按订阅吊销代理访问，泄漏只能全局轮换（会打断所有客户端）。
+4. ⚠ **指标只存 7 天**：7 天以外的曲线不可得（月曲线依赖永久日表，可信；但"上月某天下午的 CPU"查不到）。
+5. ⚠ **不做自动停服**：配额超标不会自动止损，完全依赖告警通道可达。

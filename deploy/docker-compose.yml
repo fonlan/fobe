@@ -1,0 +1,25 @@
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+      args:
+        VERSION: ${FOBE_VERSION:-compose}
+    image: fobe-server:latest
+    restart: unless-stopped
+    # Loopback only: the operator's nginx is the single public entry
+    # (design.md §2). When nginx runs on another host, change to
+    # "0.0.0.0:8080:8080" and firewall the source (README: 拓扑 B).
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ../data/sqlite:/data
+      - ../data/dl:/srv/dl
+      - ../data/backup:/backup
+    environment:
+      FOBE_MASTER_KEY: ${FOBE_MASTER_KEY:?needed}
+      FOBE_ADMIN_PASSWORD: ${FOBE_ADMIN_PASSWORD:-}
+      FOBE_DB: /data/fobe.db
+      FOBE_WEB_DIR: /srv/web
+      FOBE_DL_DIR: /srv/dl
+      FOBE_TRUSTED_PROXIES: "127.0.0.1/32,::1/128,172.16.0.0/12"

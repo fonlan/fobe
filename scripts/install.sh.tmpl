@@ -1,0 +1,146 @@
+#!/bin/sh
+# fobe agent install script (design.md §5.2).
+# Rendered by the server from scripts/install.sh.tmpl; {{.DefaultServer}} /
+# {{.DefaultToken}} carry optional query-string defaults, real values come
+# from --token / --server args.
+#
+# Runs as root directly (most VPS have no sudo) and elevates via sudo only
+# when started by a non-root user that has sudo installed.
+set -eu
+
+DEFAULT_SERVER="{{.DefaultServer}}"
+DEFAULT_TOKEN="{{.DefaultToken}}"
+
+TOKEN=""
+SERVER=""
+BIN_DIR="/usr/local/bin"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --token)  TOKEN="$2";  shift 2 ;;
+        --server) SERVER="$2"; shift 2 ;;
+        --token=*)  TOKEN="${1#*=}";  shift ;;
+        --server=*) SERVER="${1#*=}"; shift ;;
+        *) echo "unknown arg: $1" >&2; exit 1 ;;
+    esac
+done
+SERVER="${SERVER:-$DEFAULT_SERVER}"
+TOKEN="${TOKEN:-$DEFAULT_TOKEN}"
+[ -n "$SERVER" ] || { echo "fobe: --server is required" >&2; exit 1; }
+[ -n "$TOKEN" ]  || { echo "fobe: --token is required"  >&2; exit 1; }
+
+# privilege handling: pure root is the common VPS case and needs nothing;
+# a non-root user with sudo gets elevated; anything else fails loudly.
+SUDO=""
+if [ "$(id -u)" != "0" ]; then
+    if command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+        echo "fobe: not running as root; elevating with sudo"
+    else
+        echo "fobe: must run as root (this box has no sudo; re-run as root)" >&2
+        exit 1
+    fi
+fi
+
+# 1. architecture gate: v1 ships x86_64 only, fail loudly otherwise (§5.2)
+ARCH="$(uname -m)"
+[ "$ARCH" = "x86_64" ] || { echo "fobe: unsupported architecture '$ARCH' (v1 is x86_64 only)" >&2; exit 1; }
+
+# 2. service-manager detection (§5.3)
+if [ -d /run/systemd/system ]; then
+    INIT=systemd
+elif [ -x /sbin/procd ] || [ -f /etc/rc.common ]; then
+    INIT=procd
+    BIN_DIR="/usr/bin"          # OpenWrt: overlay-persistent /usr/bin (§5.4)
+else
+    INIT=fallback
+fi
+
+echo "fobe: server=$SERVER init=$INIT"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# 3. download + sha256 verify (checksum comes from the server's manifest)
+DL="$SERVER/dl/agent/latest/linux-amd64"
+echo "fobe: downloading agent from $DL"
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$DL" -o "$TMP/fobe-agent"
+else
+    wget -qO "$TMP/fobe-agent" "$DL"
+fi
+
+# checksum: prefer the server's sidecar file; refuse unsigned installs
+if curl -fsSL "$DL.sha256" -o "$TMP/fobe-agent.sha256" 2>/dev/null \
+   || wget -qO "$TMP/fobe-agent.sha256" "$DL.sha256" 2>/dev/null; then
+    EXPECTED="$(awk '{print $1}' "$TMP/fobe-agent.sha256")"
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL="$(sha256sum "$TMP/fobe-agent" | awk '{print $1}')"
+    else
+        ACTUAL="$(sha256 "$TMP/fobe-agent" | awk '{print $NF}')"
+    fi
+    [ "$EXPECTED" = "$ACTUAL" ] || { echo "fobe: checksum mismatch" >&2; exit 1; }
+else
+    echo "fobe: WARNING: no checksum published by server; aborting" >&2
+    exit 1
+fi
+
+$SUDO install -m 0755 "$TMP/fobe-agent" "$BIN_DIR/fobe-agent"
+
+# 4-5. register (reuses prior credentials on reinstall, §4.2)
+$SUDO mkdir -p /etc/fobe-agent
+if ! $SUDO "$BIN_DIR/fobe-agent" -register -token "$TOKEN" -server "$SERVER"; then
+    echo "fobe: registration failed" >&2
+    exit 1
+fi
+
+# 6. install + start the service (files are staged in $TMP and elevated
+#    with $SUDO install, so redirects never need a root shell)
+case "$INIT" in
+    systemd)
+        cat > "$TMP/fobe-agent.service" <<UNIT
+[Unit]
+Description=fobe probe agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=$BIN_DIR/fobe-agent -config /etc/fobe-agent/config.json -run
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+        $SUDO install -m 0644 "$TMP/fobe-agent.service" /etc/systemd/system/fobe-agent.service
+        $SUDO systemctl daemon-reload
+        $SUDO systemctl enable --now fobe-agent.service
+        ;;
+    procd)
+        cat > "$TMP/fobe-agent.initd" <<'INITD'
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=99
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /usr/bin/fobe-agent -config /etc/fobe-agent/config.json -run
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 0
+	procd_set_param stderr 0
+	procd_close_instance
+}
+INITD
+        $SUDO install -m 0755 "$TMP/fobe-agent" /etc/init.d/fobe-agent
+        $SUDO /etc/init.d/fobe-agent enable
+        $SUDO /etc/init.d/fobe-agent start
+        ;;
+    fallback)
+        echo "fobe: no service manager found; start the agent manually:"
+        echo "  $BIN_DIR/fobe-agent -config /etc/fobe-agent/config.json -run"
+        $SUDO mkdir -p /var/log
+        $SUDO sh -c "nohup $BIN_DIR/fobe-agent -config /etc/fobe-agent/config.json -run >/var/log/fobe-agent.log 2>&1 &"
+        ;;
+esac
+
+echo "fobe: installed. the node should appear in the panel within seconds."

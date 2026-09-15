@@ -1,0 +1,624 @@
+package store
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+)
+
+// --- commands (offline queue, TTL 10min, design §7/§19.1) ---
+
+type Command struct {
+	ID          string
+	NodeID      string
+	Kind        string
+	Payload     string
+	Status      string // pending|sent|ok|failed|timeout
+	CreatedAt   int64
+	SentAt      sql.NullInt64
+	FinishedAt  sql.NullInt64
+	Result      string
+	TTLSeconds  int64
+	Actor       string
+	AISessionID string
+	Reason      string
+	Risk        string
+}
+
+type CommandMeta struct {
+	Actor       string
+	AISessionID string
+	Reason      string
+	Risk        string
+}
+
+func (s *Store) CreateCommand(id, nodeID, kind, payload string, ttlSeconds int64) error {
+	return s.CreateCommandWithMeta(id, nodeID, kind, payload, ttlSeconds, CommandMeta{Actor: "panel"})
+}
+
+func (s *Store) CreateCommandWithMeta(id, nodeID, kind, payload string, ttlSeconds int64, meta CommandMeta) error {
+	_, err := s.db.Exec(
+		`INSERT INTO commands
+		 (id, node_id, kind, payload, status, created_at, ttl_seconds, actor, ai_session_id, reason, risk)
+		 VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
+		id, nodeID, kind, payload, now(), ttlSeconds, meta.Actor, meta.AISessionID, meta.Reason, meta.Risk,
+	)
+	return err
+}
+
+// NextPendingCommand claims the oldest pending command for a node, marking it sent.
+func (s *Store) NextPendingCommand(nodeID string) (*Command, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	c := &Command{}
+	err = tx.QueryRow(
+		`SELECT id, node_id, kind, payload, status, created_at, sent_at, finished_at, result,
+			        ttl_seconds, actor, ai_session_id, reason, risk
+			 FROM commands WHERE node_id = ? AND status = 'pending' ORDER BY created_at LIMIT 1`, nodeID,
+	).Scan(&c.ID, &c.NodeID, &c.Kind, &c.Payload, &c.Status, &c.CreatedAt, &c.SentAt,
+		&c.FinishedAt, &c.Result, &c.TTLSeconds, &c.Actor, &c.AISessionID, &c.Reason, &c.Risk)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE commands SET status = 'sent', sent_at = ? WHERE id = ?`, now(), c.ID); err != nil {
+		return nil, err
+	}
+	return c, tx.Commit()
+}
+
+func (s *Store) FinishCommand(id, status, result string) error {
+	_, err := s.db.Exec(`UPDATE commands SET status = ?, result = ?, finished_at = ? WHERE id = ?`,
+		status, result, now(), id)
+	return err
+}
+
+// TimeoutStaleCommands expires pending commands past their TTL (design §7).
+func (s *Store) TimeoutStaleCommands() (int64, error) {
+	res, err := s.db.Exec(
+		`UPDATE commands SET status = 'timeout', finished_at = ?
+		 WHERE status IN ('pending','sent') AND created_at + ttl_seconds < ?`, now(), now(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) ListCommands(nodeID string, limit int) ([]Command, error) {
+	rows, err := s.db.Query(
+		`SELECT id, node_id, kind, payload, status, created_at, sent_at, finished_at, result,
+			        ttl_seconds, actor, ai_session_id, reason, risk
+			 FROM commands WHERE node_id = ? ORDER BY created_at DESC LIMIT ?`, nodeID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Command{}
+	for rows.Next() {
+		var c Command
+		if err := rows.Scan(&c.ID, &c.NodeID, &c.Kind, &c.Payload, &c.Status, &c.CreatedAt,
+			&c.SentAt, &c.FinishedAt, &c.Result, &c.TTLSeconds, &c.Actor, &c.AISessionID,
+			&c.Reason, &c.Risk); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// --- alerts (design §15) ---
+
+type Alert struct {
+	ID          int64  `json:"id"`
+	Kind        string `json:"kind"`
+	NodeID      string `json:"node_id,omitempty"`
+	Payload     string `json:"payload,omitempty"`
+	CreatedAt   int64  `json:"created_at"`
+	DeliveredAt *int64 `json:"delivered_at,omitempty"`
+	RecoveredAt *int64 `json:"recovered_at,omitempty"`
+}
+
+// CreateAlert dedupes: same node+kind within window returns existing id and created=false.
+func (s *Store) CreateAlert(kind, nodeID, payload string, dedupeWindowSeconds int64) (int64, bool, error) {
+	if dedupeWindowSeconds > 0 {
+		var id int64
+		err := s.db.QueryRow(
+			`SELECT id FROM alerts WHERE kind = ? AND node_id = ? AND created_at > ? AND recovered_at IS NULL
+			 ORDER BY id DESC LIMIT 1`, kind, nodeID, now()-dedupeWindowSeconds,
+		).Scan(&id)
+		if err == nil {
+			return id, false, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return 0, false, err
+		}
+	}
+	res, err := s.db.Exec(
+		`INSERT INTO alerts (kind, node_id, payload, created_at) VALUES (?, ?, ?, ?)`,
+		kind, nodeID, payload, now(),
+	)
+	if err != nil {
+		return 0, false, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, false, err
+	}
+	return id, true, nil
+}
+
+func (s *Store) MarkAlertDelivered(id int64) error {
+	_, err := s.db.Exec(`UPDATE alerts SET delivered_at = ? WHERE id = ?`, now(), id)
+	return err
+}
+
+// RecoverAlert closes the matching open alert (recovery notice, design §15).
+func (s *Store) RecoverAlert(kind, nodeID string) error {
+	_, err := s.db.Exec(
+		`UPDATE alerts SET recovered_at = ? WHERE kind = ? AND node_id = ? AND recovered_at IS NULL`,
+		now(), kind, nodeID,
+	)
+	return err
+}
+
+// OpenAlert returns the newest unrecovered alert of kind+node; ErrNotFound
+// when none is open. Lets jobs dedupe on their own stage (e.g. billing days).
+func (s *Store) OpenAlert(kind, nodeID string) (*Alert, error) {
+	a := &Alert{}
+	err := s.db.QueryRow(
+		`SELECT id, kind, node_id, payload, created_at, delivered_at, recovered_at
+		 FROM alerts WHERE kind = ? AND node_id = ? AND recovered_at IS NULL
+		 ORDER BY id DESC LIMIT 1`, kind, nodeID,
+	).Scan(&a.ID, &a.Kind, &a.NodeID, &a.Payload, &a.CreatedAt, &a.DeliveredAt, &a.RecoveredAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+func (s *Store) ListAlerts(limit int) ([]Alert, error) {
+	rows, err := s.db.Query(
+		`SELECT id, kind, node_id, payload, created_at, delivered_at, recovered_at
+		 FROM alerts ORDER BY id DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Alert{}
+	for rows.Next() {
+		var a Alert
+		if err := rows.Scan(&a.ID, &a.Kind, &a.NodeID, &a.Payload, &a.CreatedAt, &a.DeliveredAt, &a.RecoveredAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UndeliveredAlerts() ([]Alert, error) {
+	rows, err := s.db.Query(
+		`SELECT id, kind, node_id, payload, created_at, delivered_at, recovered_at
+		 FROM alerts WHERE delivered_at IS NULL ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Alert{}
+	for rows.Next() {
+		var a Alert
+		if err := rows.Scan(&a.ID, &a.Kind, &a.NodeID, &a.Payload, &a.CreatedAt, &a.DeliveredAt, &a.RecoveredAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// --- audit logs (design §4.4) ---
+
+type AuditEntry struct {
+	TS          int64  `json:"ts"`
+	Actor       string `json:"actor"`
+	NodeID      string `json:"node_id,omitempty"`
+	Action      string `json:"action"`
+	Command     string `json:"command,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Risk        string `json:"risk,omitempty"`
+	SourceIP    string `json:"source_ip,omitempty"`
+	AISessionID string `json:"ai_session_id,omitempty"`
+}
+
+func (s *Store) InsertAudit(a *AuditEntry) error {
+	if a.TS == 0 {
+		a.TS = now()
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO audit_logs (ts, actor, node_id, action, command, reason, risk, source_ip, ai_session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.TS, a.Actor, a.NodeID, a.Action, a.Command, a.Reason, a.Risk, a.SourceIP, a.AISessionID,
+	)
+	return err
+}
+
+func (s *Store) ListAudit(limit int) ([]AuditEntry, error) {
+	rows, err := s.db.Query(
+		`SELECT ts, actor, node_id, action, command, reason, risk, source_ip, ai_session_id
+		 FROM audit_logs ORDER BY id DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AuditEntry{}
+	for rows.Next() {
+		var a AuditEntry
+		if err := rows.Scan(&a.TS, &a.Actor, &a.NodeID, &a.Action, &a.Command, &a.Reason,
+			&a.Risk, &a.SourceIP, &a.AISessionID); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// --- node_singbox (design §9.1) ---
+
+type NodeSingbox struct {
+	NodeID          string `json:"node_id"`
+	Version         string `json:"version"`
+	DesiredVersion  string `json:"desired_version"`
+	ConfigHash      string `json:"config_hash"`
+	Status          string `json:"status"`
+	LastError       string `json:"last_error"`
+	RollbackVersion string `json:"rollback_version"`
+	CertPEM         string `json:"cert_pem"`
+	CertSHA256      string `json:"cert_sha256"`
+	CertNotAfter    int64  `json:"cert_not_after"`
+	Port            int    `json:"port"`
+	UpdatedAt       int64  `json:"updated_at"`
+}
+
+func (s *Store) GetNodeSingbox(nodeID string) (*NodeSingbox, error) {
+	n := &NodeSingbox{}
+	err := s.db.QueryRow(
+		`SELECT node_id, version, desired_version, config_hash, status, last_error, rollback_version,
+		        cert_pem, cert_sha256, cert_not_after, port, updated_at
+		 FROM node_singbox WHERE node_id = ?`, nodeID,
+	).Scan(&n.NodeID, &n.Version, &n.DesiredVersion, &n.ConfigHash, &n.Status, &n.LastError,
+		&n.RollbackVersion, &n.CertPEM, &n.CertSHA256, &n.CertNotAfter, &n.Port, &n.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return n, err
+}
+
+func (s *Store) UpsertNodeSingbox(n *NodeSingbox) error {
+	_, err := s.db.Exec(
+		`INSERT INTO node_singbox
+		 (node_id, version, desired_version, config_hash, status, last_error, rollback_version,
+		  cert_pem, cert_sha256, cert_not_after, port, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(node_id) DO UPDATE SET
+		   version = excluded.version, desired_version = excluded.desired_version,
+		   config_hash = excluded.config_hash, status = excluded.status,
+		   last_error = excluded.last_error, rollback_version = excluded.rollback_version,
+		   cert_pem = excluded.cert_pem, cert_sha256 = excluded.cert_sha256,
+		   cert_not_after = excluded.cert_not_after, port = excluded.port,
+		   updated_at = excluded.updated_at`,
+		n.NodeID, n.Version, n.DesiredVersion, n.ConfigHash, n.Status, n.LastError,
+		n.RollbackVersion, n.CertPEM, n.CertSHA256, n.CertNotAfter, n.Port, now(),
+	)
+	return err
+}
+
+// SetNodeSingboxFirewallHint mirrors the agent's firewall hint (§9.2) into
+// node_singbox without disturbing the other columns (the agent owns the
+// value; the empty string clears it once the port is allowed). Creates the row if absent.
+func (s *Store) SetNodeSingboxFirewallHint(nodeID, hint string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO node_singbox (node_id, firewall_hint, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(node_id) DO UPDATE SET
+		   firewall_hint = excluded.firewall_hint, updated_at = excluded.updated_at`,
+		nodeID, hint, now(),
+	)
+	return err
+}
+
+// GetNodeSingboxFirewallHint returns the stored §9.2 manual command (empty
+// when the agent allowed the port or never attempted).
+func (s *Store) GetNodeSingboxFirewallHint(nodeID string) (string, error) {
+	var hint string
+	err := s.db.QueryRow(
+		`SELECT firewall_hint FROM node_singbox WHERE node_id = ?`, nodeID,
+	).Scan(&hint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return hint, err
+}
+
+// GetNodeSingboxPasswordOverride returns the per-node anytls password
+// override (§19.9; empty = use the global shared password). v1 keeps this a
+// data-model-only feature: no UI/API writes it yet.
+func (s *Store) GetNodeSingboxPasswordOverride(nodeID string) (string, error) {
+	var pw string
+	err := s.db.QueryRow(
+		`SELECT password_override FROM node_singbox WHERE node_id = ?`, nodeID,
+	).Scan(&pw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return pw, err
+}
+
+// SetNodeSingboxPasswordOverride stores the per-node anytls password
+// override (§19.9). Creates the row if absent.
+func (s *Store) SetNodeSingboxPasswordOverride(nodeID, password string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO node_singbox (node_id, password_override, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(node_id) DO UPDATE SET
+		   password_override = excluded.password_override, updated_at = excluded.updated_at`,
+		nodeID, password, now(),
+	)
+	return err
+}
+
+// --- subscriptions & templates (design §10; rendering lands in M3) ---
+
+func (s *Store) CreateSubscription(id, name, tokenHash string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO subscriptions (id, name, token_hash, enabled, created_at) VALUES (?, ?, ?, 1, ?)`,
+		id, name, tokenHash, now(),
+	)
+	return err
+}
+
+func (s *Store) GetSubscriptionByTokenHash(tokenHash string) (id, name string, enabled bool, err error) {
+	err = s.db.QueryRow(`SELECT id, name, enabled FROM subscriptions WHERE token_hash = ?`, tokenHash).
+		Scan(&id, &name, &enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, ErrNotFound
+	}
+	return
+}
+
+func (s *Store) SetSubscriptionNodes(subID string, nodeIDs []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM subscription_nodes WHERE subscription_id = ?`, subID); err != nil {
+		return err
+	}
+	for _, id := range nodeIDs {
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO subscription_nodes (subscription_id, node_id) VALUES (?, ?)`, subID, id,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) SubscriptionNodeIDs(subID string) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT node_id FROM subscription_nodes WHERE subscription_id = ? ORDER BY node_id`, subID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) InsertSubAccess(subID, ip, ua string) {
+	s.db.Exec(`INSERT INTO sub_access_logs (subscription_id, ts, ip, ua) VALUES (?, ?, ?, ?)`,
+		subID, now(), ip, ua)
+}
+
+// Subscription is one subscription row (design §10). The token hash is never
+// exposed over HTTP; the plaintext is shown exactly once at creation/rotation.
+type Subscription struct {
+	ID         string
+	Name       string
+	TokenHash  string
+	Enabled    bool
+	UAFilter   string         // comma-separated UA substrings; empty = allow all (§10)
+	TemplateID sql.NullString // nullable: empty → built-in default template
+	CreatedAt  int64
+}
+
+const subscriptionCols = `id, name, token_hash, enabled, ua_filter, template_id, created_at`
+
+func scanSubscription(rs rowScanner) (*Subscription, error) {
+	sub := &Subscription{}
+	var enabled int
+	if err := rs.Scan(&sub.ID, &sub.Name, &sub.TokenHash, &enabled, &sub.UAFilter, &sub.TemplateID, &sub.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	sub.Enabled = enabled != 0
+	return sub, nil
+}
+
+func (s *Store) ListSubscriptions() ([]Subscription, error) {
+	rows, err := s.db.Query(`SELECT ` + subscriptionCols + ` FROM subscriptions ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Subscription{}
+	for rows.Next() {
+		sub, err := scanSubscription(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *sub)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetSubscription(id string) (*Subscription, error) {
+	return scanSubscription(s.db.QueryRow(
+		`SELECT `+subscriptionCols+` FROM subscriptions WHERE id = ?`, id))
+}
+
+// GetSubscriptionByToken resolves a subscription from a token hash for
+// /sub/<token> rendering (design §10: the DB only ever sees the hash).
+func (s *Store) GetSubscriptionByToken(tokenHash string) (*Subscription, error) {
+	return scanSubscription(s.db.QueryRow(
+		`SELECT `+subscriptionCols+` FROM subscriptions WHERE token_hash = ?`, tokenHash))
+}
+
+// RotateSubscriptionToken replaces the token hash (design §10 一键轮换):
+// old URLs stop resolving, the new plaintext is shown once.
+func (s *Store) RotateSubscriptionToken(id, tokenHash string) error {
+	_, err := s.db.Exec(`UPDATE subscriptions SET token_hash = ? WHERE id = ?`, tokenHash, id)
+	return err
+}
+
+func (s *Store) SetSubscriptionEnabled(id string, enabled bool) error {
+	_, err := s.db.Exec(`UPDATE subscriptions SET enabled = ? WHERE id = ?`, b2i(enabled), id)
+	return err
+}
+
+func (s *Store) SetSubscriptionMeta(id, name string, templateID *string) error {
+	_, err := s.db.Exec(`UPDATE subscriptions SET name = ?, template_id = ? WHERE id = ?`, name, templateID, id)
+	return err
+}
+
+// SetSubscriptionUAFilter updates the §10 UA allow-list (comma-separated
+// substrings, already normalized by the caller; empty = every client allowed).
+func (s *Store) SetSubscriptionUAFilter(id, filter string) error {
+	_, err := s.db.Exec(`UPDATE subscriptions SET ua_filter = ? WHERE id = ?`, filter, id)
+	return err
+}
+
+func (s *Store) DeleteSubscription(id string) error {
+	_, err := s.db.Exec(`DELETE FROM subscriptions WHERE id = ?`, id)
+	return err
+}
+
+// SubAccess is one /sub/<token> hit (time/IP/UA, design §10 访问日志).
+type SubAccess struct {
+	TS int64  `json:"ts"`
+	IP string `json:"ip"`
+	UA string `json:"ua"`
+}
+
+func (s *Store) ListSubAccess(subID string, limit int) ([]SubAccess, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.db.Query(
+		`SELECT ts, ip, ua FROM sub_access_logs WHERE subscription_id = ? ORDER BY id DESC LIMIT ?`,
+		subID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SubAccess{}
+	for rows.Next() {
+		var a SubAccess
+		if err := rows.Scan(&a.TS, &a.IP, &a.UA); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// --- templates (design §10: one complete config template per format) ---
+
+type Template struct {
+	ID        string
+	Name      string
+	Format    string // singbox | clash
+	Content   string // must contain {{nodes}} and {{rules}}
+	CreatedAt int64
+	UpdatedAt int64
+}
+
+func (s *Store) ListTemplates() ([]Template, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, format, content, created_at, updated_at FROM templates ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Template{}
+	for rows.Next() {
+		var t Template
+		if err := rows.Scan(&t.ID, &t.Name, &t.Format, &t.Content, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetTemplate(id string) (*Template, error) {
+	t := &Template{}
+	err := s.db.QueryRow(
+		`SELECT id, name, format, content, created_at, updated_at FROM templates WHERE id = ?`, id,
+	).Scan(&t.ID, &t.Name, &t.Format, &t.Content, &t.CreatedAt, &t.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+func (s *Store) InsertTemplate(t *Template) error {
+	t.CreatedAt, t.UpdatedAt = now(), now()
+	_, err := s.db.Exec(
+		`INSERT INTO templates (id, name, format, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		t.ID, t.Name, t.Format, t.Content, t.CreatedAt, t.UpdatedAt)
+	return err
+}
+
+func (s *Store) UpdateTemplate(t *Template) error {
+	t.UpdatedAt = now()
+	_, err := s.db.Exec(
+		`UPDATE templates SET name = ?, format = ?, content = ?, updated_at = ? WHERE id = ?`,
+		t.Name, t.Format, t.Content, t.UpdatedAt, t.ID)
+	return err
+}
+
+func (s *Store) DeleteTemplate(id string) error {
+	_, err := s.db.Exec(`DELETE FROM templates WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) BackupTo(path string) error {
+	// VACUUM INTO produces a consistent snapshot (design §17).
+	_, err := s.db.Exec(fmt.Sprintf(`VACUUM INTO %q`, path))
+	if err != nil {
+		return fmt.Errorf("vacuum into %s: %w", path, err)
+	}
+	return nil
+}
