@@ -140,7 +140,22 @@ type Node struct {
 	CountryCode  string
 	TZ           string
 	Caps         json.RawMessage
+	// Agent self-update bookkeeping (design §5.5).
+	AgentTargetVersion   string
+	AgentUpdateState     string
+	AgentUpdateAttempts  int
+	AgentUpdateError     string
+	AgentUpdatePlannedAt int64
+	AgentUpdateDoneAt    int64
 }
+
+// nodeColumns is the single column list every node query shares. Adding a
+// column in one place and forgetting the others used to be the easy mistake
+// (scanNode would then fail at runtime, not at compile time).
+const nodeColumns = `id, name, machine_id, status, note, created_at, last_seen, agent_version,
+	        os, arch, kernel, hostname, cpu_cores, primary_ip, country_code, tz, caps,
+	        agent_target_version, agent_update_state, agent_update_attempts, agent_update_error,
+	        agent_update_planned_at, agent_update_done_at`
 
 func (s *Store) CreateNode(n *Node, secretHash string) error {
 	_, err := s.db.Exec(
@@ -158,25 +173,19 @@ func (s *Store) CreateNode(n *Node, secretHash string) error {
 
 func (s *Store) GetNodeByMachineID(machineID string) (*Node, error) {
 	return s.scanNode(s.db.QueryRow(
-		`SELECT id, name, machine_id, status, note, created_at, last_seen, agent_version,
-		        os, arch, kernel, hostname, cpu_cores, primary_ip, country_code, tz, caps
-		 FROM nodes WHERE machine_id = ?`, machineID,
+		`SELECT `+nodeColumns+` FROM nodes WHERE machine_id = ?`, machineID,
 	))
 }
 
 func (s *Store) GetNode(id string) (*Node, error) {
 	return s.scanNode(s.db.QueryRow(
-		`SELECT id, name, machine_id, status, note, created_at, last_seen, agent_version,
-		        os, arch, kernel, hostname, cpu_cores, primary_ip, country_code, tz, caps
-		 FROM nodes WHERE id = ?`, id,
+		`SELECT `+nodeColumns+` FROM nodes WHERE id = ?`, id,
 	))
 }
 
 func (s *Store) ListNodes() ([]Node, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, machine_id, status, note, created_at, last_seen, agent_version,
-		        os, arch, kernel, hostname, cpu_cores, primary_ip, country_code, tz, caps
-		 FROM nodes ORDER BY created_at`)
+		`SELECT ` + nodeColumns + ` FROM nodes ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +208,9 @@ func (s *Store) scanNode(rs rowScanner) (*Node, error) {
 	var caps string
 	err := rs.Scan(&n.ID, &n.Name, &n.MachineID, &n.Status, &n.Note, &n.CreatedAt, &n.LastSeen,
 		&n.AgentVersion, &n.OS, &n.Arch, &n.Kernel, &n.Hostname, &n.CPUCores,
-		&n.PrimaryIP, &n.CountryCode, &n.TZ, &caps)
+		&n.PrimaryIP, &n.CountryCode, &n.TZ, &caps,
+		&n.AgentTargetVersion, &n.AgentUpdateState, &n.AgentUpdateAttempts, &n.AgentUpdateError,
+		&n.AgentUpdatePlannedAt, &n.AgentUpdateDoneAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -211,6 +222,76 @@ func (s *Store) scanNode(rs rowScanner) (*Node, error) {
 	}
 	n.Caps = json.RawMessage(caps)
 	return n, nil
+}
+
+// --- agent self-update bookkeeping (design §5.5) ---
+
+// SetAgentUpdatePlanned stores the target version and the stagger deadline the
+// server just handed to this agent. done_at is cleared only when the target
+// changes, so the panel keeps showing the last completed update's timestamp.
+func (s *Store) SetAgentUpdatePlanned(id, target string, plannedAt int64) error {
+	_, err := s.db.Exec(
+		`UPDATE nodes SET agent_target_version = ?, agent_update_planned_at = ?,
+		   agent_update_done_at = CASE WHEN agent_target_version = ? THEN agent_update_done_at ELSE 0 END
+		 WHERE id = ?`,
+		target, plannedAt, target, id,
+	)
+	return err
+}
+
+// RecordAgentUpdate stores what the agent reported about an attempt. A target
+// change resets the attempt counter, so a new server version starts from a
+// clean slate instead of inheriting an old exhaustion.
+func (s *Store) RecordAgentUpdate(id, target, state string, attempts int, lastErr string, doneAt int64) error {
+	_, err := s.db.Exec(
+		`UPDATE nodes SET
+		   agent_update_attempts = CASE WHEN agent_target_version = ? THEN ? ELSE ? END,
+		   agent_update_state    = ?,
+		   agent_update_error    = ?,
+		   agent_update_done_at  = CASE WHEN ? > 0 THEN ? ELSE agent_update_done_at END,
+		   agent_target_version  = CASE WHEN ? = '' THEN agent_target_version ELSE ? END
+		 WHERE id = ?`,
+		target, attempts, attempts, state, lastErr, doneAt, doneAt, target, target, id,
+	)
+	return err
+}
+
+// ClearAgentUpdate is the operator escape hatch (POST /api/nodes/{id}/agent/retry):
+// forget the attempts and the previous error, and let the next handshake hand
+// out a fresh stagger deadline.
+func (s *Store) ClearAgentUpdate(id string) error {
+	_, err := s.db.Exec(
+		`UPDATE nodes SET agent_update_attempts = 0, agent_update_error = '',
+		   agent_update_state = '', agent_update_planned_at = 0 WHERE id = ?`, id,
+	)
+	return err
+}
+
+// StaleAgentUpdates lists nodes that were told to move to a target and still
+// report something else (design §5.5: 分发后 15 分钟仍未收敛). Nodes already
+// in a terminal state are excluded — they are surfaced by their own alert and
+// are not "still converging".
+func (s *Store) StaleAgentUpdates(deadline int64) ([]Node, error) {
+	rows, err := s.db.Query(
+		`SELECT `+nodeColumns+` FROM nodes
+		 WHERE agent_target_version != '' AND agent_target_version != agent_version
+		   AND agent_update_planned_at > 0 AND agent_update_planned_at <= ?
+		   AND agent_update_state NOT IN ('failed', 'suppressed', 'unsupported')
+		 ORDER BY created_at`, deadline,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Node{}
+	for rows.Next() {
+		n, err := s.scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *n)
+	}
+	return out, rows.Err()
 }
 
 // GetNodeSecretHash returns the stored argon2/bcrypt hash of node_secret.

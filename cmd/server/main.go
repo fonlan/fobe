@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fobe-panel/fobe/internal/server/agentupdate"
 	"github.com/fobe-panel/fobe/internal/server/geoip"
 	"github.com/fobe-panel/fobe/internal/server/geoipupdate"
 	"github.com/fobe-panel/fobe/internal/server/httpapi"
@@ -180,6 +181,33 @@ func runServer() {
 	// upgrade. It never blocks startup.
 	api.SingboxCache = startSingboxCache(bgCtx, st, log, api.SingboxDL())
 
+	// §5.5 agent self-update. Two startup steps, in this order:
+	//   1. seed the artifact volume with the agent builds that shipped inside
+	//      the image — the compose bind mount hides the image's own /srv/dl, so
+	//      without this copy the panel has nothing to hand out and /install.sh
+	//      404s on a fresh deployment;
+	//   2. hand the manager to the hub (target + stagger in hello_ack) and to
+	//      the API (status, operator retry, reinstall command).
+	seedDir := env("FOBE_AGENT_SEED_DIR", agentupdate.DefaultSeedDir)
+	if dlDir != "" {
+		if err := agentupdate.Seed(seedDir, dlDir, version, log); err != nil {
+			log.Warn("agent artifact seed failed", "seed_dir", seedDir, "dl_dir", dlDir, "err", err)
+		}
+	}
+	agentUpd := agentupdate.New(agentupdate.Config{
+		Store:         st,
+		Log:           log,
+		ServerVersion: version,
+		DLDir:         dlDir,
+		// §12.3: the freeze wins over follow — a killed panel must not swap
+		// probe binaries while the operator is trying to stop the bleeding.
+		KillSwitch: func() bool { return settingBool(st, "ai.kill_switch") },
+		Enabled:    func() bool { return agentupdate.AutoUpdateEnabled(st) },
+	})
+	h.SetAgentUpdater(agentUpd)
+	api.AgentUpdate = agentUpd
+	agentUpd.Start(bgCtx)
+
 	// §9.2 one-click batch update: build the manager now and re-arm the
 	// convergence check of a job that was still pending when the process last
 	// stopped (the deadline is persisted with the job).
@@ -236,6 +264,20 @@ func startSingboxCache(ctx context.Context, st *store.Store, log *slog.Logger, d
 	})
 	mgr.Start(ctx)
 	return mgr
+}
+
+// settingBool reads a boolean setting the way the panel writes it ("1"/"0",
+// "true"/"false"; absent = false).
+func settingBool(st *store.Store, key string) bool {
+	v, err := st.GetSetting(key)
+	if err != nil {
+		return false
+	}
+	v = strings.TrimSpace(v)
+	if b, err := strconv.ParseBool(v); err == nil {
+		return b
+	}
+	return v == "1"
 }
 
 // singboxAutoDownloadEnabled reports whether the startup download runs.

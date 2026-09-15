@@ -87,7 +87,7 @@ func Register(cfg *Config, configPath, regToken string) error {
 // exponential backoff, hello on connect, periodic reporting, command serving.
 // The sing-box manager (§9) outlives individual sessions so fallback-mode
 // processes and convergence state survive a reconnect.
-func Run(cfg *Config, log *slog.Logger) error {
+func Run(cfg *Config, configPath string, log *slog.Logger) error {
 	coll := collect.New()
 
 	// Adopt an installation left by an older agent before the first
@@ -105,6 +105,11 @@ func Run(cfg *Config, log *slog.Logger) error {
 	sbx := newSingboxManager(cfg, log)
 	go sbx.Run()
 
+	// §5.5 self-update lives at process scope: its state file and its "already
+	// updating" guard must survive session reconnects (and the restart the
+	// update itself performs).
+	updater := newSelfUpdater(cfg, configPath, log)
+
 	metricsEvery := reportEvery
 	if cfg.MetricsIntervalSec > 0 {
 		metricsEvery = time.Duration(cfg.MetricsIntervalSec) * time.Second
@@ -113,7 +118,7 @@ func Run(cfg *Config, log *slog.Logger) error {
 	backoff := backoffStart
 	for {
 		started := time.Now()
-		err := connectAndServe(cfg, coll, sbx, metricsEvery, log)
+		err := connectAndServe(cfg, coll, sbx, updater, metricsEvery, log)
 		if err != nil {
 			log.Warn("agent link lost", "err", err)
 		}
@@ -130,7 +135,7 @@ func Run(cfg *Config, log *slog.Logger) error {
 	}
 }
 
-func connectAndServe(cfg *Config, coll *collect.Collector, sbx *singboxManager, metricsEvery time.Duration, log *slog.Logger) error {
+func connectAndServe(cfg *Config, coll *collect.Collector, sbx *singboxManager, updater *selfUpdater, metricsEvery time.Duration, log *slog.Logger) error {
 	wsURL := wsEndpoint(cfg.ServerURL)
 	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
 	reqHeader := http.Header{
@@ -144,7 +149,7 @@ func connectAndServe(cfg *Config, coll *collect.Collector, sbx *singboxManager, 
 	defer ws.Close()
 	log.Info("agent connected", "server", wsURL, "version", Version)
 
-	session := newSession(cfg, coll, ws, sbx, log)
+	session := newSession(cfg, coll, ws, sbx, updater, log)
 	defer session.shutdown("agent websocket disconnected")
 	session.hello()
 	session.reportOnce() // fresh nodes appear immediately
@@ -169,6 +174,7 @@ type agentSession struct {
 	shutdownOnce sync.Once
 	term         *terminalManager
 	sbx          *singboxManager
+	updater      *selfUpdater
 
 	probeMetrics atomic.Bool   // §16: stream 5s samples while a detail page is open
 	cadence      chan struct{} // nudges reportLoop to re-arm its ticker (buffered 1)
@@ -177,7 +183,7 @@ type agentSession struct {
 	execMu  chan struct{} // one command at a time; also serves as idempotency guard
 }
 
-func newSession(cfg *Config, coll *collect.Collector, ws *websocket.Conn, sbx *singboxManager, log *slog.Logger) *agentSession {
+func newSession(cfg *Config, coll *collect.Collector, ws *websocket.Conn, sbx *singboxManager, updater *selfUpdater, log *slog.Logger) *agentSession {
 	s := &agentSession{
 		cfg:        cfg,
 		coll:       coll,
@@ -190,6 +196,7 @@ func newSession(cfg *Config, coll *collect.Collector, ws *websocket.Conn, sbx *s
 		cadence:    make(chan struct{}, 1),
 	}
 	s.sbx = sbx
+	s.updater = updater
 	s.term = newTerminalManager(s)
 	return s
 }
@@ -210,6 +217,9 @@ func (s *agentSession) hello() {
 			Systemd:  detect == service.KindSystemd,
 			Procd:    detect == service.KindProcd,
 			Fallback: detect == service.KindFallback,
+			// §5.5: agents built before this never send the bit, which is how
+			// the panel tells "will follow" from "needs a reinstall".
+			SelfUpdate: selfUpdateSupported(),
 		},
 		IPs: LocalIPs(),
 	}
@@ -373,7 +383,8 @@ func (s *agentSession) handleServerFrame(env protocol.Envelope) {
 	case protocol.TypeHelloAck:
 		var ack protocol.HelloAck
 		if json.Unmarshal(env.Payload, &ack) == nil {
-			s.log.Info("hello_ack", "node", ack.NodeID, "targets", len(ack.LatencyTargets))
+			s.log.Info("hello_ack", "node", ack.NodeID, "targets", len(ack.LatencyTargets),
+				"agent_target", ack.AgentTargetVersion)
 			s.targets = ack.LatencyTargets
 			s.setProbeMetrics(ack.ProbeMetrics)
 			s.applyDesired(ack.Desired) // full desired state rides along (§7)
@@ -404,6 +415,22 @@ func (s *agentSession) applyDesired(desired protocol.DesiredState) {
 			"version", desired.Singbox.Version, "port", desired.Singbox.Port)
 	}
 	s.sbx.SetDesired(desired.Singbox)
+	// §5.5: the same declaration carries the agent build this server wants, so
+	// an operator retry can arrive as a plain desired frame.
+	if s.updater != nil {
+		s.updater.SetReporter(s.reportAgentUpdate)
+		s.updater.Consider(desired.AgentTargetVersion, desired.AgentUpdateAfter)
+	}
+}
+
+// reportAgentUpdate narrates one §5.5 attempt to the server. Fire-and-forget:
+// the frame may be dropped while the socket is being torn down by the very
+// restart it announces, and the definitive evidence is the version the new
+// binary reports at its next handshake.
+func (s *agentSession) reportAgentUpdate(target, phase, class string, attempts int, errMsg string) {
+	s.sendEnvelope(protocol.NewEnvelope(protocol.TypeAgentUpdate, "", protocol.AgentUpdate{
+		Target: target, Phase: phase, Class: class, Error: errMsg, Attempts: attempts,
+	}))
 }
 
 func (s *agentSession) applyDesiredFrame(env protocol.Envelope) {

@@ -9,6 +9,7 @@ import { useI18n } from '../i18n';
 import { useTheme, type ThemeMode } from '../theme';
 import { fmtBytes, fmtRate, fmtTime } from '../format';
 import type {
+  AgentUpdateStatus,
   BlacklistRow,
   GeoIPDownload,
   GeoIPStatus,
@@ -40,6 +41,7 @@ const NOTIFY_KEYS = ['notify.telegram_bot_token', 'notify.telegram_chat_id', 'no
 const PROXY_KEYS = ['anytls_password'] as const;
 /** §14.1 database refresh policy; the database itself has its own endpoints. */
 const GEOIP_KEYS = ['geoip.auto_update', 'geoip.max_age_days', 'geoip.url'] as const;
+const AGENT_KEYS = ['agent.auto_update'] as const;
 
 function isHTTPURL(value: string): boolean {
   try {
@@ -267,6 +269,13 @@ export default function Settings() {
         onSave={() => void saveGroup(GEOIP_KEYS)}
         saveLabel={t('save')}
       />
+      <AgentUpdateCard
+        field={field}
+        busy={busy}
+        savedMsg={savedMsg}
+        onSave={() => void saveGroup(AGENT_KEYS)}
+        saveLabel={t('save')}
+      />
       <BlacklistCard />
       <SessionsCard />
       <AuditCard />
@@ -284,6 +293,79 @@ export default function Settings() {
         </div>
       </section>
     </div>
+  );
+}
+
+
+/**
+ * §5.5 agent self-update: the on/off switch plus the reasons it can be off and
+ * how many probes are behind. The panel never triggers an update itself — the
+ * only operator actions are "retry" (on the node page) and reinstalling a probe
+ * whose binary predates the feature.
+ */
+function AgentUpdateCard({
+  field,
+  busy,
+  savedMsg,
+  onSave,
+  saveLabel,
+}: {
+  field: (
+    key: string,
+    label: string,
+    opts?: { password?: boolean; type?: string; select?: { value: string; label: string }[] },
+  ) => ReactNode;
+  busy: boolean;
+  savedMsg: string | null;
+  onSave: () => void;
+  saveLabel: string;
+}) {
+  const { t } = useI18n();
+  const [status, setStatus] = useState<AgentUpdateStatus | null>(null);
+
+  const load = useCallback(() => {
+    api
+      .getAgentUpdateStatus()
+      .then((r) => setStatus(r.status))
+      .catch(() => setStatus(null));
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load, savedMsg]);
+
+  const reasonKey = status?.reason
+    ? `agent_update_reason_${status.reason}`
+    : 'agent_update_reason_not_wired';
+
+  return (
+    <section className="card">
+      <h3>{t('sec_agent_update')}</h3>
+      <p className="hint">{t('agent_update_desc')}</p>
+      <div className="form-grid">
+        {field('agent.auto_update', t('agent_auto_update'), {
+          select: [
+            { value: '1', label: t('agent_auto_on') },
+            { value: '0', label: t('agent_auto_off') },
+          ],
+        })}
+      </div>
+      {status && (
+        <div className="hint">
+          <div>
+            {t('agent_update_target')}: <span className="mono">{status.server_version || '-'}</span>
+            {' · '}
+            {status.enabled
+              ? t('agent_update_behind', { n: status.nodes_behind, total: status.nodes_total })
+              : t('agent_update_off_reason', { reason: t(reasonKey as never) })}
+          </div>
+          {status.enabled && status.nodes_behind > 0 && (
+            <div>{t('agent_update_queue')}</div>
+          )}
+        </div>
+      )}
+      <SaveRow busy={busy} savedMsg={savedMsg} onSave={onSave} label={saveLabel} />
+    </section>
   );
 }
 

@@ -59,7 +59,7 @@ fobe-server admin unblock <ip|all> | reset-password | list-sessions --revoke | k
 4. **XFF 只信 `FOBE_TRUSTED_PROXIES` 内上游传来的最左地址**，范围外忽略 XFF 改用 socket 源地址。
 5. `server.public_url` 是安装命令与订阅域名的准绳，**优先于请求 Host**；改了它要同步改 `install.sh` 的渲染预期。
 6. **API 只返回结构化数据与 snake_case 错误码**（`writeErr(w, status, code)`），不出中文文案；文案在 `web/src/i18n.tsx`，zh/en 两份都要加。
-7. **AI 执行默认放行，但元操作强制确认**（面板密码、主密钥、AI 自身配置、agent 自更新——design §12.3）；每条执行写 `audit_logs`；Kill Switch 必须能冻结全部执行。
+7. **AI 执行默认放行，但元操作强制确认**（面板密码、主密钥、AI 自身配置、**由 AI 发起的** agent 自更新——design §12.3）；每条执行写 `audit_logs`；Kill Switch 必须能冻结全部执行，**包括 agent 自动更新**（on 时服务端不下发 target）。§5.5 的**系统自动跟随**不属于元操作（服务端版本变更触发，AI 侧只有只读查询）。
 8. **agent 不调用外部命令做采集**（OpenWrt 是 busybox），只读 `/proc`、`/sys`、`statfs`。
 9. **流量计数器 `delta < 0` 判为回绕/重启**：不计负数、重设基准，并记 `counter_reset` 事件。
 10. **sing-box 变更走三道闸门**：下载+sha256 → `check` → 启动 → 30s 观察（进程存活 + 端口可连 + TLS 握手）→ 失败回滚 `.prev`。版本必须显式指定，不追 latest。
@@ -101,4 +101,5 @@ fobe-server admin unblock <ip|all> | reset-password | list-sessions --revoke | k
 - **局域网探针集体掉线 → 先查监听地址，再查 `server.public_url`**：dev.sh 曾一度硬绑 `127.0.0.1`，探针装的是局域网地址（`server.public_url`），于是全部连不上、面板数据看起来「不会自动更新」（页面上其实是离线状态）。判断顺序：`lsof -nP -iTCP:8080 -sTCP:LISTEN` 看是不是 `*:8080`，再看 `server.public_url` 是否等于本机当前局域网 IP（`ipconfig getifaddr en0`）。改完 dev.sh 必须**重启**它才生效。
 - **`FOBE_ADMIN_PASSWORD` 是密码准绳**：每次启动同步为该值，变更时吊销全部旧会话；不设置则不动现有密码。首次启动无用户且未设置时才打印一次性初始密码。
 - **`.gitignore` 覆盖了 `.agents/`、`.zcode/`、`.mem/`**（本地 skills 与工具元数据）以及构建产物 `agent`、`agent.exe`、`server`、`web/dist/`、`data/`。仓库根目录里那些二进制是本地构建残留，不要提交。
+- **挂载卷遮蔽镜像内置的 agent 产物**：镜像里 `COPY` 了 `/srv/dl/agent/<version>/`，但 compose 把 `../data/dl` 挂到 `/srv/dl`——宿主机目录里没有的版本就看不见，标准部署下 `/dl/agent/<version>/linux-amd64` 默认 404，"探针跟随服务端"（design §5.5）会静默失效。所以服务端启动时必须把镜像自带产物**复制进 DL 卷**；排查"节点一直没跟上"先看 DL 卷里有没有该版本目录和 `.sha256`。
 - `data/sqlite/fobe.db` 是 WAL 单写者，别用多实例同时挂载。

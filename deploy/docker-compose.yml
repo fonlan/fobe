@@ -4,6 +4,11 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.server
       args:
+        # Same $VERSION is injected into fobe-server and fobe-agent, and it is
+        # the §5.5 self-update target. "compose" is deliberately not a release
+        # identifier (it contains no digit), so an unversioned local build never
+        # tells probes to "follow": set FOBE_VERSION to a real tag to exercise
+        # agent auto-update locally.
         VERSION: ${FOBE_VERSION:-compose}
     image: fobe-server:latest
     restart: unless-stopped

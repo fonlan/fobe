@@ -62,7 +62,18 @@ CREATE TABLE IF NOT EXISTS nodes (
     primary_ip      TEXT NOT NULL DEFAULT '',
     country_code    TEXT NOT NULL DEFAULT '',
     tz              TEXT NOT NULL DEFAULT 'UTC',
-    caps            TEXT NOT NULL DEFAULT '{}'
+    caps            TEXT NOT NULL DEFAULT '{}',
+    -- agent self-update bookkeeping (design §5.5). target is the version this
+    -- server wants the probe to run; state is planned|downloading|verifying|
+    -- committed|failed|unsupported|suppressed. The agent keeps its own copy in
+    -- /etc/fobe-agent/update-state.json; this one lets the panel answer
+    -- "why did it not follow?".
+    agent_target_version    TEXT NOT NULL DEFAULT '',
+    agent_update_state      TEXT NOT NULL DEFAULT '',
+    agent_update_attempts   INTEGER NOT NULL DEFAULT 0,
+    agent_update_error      TEXT NOT NULL DEFAULT '',
+    agent_update_planned_at INTEGER NOT NULL DEFAULT 0,
+    agent_update_done_at    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS node_ips (

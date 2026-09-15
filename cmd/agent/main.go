@@ -2,6 +2,7 @@
 //
 //	fobe-agent -register -token <REGTOKEN> -server https://panel.example.com
 //	fobe-agent -run [-config /etc/fobe-agent/config.json]
+//	fobe-agent -selfcheck [-config …]   # §5.5 bypass handshake, used by -run
 package main
 
 import (
@@ -19,6 +20,10 @@ func main() {
 	token := flag.String("token", "", "registration token (single use, 30 min TTL)")
 	server := flag.String("server", "", "panel base URL, e.g. https://panel.example.com")
 	run := flag.Bool("run", false, "run the agent against the configured server")
+	// §5.5: the self-check a freshly downloaded binary runs on itself before the
+	// running agent commits the replacement. It talks to the server but never
+	// registers, so a failed check changes nothing on either side.
+	selfcheck := flag.Bool("selfcheck", false, "verify this binary can serve the configured server, then exit")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -40,19 +45,31 @@ func main() {
 		}
 		fmt.Println("registered:", cfg.NodeID)
 
+	case *selfcheck:
+		cfg, err := agent.LoadConfig(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fobe-agent: %v\n", err)
+			os.Exit(1)
+		}
+		if err := agent.SelfCheck(cfg, log); err != nil {
+			fmt.Fprintf(os.Stderr, "fobe-agent: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("selfcheck ok:", agent.Version)
+
 	case *run:
 		cfg, err := agent.LoadConfig(*configPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fobe-agent: %v\n", err)
 			os.Exit(1)
 		}
-		if err := agent.Run(cfg, log); err != nil {
+		if err := agent.Run(cfg, *configPath, log); err != nil {
 			fmt.Fprintf(os.Stderr, "fobe-agent: %v\n", err)
 			os.Exit(1)
 		}
 
 	default:
-		fmt.Fprintf(os.Stderr, "fobe-agent %s\nusage: fobe-agent -register -token <TOKEN> -server <URL>\n       fobe-agent -run [-config PATH]\n", agent.Version)
+		fmt.Fprintf(os.Stderr, "fobe-agent %s\nusage: fobe-agent -register -token <TOKEN> -server <URL>\n       fobe-agent -run [-config PATH]\n       fobe-agent -selfcheck [-config PATH]\n", agent.Version)
 		os.Exit(2)
 	}
 }

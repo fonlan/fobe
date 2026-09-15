@@ -94,7 +94,14 @@ export default function Servers() {
                   <span className={'dot ' + (n.online ? 'on' : 'off')} title={t(n.online ? 'online' : 'offline')} />
                 </td>
                 <td className="mono">{n.primary_ip || t('unknown')}</td>
-                <td className="mono">{n.agent_version || '-'}</td>
+                <td className="mono">
+                  {n.agent_version || '-'}
+                  {/* §5.5: the target is shown next to the reported version so a
+                      probe that has not followed yet is visible without opening it. */}
+                  {n.agent_target_version && n.agent_target_version !== n.agent_version && (
+                    <span className="hint"> → {n.agent_target_version}</span>
+                  )}
+                </td>
                 <td className="nowrap">
                   <Link
                     to={`/settings/servers/${encodeURIComponent(n.id)}`}

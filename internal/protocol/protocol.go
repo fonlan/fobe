@@ -20,6 +20,8 @@ const (
 	TypeState     = "state"
 	TypeCmdResult = "cmd_result"
 	TypePing      = "ping"
+	// TypeAgentUpdate reports one agent self-update attempt (§5.5).
+	TypeAgentUpdate = "agent_update"
 	// Terminal (agent → server side of the browser session).
 	TypeTerminalOutput = "terminal_output"
 	TypeTerminalClosed = "terminal_closed"
@@ -72,6 +74,12 @@ type Hello struct {
 	TZ        string   `json:"tz"` // IANA name, e.g. Asia/Shanghai
 	Caps      Caps     `json:"caps"`
 	IPs       []IPInfo `json:"ips"`
+	// SelfCheck marks the bypass handshake of a freshly downloaded binary
+	// (§5.5). The server answers hello_ack and closes without registering the
+	// connection or touching last_seen/agent_version — a plain handshake would
+	// kick the running agent off the wire and make the panel report a version
+	// that is not actually serving.
+	SelfCheck bool `json:"selfcheck,omitempty"`
 }
 
 // Caps reports what the agent can do on this host (design §5.1).
@@ -80,6 +88,10 @@ type Caps struct {
 	Systemd  bool `json:"systemd"`
 	Procd    bool `json:"procd"`
 	Fallback bool `json:"fallback"` // pidfile watchdog mode
+	// SelfUpdate reports that this agent may replace its own binary (§5.5).
+	// Agents built before §5.5 do not send it, which is exactly how the panel
+	// tells "needs a manual reinstall" from "will follow on its own".
+	SelfUpdate bool `json:"self_update"`
 }
 
 // IPInfo is one address of the probe (loopback / link-local excluded).
@@ -168,6 +180,42 @@ type CmdResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// Self-update phases carried by AgentUpdate (§5.5). planned/downloading/
+// verifying are progress, committed is success; failed carries Class. The two
+// extra conditions are terminal judgements the agent makes on its own and the
+// panel renders as-is.
+const (
+	UpdatePlanned     = "planned"
+	UpdateDownloading = "downloading"
+	UpdateVerifying   = "verifying"
+	UpdateCommitted   = "committed"
+	UpdateFailed      = "failed"
+	// UpdateSuppressed: this target already exhausted its attempt budget; the
+	// agent stopped until the target changes or an operator hits retry.
+	UpdateSuppressed = "suppressed"
+	// UpdateUnsupported: no supervisor to restart under (nohup/fallback mode),
+	// so the agent never replaces its own binary.
+	UpdateUnsupported = "unsupported"
+)
+
+// Failure classes (§5.5): terminal stops retrying until the target changes or
+// an operator retries; transient backs off and tries again.
+const (
+	ClassTerminal  = "terminal"
+	ClassTransient = "transient"
+)
+
+// AgentUpdate reports one self-update attempt to the server (§5.5). The server
+// keeps it in nodes.agent_update_* for the panel, writes an audit line, and
+// raises the terminal/transient alerts.
+type AgentUpdate struct {
+	Target   string `json:"target"`
+	Phase    string `json:"phase"`
+	Class    string `json:"class,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Attempts int    `json:"attempts,omitempty"`
+}
+
 // --- server → agent payloads ---
 
 // HelloAck answers hello with the full desired state (design §7).
@@ -177,11 +225,28 @@ type HelloAck struct {
 	ProbeMetrics   bool         `json:"probe_metrics"` // stream 5s samples while a detail page is open
 	Desired        DesiredState `json:"desired"`
 	LatencyTargets []TargetSpec `json:"latency_targets"`
+	// AgentTargetVersion is the agent build this server wants the probe to run
+	// (§5.5). Empty means "self-update is disabled / not offered right now":
+	// non-release server version, missing artifact, panel switch off, or the
+	// kill switch is on. Agents compare it against their own build and switch
+	// when it differs — in either direction.
+	AgentTargetVersion string `json:"agent_target_version,omitempty"`
+	// AgentUpdateAfter is the unix second before which the agent must not
+	// start (§5.5 stagger). A server restart drops every agent connection at
+	// once, so without a server-computed offset they would all fetch the same
+	// 10 MB artifact in the same instant.
+	AgentUpdateAfter int64 `json:"agent_update_after,omitempty"`
 }
 
 // DesiredState is declarative (design §7): the agent converges to this.
 type DesiredState struct {
 	Singbox *SingboxDesired `json:"singbox,omitempty"`
+	// Agent self-update target (§5.5). These mirror the flat HelloAck fields so
+	// an operator retry can nudge an online agent with a plain `desired` frame
+	// instead of waiting for its next handshake. Both carriers are always
+	// filled by the server; the agent reads them from here.
+	AgentTargetVersion string `json:"agent_target_version,omitempty"`
+	AgentUpdateAfter   int64  `json:"agent_update_after,omitempty"`
 }
 
 // SingboxDesired: install/update the given version and apply this config.

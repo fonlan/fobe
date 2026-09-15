@@ -35,6 +35,29 @@ export interface NodeView {
   today_rx: number;
   today_tx: number;
   next_due_at?: number | null;
+  // Agent self-update state (design §5.5): what the panel needs to answer
+  // "why did this probe not follow the server?".
+  agent_target_version: string;
+  agent_update_state: string;
+  agent_update_attempts: number;
+  agent_update_error?: string;
+  agent_update_planned_at?: number | null;
+  agent_update_done_at?: number | null;
+  /** Capability bit: false = built before §5.5, needs a manual reinstall. */
+  agent_self_update: boolean;
+  /** Whether the agent ever said hello (false = no caps reported yet). */
+  agent_caps_seen: boolean;
+}
+
+/** GET /api/agent/update (design §5.5). */
+export interface AgentUpdateStatus {
+  enabled: boolean;
+  reason?: string;
+  server_version: string;
+  artifact_present: boolean;
+  stagger_seconds: number;
+  nodes_total: number;
+  nodes_behind: number;
 }
 
 export interface NodeIP {

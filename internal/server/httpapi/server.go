@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/fobe-panel/fobe/internal/server/agentupdate"
 	"github.com/fobe-panel/fobe/internal/server/geoip"
 	"github.com/fobe-panel/fobe/internal/server/geoipupdate"
 	"github.com/fobe-panel/fobe/internal/server/hub"
@@ -67,6 +68,10 @@ type Server struct {
 	// optional — without it the section reports "not wired" instead of failing.
 	GeoIPUpdater *geoipupdate.Manager
 
+	// AgentUpdate is the §5.5 self-update manager. Optional: dev builds and
+	// tests can run without one (no target is offered then).
+	AgentUpdate *agentupdate.Manager
+
 	// events broker for /ws/events (live panel updates)
 	evMu   sync.Mutex
 	evSubs map[chan []byte]struct{}
@@ -117,6 +122,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/nodes/{id}/latency", s.requireSession(s.handleNodeLatency))
 	mux.HandleFunc("GET /api/nodes/{id}/commands", s.requireSession(s.handleListCommands))
 	mux.HandleFunc("POST /api/nodes/{id}/commands", s.requireSession(s.handleEnqueueCommand))
+	// §5.5 agent self-update: cluster status, operator retry, reinstall command.
+	mux.HandleFunc("GET /api/agent/update", s.requireSession(s.handleAgentUpdateStatus))
+	mux.HandleFunc("POST /api/nodes/{id}/agent/retry", s.requireSession(s.handleAgentUpdateRetry))
+	mux.HandleFunc("POST /api/nodes/{id}/agent/reinstall-command", s.requireSession(s.handleAgentReinstallCommand))
 
 	// registration tokens (add-node flow, §4.2)
 	mux.HandleFunc("GET /api/reg-tokens", s.requireSession(s.handleListRegTokens))

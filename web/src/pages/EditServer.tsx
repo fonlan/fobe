@@ -85,6 +85,129 @@ export default function EditServer() {
         <h3>{t('sb_card')}</h3>
         <SingboxCard nodeId={id} onChanged={() => void load()} />
       </section>
+
+      <section className="card">
+        <h3>{t('sec_agent_update')}</h3>
+        <AgentUpdatePanel node={node} onChanged={() => void load()} />
+      </section>
+    </div>
+  );
+}
+
+/**
+ * §5.5 agent self-update, per node: what the panel knows (current vs target,
+ * state, plan, last error) plus the two operator actions — retry (unlock a
+ * circuit-broken probe) and, for probes whose binary predates the feature, a
+ * fresh reinstall command.
+ */
+function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; onChanged: () => void }) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const [cmd, setCmd] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const behind = node.agent_target_version !== '' && node.agent_target_version !== node.agent_version;
+  const stateKey = node.agent_update_state ? `agent_state_${node.agent_update_state}` : '';
+
+  const retry = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      const r = await api.retryAgentUpdate(node.id);
+      setMsg(t('agent_update_retry_done') + (r.pushed ? '' : ' · ' + t('offline')));
+      onChanged();
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reinstall = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api.agentReinstallCommand(node.id);
+      setCmd(r.install_command);
+    } catch (e) {
+      setErr(t('agent_reinstall_failed') + ' · ' + apiErrorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copy = async () => {
+    if (!cmd) return;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable: the command is selectable text either way */
+    }
+  };
+
+  return (
+    <div className="stack">
+      <div className="tile-grid">
+        <Tile label={t('agent_update_current')} value={node.agent_version || '-'} />
+        <Tile label={t('agent_update_target')} value={node.agent_target_version || '-'} />
+        <Tile
+          label={t('agent_update_state')}
+          value={stateKey && t(stateKey as never) !== stateKey ? t(stateKey as never) : node.agent_update_state || '-'}
+          sub={node.agent_update_attempts > 0 ? `${t('agent_update_attempts')}: ${node.agent_update_attempts}` : undefined}
+        />
+        <Tile
+          label={t('agent_update_planned')}
+          value={node.agent_update_planned_at ? fmtTime(node.agent_update_planned_at) : '-'}
+          sub={node.agent_update_done_at ? `${t('agent_update_done')}: ${fmtTime(node.agent_update_done_at)}` : undefined}
+        />
+      </div>
+
+      {node.agent_update_error && (
+        <p className="form-error">
+          {t('agent_update_error')}: <span className="mono">{node.agent_update_error}</span>
+        </p>
+      )}
+
+      {/* Only an agent that has actually reported caps can be judged: a node
+          that never said hello is not evidence of an outdated binary. */}
+      {node.agent_caps_seen && !node.agent_self_update && (
+        <div className="stack">
+          <p className="hint">{t('agent_reinstall_hint')}</p>
+          <div className="row-gap">
+            <button type="button" className="btn" disabled={busy} onClick={() => void reinstall()}>
+              {t('agent_reinstall_title')}
+            </button>
+          </div>
+          {cmd && (
+            <div className="stack">
+              <pre className="code-block">{cmd}</pre>
+              <div className="row-gap">
+                <button type="button" className="btn small" onClick={() => void copy()}>
+                  {copied ? t('copied') : t('copy')}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {behind && node.agent_self_update && (
+        <div className="row-gap">
+          <button type="button" className="btn primary" disabled={busy} onClick={() => void retry()}>
+            {t('agent_update_retry')}
+          </button>
+        </div>
+      )}
+
+      {msg && <span className="form-ok">{msg}</span>}
+      {err && <span className="form-error">{err}</span>}
     </div>
   );
 }

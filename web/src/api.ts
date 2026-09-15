@@ -3,6 +3,7 @@
 // the backend error *code*; pages localize codes via i18n (design §16).
 
 import type {
+  AgentUpdateStatus,
   AlertRow,
   AuditRow,
   BlacklistRow,
@@ -225,6 +226,27 @@ export function setNodePrimaryIP(id: string, ip: string): Promise<{ ok: boolean 
  */
 export function probeMetrics(id: string, enabled: boolean): Promise<{ ok: boolean }> {
   return request(`/api/nodes/${encodeURIComponent(id)}/probe`, { method: 'POST', body: { enabled } });
+}
+
+// --- agent self-update (design §5.5) ---------------------------------------
+
+/** Cluster-wide view: on/off, why, and how many probes are behind. */
+export function getAgentUpdateStatus(): Promise<{ status: AgentUpdateStatus }> {
+  return request('/api/agent/update');
+}
+
+/** Operator retry: clears the attempt counters and nudges an online agent. */
+export function retryAgentUpdate(id: string): Promise<{ ok: boolean; pushed: boolean }> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/agent/retry`, { method: 'POST' });
+}
+
+/**
+ * Reinstall command for a probe whose agent predates §5.5. Mints a fresh
+ * single-use registration token; the machine re-registers onto the same node
+ * because the probe keeps its machine-id and node credentials.
+ */
+export function agentReinstallCommand(id: string): Promise<{ install_command: string; ttl: number }> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/agent/reinstall-command`, { method: 'POST' });
 }
 
 // --- commands ---------------------------------------------------------------

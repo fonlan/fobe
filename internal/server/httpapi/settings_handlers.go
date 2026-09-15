@@ -3,6 +3,8 @@ package httpapi
 import (
 	"net/http"
 	"strings"
+
+	"github.com/fobe-panel/fobe/internal/server/agentupdate"
 )
 
 // Settings groups (design §4.4 / §12.1 / §14 / §15 / §16):
@@ -47,6 +49,8 @@ var allowedKeys = func() map[string]bool {
 		"ui.theme", // light|dark|system; validated below (§16 dual-write)
 		// §14.1 GeoIP database refresh policy.
 		"geoip.auto_update", "geoip.max_age_days", "geoip.url",
+		// §5.5 agent self-update switch (default on).
+		agentupdate.SettingAutoUpdate,
 	} {
 		m[k] = true
 	}
@@ -69,6 +73,16 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 type putSettingsReq struct {
 	Settings map[string]string `json:"settings"`
+}
+
+// validBoolSetting accepts the spellings the panel and env-style config use.
+func validBoolSetting(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "0", "true", "false", "on", "off", "yes", "no":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
@@ -95,6 +109,12 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusBadRequest, "bad_theme")
 				return
 			}
+		}
+		// §5.5 switch. Anything truthy-but-unparsable would silently mean "on"
+		// (the default), so refuse it instead of pretending to have turned it off.
+		if key == agentupdate.SettingAutoUpdate && !validBoolSetting(value) {
+			writeErr(w, http.StatusBadRequest, "bad_switch")
+			return
 		}
 		// §14.1 policy values; validated by the same helper the §17 import uses.
 		if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {

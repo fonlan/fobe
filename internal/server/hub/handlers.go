@@ -335,6 +335,12 @@ func (h *Hub) buildDesiredState(nodeID string) protocol.DesiredState {
 			desired.Singbox.ConfigJSON = cfg
 		}
 	}
+	// §5.5: the agent build this server wants, plus the earliest moment the
+	// probe may start. Filled here so hello_ack and an operator's retry push
+	// (a plain `desired` frame) carry exactly the same values.
+	if h.agentUp != nil {
+		h.agentUp.Desired(nodeID, &desired)
+	}
 	return desired
 }
 

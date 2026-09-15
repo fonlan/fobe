@@ -87,6 +87,13 @@ func (s *Store) migrateAdditive() error {
 		{"node_ips", "manual_primary", `ALTER TABLE node_ips ADD COLUMN manual_primary INTEGER NOT NULL DEFAULT 0`},
 		{"node_singbox", "firewall_hint", `ALTER TABLE node_singbox ADD COLUMN firewall_hint TEXT NOT NULL DEFAULT ''`},
 		{"node_singbox", "password_override", `ALTER TABLE node_singbox ADD COLUMN password_override TEXT NOT NULL DEFAULT ''`},
+		// §5.5 agent self-update bookkeeping (migrateAdditive is idempotent).
+		{"nodes", "agent_target_version", `ALTER TABLE nodes ADD COLUMN agent_target_version TEXT NOT NULL DEFAULT ''`},
+		{"nodes", "agent_update_state", `ALTER TABLE nodes ADD COLUMN agent_update_state TEXT NOT NULL DEFAULT ''`},
+		{"nodes", "agent_update_attempts", `ALTER TABLE nodes ADD COLUMN agent_update_attempts INTEGER NOT NULL DEFAULT 0`},
+		{"nodes", "agent_update_error", `ALTER TABLE nodes ADD COLUMN agent_update_error TEXT NOT NULL DEFAULT ''`},
+		{"nodes", "agent_update_planned_at", `ALTER TABLE nodes ADD COLUMN agent_update_planned_at INTEGER NOT NULL DEFAULT 0`},
+		{"nodes", "agent_update_done_at", `ALTER TABLE nodes ADD COLUMN agent_update_done_at INTEGER NOT NULL DEFAULT 0`},
 	}
 	for _, m := range migrations {
 		if s.columnExists(m.table, m.column) {

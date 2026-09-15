@@ -233,6 +233,14 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	// §5.5 bypass handshake: a freshly downloaded binary proves it can talk to
+	// the server *before* anything is committed. It must not take the normal
+	// path — that would replace the live connection (kicking a healthy agent
+	// offline) and write a version into the panel that is not serving.
+	if r.Header.Get("X-Fobe-Selfcheck") != "" {
+		s.Hub.HandleAgentSelfCheck(w, r, nodeID)
+		return
+	}
 	s.Hub.HandleAgentWS(w, r, nodeID)
 }
 

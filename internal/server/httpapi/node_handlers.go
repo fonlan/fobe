@@ -46,6 +46,22 @@ type nodeView struct {
 	TodayRx     int64   `json:"today_rx"`
 	TodayTx     int64   `json:"today_tx"`
 	NextDueAt   *int64  `json:"next_due_at,omitempty"`
+
+	// Agent self-update state (design §5.5): what the panel needs to answer
+	// "why did this probe not follow the server?".
+	AgentTargetVersion   string `json:"agent_target_version"`
+	AgentUpdateState     string `json:"agent_update_state"`
+	AgentUpdateAttempts  int    `json:"agent_update_attempts"`
+	AgentUpdateError     string `json:"agent_update_error,omitempty"`
+	AgentUpdatePlannedAt *int64 `json:"agent_update_planned_at,omitempty"`
+	AgentUpdateDoneAt    *int64 `json:"agent_update_done_at,omitempty"`
+	// AgentSelfUpdate is the capability bit an agent built before §5.5 never
+	// sends; false is how the panel recognises "needs a manual reinstall".
+	AgentSelfUpdate bool `json:"agent_self_update"`
+	// AgentCapsSeen tells "no self-update support" apart from "never said
+	// hello": a freshly registered node has no caps yet, and accusing it of
+	// needing a reinstall would be wrong.
+	AgentCapsSeen bool `json:"agent_caps_seen"`
 }
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +84,26 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 		CPUCores: n.CPUCores, PrimaryIP: n.PrimaryIP, CountryCode: n.CountryCode,
 		AgentVersion: n.AgentVersion,
 		PeriodPct:    -1,
+
+		AgentTargetVersion:  n.AgentTargetVersion,
+		AgentUpdateState:    n.AgentUpdateState,
+		AgentUpdateAttempts: n.AgentUpdateAttempts,
+		AgentUpdateError:    n.AgentUpdateError,
 	}
+	if n.AgentUpdatePlannedAt > 0 {
+		v.AgentUpdatePlannedAt = &n.AgentUpdatePlannedAt
+	}
+	if n.AgentUpdateDoneAt > 0 {
+		v.AgentUpdateDoneAt = &n.AgentUpdateDoneAt
+	}
+	// §5.5: the capability bit, not a version guess, decides whether this probe
+	// can follow on its own.
+	var caps protocol.Caps
+	if len(n.Caps) > 0 {
+		_ = json.Unmarshal(n.Caps, &caps)
+	}
+	v.AgentSelfUpdate = caps.SelfUpdate
+	v.AgentCapsSeen = capsSeen(n.Caps)
 	if n.LastSeen.Valid {
 		v.LastSeen = &n.LastSeen.Int64
 	}
@@ -102,6 +137,14 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 		v.NextDueAt = b.NextDueAt
 	}
 	return v
+}
+
+// capsSeen reports whether the agent ever completed a handshake: nodes are
+// created with "{}" and only a hello replaces it (§5.5 uses this to avoid
+// labelling a brand-new node as "needs a manual reinstall").
+func capsSeen(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s != "" && s != "{}"
 }
 
 func deref(p *int64) int64 {

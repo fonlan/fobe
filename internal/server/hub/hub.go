@@ -30,6 +30,11 @@ type Hub struct {
 	log   *slog.Logger
 	geo   geoip.Resolver // country lookup for node IPs (§14); nil keeps old behaviour
 
+	// agentUp decides §5.5 agent self-update per node. Optional: without one no
+	// target is ever offered (dev builds, unit tests) and agents simply keep
+	// whatever they run.
+	agentUp AgentUpdater
+
 	mu    sync.RWMutex
 	conns map[string]*Conn
 
@@ -37,6 +42,19 @@ type Hub struct {
 	termMu   sync.Mutex
 	termSubs map[string]chan protocol.Envelope // sessionID -> sink
 }
+
+// AgentUpdater is the §5.5 decision surface the hub needs.
+// *agentupdate.Manager implements it.
+type AgentUpdater interface {
+	// Desired fills the self-update fields of a desired state and returns the
+	// flat values for hello_ack; ok=false means "no target right now".
+	Desired(nodeID string, d *protocol.DesiredState) (version string, after int64)
+	// OnReport records what an agent said about one self-update attempt.
+	OnReport(nodeID string, r *protocol.AgentUpdate)
+}
+
+// SetAgentUpdater wires (or replaces) the §5.5 self-update manager.
+func (h *Hub) SetAgentUpdater(u AgentUpdater) { h.agentUp = u }
 
 // New builds a Hub. geo is optional (variadic) so existing callers keep
 // compiling: pass a geoip.Resolver to enable §14 country resolution; without
@@ -129,6 +147,10 @@ func (h *Hub) HandleAgentWS(w http.ResponseWriter, r *http.Request, nodeID strin
 		ProbeMetrics:   false,
 		Desired:        desired,
 		LatencyTargets: specs,
+		// §5.5: the flat fields mirror Desired so both carriers can never
+		// disagree, and old agents that ignore the new fields are unaffected.
+		AgentTargetVersion: desired.AgentTargetVersion,
+		AgentUpdateAfter:   desired.AgentUpdateAfter,
 	}
 	if !h.sendEnvelope(c, protocol.NewEnvelope(protocol.TypeHelloAck, "", ack)) {
 		return
@@ -137,6 +159,58 @@ func (h *Hub) HandleAgentWS(w http.ResponseWriter, r *http.Request, nodeID strin
 
 	go h.writePump(c)
 	h.readPump(c)
+}
+
+// HandleAgentSelfCheck serves the §5.5 bypass handshake of a downloaded binary.
+//
+// It must not behave like a normal connection: registering would close the live
+// socket (HandleAgentWS replaces a node's existing connection) and TouchNode
+// would write the *self-checking* build's version into the panel — claiming an
+// update that has not been committed. So: upgrade, read one hello, answer with
+// the target, close. Nothing is persisted.
+func (h *Hub) HandleAgentSelfCheck(w http.ResponseWriter, r *http.Request, nodeID string) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return // upgrader already replied
+	}
+	defer ws.Close()
+	// A self-check is a local process with a 60s budget; refuse to hang here.
+	_ = ws.SetReadDeadline(time.Now().Add(20 * time.Second))
+	_ = ws.SetWriteDeadline(time.Now().Add(writeWait))
+
+	var env protocol.Envelope
+	if err := ws.ReadJSON(&env); err != nil {
+		h.log.Info("agent self-check handshake failed", "node", nodeID, "err", err)
+		return
+	}
+	if env.Type != protocol.TypeHello {
+		h.log.Warn("agent self-check sent a non-hello frame", "node", nodeID, "type", env.Type)
+		return
+	}
+	var hello protocol.Hello
+	_ = json.Unmarshal(env.Payload, &hello)
+	if !hello.SelfCheck {
+		// The header said self-check; be strict about the payload too, or a
+		// mislabelled real connection would silently never register.
+		h.log.Warn("agent self-check header without payload flag", "node", nodeID)
+		return
+	}
+	desired := protocol.DesiredState{}
+	version, after := "", int64(0)
+	if h.agentUp != nil {
+		version, after = h.agentUp.Desired(nodeID, &desired)
+	}
+	ack := protocol.HelloAck{
+		NodeID:             nodeID,
+		Desired:            desired,
+		AgentTargetVersion: version,
+		AgentUpdateAfter:   after,
+	}
+	if err := ws.WriteJSON(protocol.NewEnvelope(protocol.TypeHelloAck, "", ack)); err != nil {
+		h.log.Warn("agent self-check reply failed", "node", nodeID, "err", err)
+		return
+	}
+	h.log.Info("agent self-check ok", "node", nodeID, "version", hello.Version, "target", version)
 }
 
 var upgrader = websocket.Upgrader{
@@ -215,6 +289,11 @@ func (h *Hub) handleFrame(c *Conn, env protocol.Envelope) {
 		if json.Unmarshal(env.Payload, &p) == nil {
 			h.onCmdResult(c.nodeID, &p)
 		}
+	case protocol.TypeAgentUpdate:
+		var p protocol.AgentUpdate
+		if json.Unmarshal(env.Payload, &p) == nil && h.agentUp != nil {
+			h.agentUp.OnReport(c.nodeID, &p)
+		}
 	case protocol.TypeTerminalOutput, protocol.TypeTerminalClosed:
 		h.relayTerminal(env)
 	default:
@@ -243,6 +322,18 @@ func (h *Hub) Send(nodeID string, env protocol.Envelope) bool {
 		return false
 	}
 	return h.sendEnvelope(c, env)
+}
+
+// PushDesired sends the *complete* current desired state (§7) to an online
+// agent and reports whether it reached one. The §5.5 operator retry uses it to
+// nudge a probe without waiting for its next handshake; sending the whole state
+// is what keeps that nudge from accidentally clearing sing-box management.
+func (h *Hub) PushDesired(nodeID string) bool {
+	desired := h.buildDesiredState(nodeID)
+	if desired.Singbox == nil && desired.AgentTargetVersion == "" {
+		return false
+	}
+	return h.Send(nodeID, protocol.NewEnvelope(protocol.TypeDesired, "", desired))
 }
 
 // NotifyCommand wakes the command pump after the API enqueues something.

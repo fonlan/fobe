@@ -28,6 +28,13 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     "$VERSION" "$(awk '{print $1}' linux-amd64.sha256)" > manifest.json
 )
 
+# Same artifacts in the image's seed layout (§5.5): point FOBE_AGENT_SEED_DIR at
+# $OUT/agent-seed and a non-container server seeds its artifact volume on start,
+# exactly like the container does with /srv/agent-seed.
+echo "==> agent seed layout (FOBE_AGENT_SEED_DIR=$OUT/agent-seed)"
+mkdir -p "$OUT/agent-seed/agent/$VERSION"
+cp -R "$OUT/dl/agent/$VERSION/." "$OUT/agent-seed/agent/$VERSION/"
+
 echo "==> web (if toolchain present)"
 if command -v npm >/dev/null 2>&1 && [ -d "$ROOT/web" ]; then
     (cd "$ROOT/web" && [ -d node_modules ] || npm install && npm run build)

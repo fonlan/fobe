@@ -21,7 +21,7 @@
 | 7 | 到期/超量 | 只提醒，不自动停服 | 需要告警通道，且没有自动止损 |
 | 8 | AI 模型 | OpenAI 兼容 API，自填 base_url + key，服务端加密存储 | key 在服务端；服务端需能出网 |
 | 9 | AI 执行权 ⚠ | **默认放行**：AI 自评有风险才弹确认 | 见 §12，间接提示注入可静默拿到探针 root |
-| 10 | 构建形态 | server / agent 分开编译；前端**不嵌入 Go 二进制**但**编进生产镜像**；agent 产物进服务端镜像 | 共享 protocol 模块 + 产物分发链路；镜像构建多一个前端 stage |
+| 10 | 构建形态 | server / agent 分开编译；前端**不嵌入 Go 二进制**但**编进生产镜像**；agent 产物进服务端镜像 | 共享 protocol 模块 + 产物分发链路；镜像构建多一个前端 stage；**挂载卷会遮蔽镜像内的 agent 产物，服务端启动时得把它补进卷**（§5.5） |
 | 11 | 数据库 | SQLite（WAL），文件挂载在容器外 | 单写者；指标靠保留期控盘 |
 | 12 | 订阅模型 | 单用户 + 多订阅，每订阅独立节点集与模板文件 | 模板管理 + 双格式引擎 |
 | 13 | 探针凭据 | 一个入站 + 一个**全局共享** anytls 密码 | 无法按订阅吊销代理访问，只能全局轮换 |
@@ -32,6 +32,7 @@
 | 18 | 登录加固 | 失败 3 次拉黑 IP（持久化）+ CLI 解封；**不做 2FA** | 黑名单依赖 XFF 信任链；无第二因子 |
 | 19 | 告警 | Telegram Bot + 通用 Webhook | 没装 Telegram 就收不到 |
 | 20 | 接入层 | **不在 fobe 内实现**：外部 nginx 提供 TLS 与反代，证书自备自管 | fobe 不碰证书；你必须让 nginx 传对 XFF 与 Upgrade 头（见 §3 与 README） |
+| 21 | agent 自更新 | **一直跟随服务端**：版本不一致就切（含降级），agent 自发、免确认；Kill Switch on 时冻结（§5.5） | 服务端版本号成为对外契约；不保留 `.prev` ⇒ **没有本地回滚**；存量探针必须人工重装一次才进入自动跟随 |
 
 ---
 
@@ -187,6 +188,35 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 - 内存：agent 目标常驻 < 30MB；采集周期在低内存设备上可从 60s 放宽（面板可配）。
 - 首次运行检测 overlay 剩余空间，低于阈值时拒绝安装 sing-box 并给出提示（避免把路由器写满）。
 
+### 5.5 agent 自更新（跟随服务端）（实现修订 2026-09-15）
+
+> 目标：**探针 agent 一直跟着服务端走**——服务端换了版本，探针就换成与之匹配的那一版，**不看高低**（降级与升级共用同一套逻辑）。本节取代 §9.2 里"agent 自更新走同一条链路"那句：自更新**不复用 sing-box 的三道闸门**（sing-box 有 `check` 与 30s 观察期，agent 没有可比的"先验后启"手段），换来的是**旁路自检 + 原子提交**，且**不保留 `.prev`**。
+
+- **判据只有一个：服务端版本号**。服务端在 `hello_ack` 里下发 `agent_target_version`，agent 拿它和自己的 `internal/agent.Version` 比，不等就切换（含降级）。两端版本由构建时同一个 `$VERSION` 注入（`cmd/server` 的 `main.version` 与 `internal/agent.Version`），所以"服务端版本"就是"该配哪一版 agent"。
+- **发布门槛（fail-closed）**：仅当 ① 服务端版本是发布形态（非空、非 `dev`）且 ② `<FOBE_DL_DIR>/agent/<version>/{linux-amd64,linux-amd64.sha256}` 都在时，才下发 target。任一不满足 → 不下发，面板显示停用原因。理由：dev 构建没有"发布"概念，而"下发一个取不到的版本"只会让每台探针反复重试 404。
+- **触发 = agent 自发，不需要任何人确认**：agent 每次握手看到不一致就自己动手。这是**系统行为**，不属于 §12.3 的"元操作"清单；**Kill Switch on 时服务端不下发 target**，因此"永远跟随"在这段时间让位给止损闸。
+- **错峰由服务端编排**：服务端重启会让全部探针同时重连、同时发现不一致，因此 `hello_ack` 里带 `agent_update_after`（unix 秒），服务端按 `hash(nodeID + target)` 在 0–5 分钟内给出确定性偏移（同一 node+target 稳定，target 变则重排），并把计划时刻写进 `nodes.agent_update_planned_at` 供面板显示"计划中/进行中"。**这不是概率问题**：不错峰就是 N 台同时拉 10MB，而那一刻服务端刚起来。
+- **执行链**（agent 侧，收到 target 且已过 `update_after`）：
+  1. 下载到**目标二进制所在目录**里的临时文件（同目录才能 `rename`，跨文件系统会 `EXDEV`）；目标路径由 `os.Executable()` 解析（跟随符号链接）——不猜 `BIN_DIR`，systemd 装的是 `/usr/local/bin`、OpenWrt 是 `/usr/bin`；
+  2. 与 `linux-amd64.sha256` 比对 sha256，不符即 `terminal` 失败；
+  3. 以 `-selfcheck` 跑一次**新二进制自己**：用同一份 config 连服务端，`hello` 带 `selfcheck:true`，hub 只回 `hello_ack` 后立即关闭——**不注册、不落库、不顶掉线上连接**（`hub.go` 的重复注册会 `old.close()`：天真地握手会把正在跑的 agent 踢下线，还会让面板显示一个并没生效的版本号）。自检还必须校验 `hello_ack.agent_target_version`：非空且不等于自己的 `Version` 即失败，挡住"目录名与二进制内版本错位"这类产物错放（对方为空说明服务端此刻已不再下发 target，那是环境变化而不是这个产物的问题，不作为失败）；超时 60s；
+  4. 自检通过 → `rename` 覆盖目标二进制 → **主动 `exit`**，由 supervisor（systemd `Restart=always` / procd `respawn`）拉起新版本。**不保留 `.prev`**：不留就没有本地回滚，代价是"自检过但 `-run` 起不来"这种残余情形只能 SSH 重装（§20）；换来的是 OpenWrt overlay 上少 10MB 常驻占用；
+  5. 自检或下载失败 → 线上二进制**一动不动**。
+- **fallback 不参与**：`install.sh` 的 fallback 分支用 `nohup` 起 agent，没有 supervisor，"重启自己"无处落地；这类节点上报 `self_update=false`，面板只显示需人工处理。
+- **失败分类（两本账）**：
+  - `terminal`（不再重试，等 target 变更或人工重试）：sha256 不符 / 无法 exec / 自检报版本不符；
+  - `transient`（退避 1m → 1h 封顶，不计入熔断）：连不上服务端、`/dl` 404/5xx、同目录剩余空间 < 2×产物、目标不可写。
+- **熔断双记账**：agent 本地 `/etc/fobe-agent/update-state.json` 记 `target / attempts / last_error / class`（跨重启有效），**同一 target 连续 3 次 `terminal`** 就停手并上报；服务端 `nodes` 表同样记一份（面板可见 + 人工解锁），target 变化时两边计数清零。本地那份是唯一能在"替换无效、反复重启"时救命的账，服务端那份负责可见性——**只留一边都会在某个场景下失效**。
+- **状态与面板**：`nodes` 增 `agent_target_version / agent_update_state / agent_update_attempts / agent_update_error / agent_update_planned_at / agent_update_done_at`（`migrateAdditive`，幂等）；节点页显示 当前版本 / 期望版本 / 计划时刻 / 上次结果与原因；`POST /api/nodes/{id}/agent/retry` 清计数（人工解锁）。每次尝试写 `audit_logs`（`actor=system`）。
+- **告警三档**：`terminal` 立即；`transient` 连续 3 次；分发后 15 分钟仍未收敛的节点**汇总一条**（与 §9.5 同一口径与去重窗口）。
+- **存量探针只能人工重装一次**：今天已装的 agent 二进制里没有这段代码，服务端下发 target 它也不认识（Go 忽略未知 JSON 字段，它会照常跑）。判定靠**能力位而非版本号猜测**：新 agent 在 `hello.Caps` 里报 `self_update=true`，不报的一律在面板标"需人工重装（不支持自更新）"并给出重装命令。**不许假装它会自动跟上。**
+- **产物供给**：镜像里**不能**把 agent 产物放在 `/srv/dl`——compose 把 `../data/dl` 挂到 `/srv/dl`，挂载点在容器启动时就已生效，镜像里那份**根本不可见**（不是"被覆盖"，是读不到）。因此镜像把产物放在卷外的 `/srv/agent-seed/agent/<version>/`，服务端启动时**复制进 DL 卷**（缺什么补什么，已有则不覆盖；`FOBE_AGENT_SEED_DIR` 可改，置空即关闭；与 §9.5 的 sing-box 缓存互不影响）。同一个启动步骤还会把卷里的 `agent/latest` 指向**服务端自己这一版**——否则升级容器后 `/install.sh` 会继续装上一版的 agent（`latest` 是本地脚手架留下的真实目录时不动它）。不这么做，"跟随服务端"在标准 compose 部署里默认就是 404。
+- **混版承诺**：同一大版本内双向兼容（新增字段一律可选、未知字段/帧忽略并记日志）。升级/降级过渡期必然是混版，"版本不匹配就拒绝"会把探针直接锁死。`protocol.Version` 保持 `1`。
+- **开关**：`settings.agent.auto_update`（默认开，面板可关）。关掉或 Kill Switch on = 不下发 target。AI 侧**不新增任何工具**（§12.2）：状态随既有节点查询返回，触发/冻结/解锁/重试都只能由人在面板操作。
+- **面板与接口**（全部走会话鉴权，`GET /api/agent/update` 集群状态、`POST /api/nodes/{id}/agent/retry` 人工解锁、`POST /api/nodes/{id}/agent/reinstall-command` 生成一次重装命令）。节点视图新增 `agent_target_version / agent_update_state / agent_update_attempts / agent_update_error / agent_update_planned_at / agent_update_done_at` 与能力位 `agent_self_update`（外加 `agent_caps_seen`：没握过手的节点不算"不支持"，否则新建节点会被误标重装）；`agent_update_state` 取 `planned|downloading|verifying|committed|failed|transient|suppressed|unsupported`。
+- **"重试"要能推动在线的探针**：`hello_ack` 之外的载体是普通 `desired` 帧（`DesiredState` 里带上同样两个字段），因此解锁不必等下一次握手；服务端由同一个函数同时填两个载体，不可能填出不一致的两份。
+- **两个必须失败关闭的点**（都在实现里显式处理）：① 临时文件必须落在**目标二进制同目录**再 `rename`（跨文件系统 `EXDEV`；`open+truncate` 覆盖正在运行的文件会 `ETXTBSY`）；② 同目录可用空间 < 2×产物即判 `transient` 拒绝，宁可不动也不能写半个二进制。
+
 ---
 
 ## 6. 数据模型（SQLite，WAL）
@@ -198,7 +228,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `ip_blacklist` | ip, reason, fail_count, created_at, expires_at | 持久化 |
 | `settings` | key, value, encrypted | 全局 anytls 密码、AI 配置、Telegram、保留期等 |
 | `reg_tokens` | token_hash, note, expires_at, used_at | 单次 |
-| `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, cpu_cores, primary_ip, country_code, tz | 探针主表 |
+| `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, cpu_cores, primary_ip, country_code, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表 |
 | `node_ips` | node_id, ip, family, scope, is_primary | 多 IP 全量上报 |
 | `node_network` | node_id, iface, mode(in/out/both/max), quota_bytes, cycle_days, anchor_at, tz | 流量口径与配额 |
 | `node_billing` | node_id, cycle_type, cycle_days, next_due_at, note | 缴费周期 |
@@ -234,14 +264,15 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 | 方向 | type | 说明 |
 |---|---|---|
-| agent → server | `hello` | machine_id、版本、os/arch、能力位 |
+| agent → server | `hello` | machine_id、版本、os/arch、能力位（含 `self_update`，§5.5） |
+| | `agent_update` | 自更新逐次上报：phase / class(terminal\|transient) / error / attempts（§5.5） |
 | | `metrics` | 60s 一次；面板打开详情页时服务端可请求 5s 实时流 |
 | | `traffic` | 60s 一次：选定网卡的累计计数 + 日增量 |
 | | `latency` | 60s 一次，批量（每目标 12 个 5s 采样点） |
 | | `state` | 节点信息、IP 列表、sing-box 实际状态 |
 | | `cmd_result` | 指令执行结果（stdout/stderr/exit code，截断） |
 | | `terminal` | 终端输出/关闭 |
-| server → agent | `hello_ack` | 期望状态全量下发 |
+| server → agent | `hello_ack` | 期望状态全量下发（含 `agent_target_version` / `agent_update_after`，§5.5） |
 | | `desired` | 增量下发期望状态（sing-box 版本/配置/端口/密码/证书要求） |
 | | `cmd` | 一次性命令（AI 执行、面板操作） |
 | | `terminal_open/input/resize/close` | 终端会话 |
@@ -251,6 +282,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 - 重连：指数退避 + 抖动（1s → 5min 上限）。
 - 离线指令：入队 `commands`，重连后下发；TTL 10 分钟，超时标记 `timeout` 并在面板显示（避免你三小时前点的"重启"突然生效）。
 - 所有指令带 `id`，agent 幂等执行（同 id 重复下达只执行一次）。
+- **自更新（§5.5）靠三个字段落地，不新增"下发一条更新命令"的路径**：`hello.Caps.self_update`（能力位，旧 agent 不报）、`hello_ack.agent_target_version` + `agent_update_after`（服务端判定与错峰，`DesiredState` 里镜像一份，使人工"重试"能借普通 `desired` 帧推动在线探针——agent 读的是 `DesiredState` 那份，两个载体由服务端同一个函数填写，不会不一致）、`hello.selfcheck`（自检握手——hub 收到带该标记的 hello 后只回 `hello_ack` 就关闭，**不注册、不落库、不关闭同节点的现有连接**；实现里这条路由由 `X-Fobe-Selfcheck` 请求头选择，payload 里的 `selfcheck:true` 必须同时存在）。
 
 ---
 
@@ -316,7 +348,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 - 版本**必须显式指定**（面板展示可选版本，来自服务端 release 清单），不追 latest。一键批量更新里的 `latest` 只在**点击那一刻**解析成具体版本号并固化后下发，不变量不被破坏（见 §9.5）。
 - 产物来源：优先面板 `/dl/singbox/<version>/linux-amd64`（服务端缓存，规避国内拉 GitHub 的问题），失败回退官方地址。**缓存由服务端进程自己填充**（启动时/手动重试，见 §9.5）——agent 侧只拉面板、不补官方回退。
-- agent 自更新走同一条链路（同样三道闸门 + 保留上一版）。
+- agent 自更新**不走**这条链路（实现修订 2026-09-15）：agent 没有 `check` 与 30s 观察期可用，改用"旁路自检 + 原子提交 + 主动 exit 交给 supervisor"，且**不保留 `.prev`**——详见 **§5.5**。
 - 每次变更写 `audit_logs`，并在面板节点页显示"当前版本 / 期望版本 / 上次操作结果"。
 
 > **实现修订 2026-09-15（服务端产物缓存 + 一键批量更新）**：本节原本假定"版本清单里总是有货"，但从没有一条链路负责**把货取回来**——服务端只直出 `/dl` 目录里已有的文件，agent 也只会从面板拉取。本次补齐这条链路，并且**不新增任何安装路径**：
@@ -486,6 +518,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 **不在工具集里**：§9.5 的服务端产物缓存与**一键批量更新**接口（`/api/singbox/cache*`、`/api/singbox/update*`、`DELETE /api/singbox/versions/{version}`）。它们影响面覆盖全部节点、且会写服务端缓存，不适合落进"默认放行"的执行路径；单节点更新仍走上面的 `update_singbox`（需显式版本）。
 
+**agent 自更新（§5.5）不新增任何工具**（连只读的也不加）：期望版本、计划时刻、尝试次数与失败原因随既有节点查询一并返回，AI 看得到但做不了——不能触发、冻结、解锁或改 target。系统自动跟随是服务端版本变更触发的行为，不在模型的可达范围内。
+
 ### 12.3 执行策略（⚠ 你签下的风险）
 
 **你的选择：默认放行。** 即：
@@ -499,7 +533,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 1. **全量审计**：每条命令的原文、模型给出的理由、风险标记、结果全部落 `audit_logs`；
 2. **全局 Kill Switch**：面板一键冻结所有 AI 执行（CLI 也能开），冻结后 AI 退化为只读；
 3. **速率与影响面熔断**：单节点每分钟命令数上限、连续失败自动暂停该节点的 AI 执行；
-4. **元操作强制确认**：涉及面板密码、主密钥、AI 自身配置、agent 自更新的动作，无论模型怎么判定都强制确认（防"AI 给自己扩权"）；
+4. **元操作强制确认**：涉及面板密码、主密钥、AI 自身配置、**由 AI 发起的** agent 自更新的动作，无论模型怎么判定都强制确认（防"AI 给自己扩权"）。注意区分：§5.5 的**系统自动跟随**不在这一列——那是服务端版本变更触发的系统行为，没有人在点它；实际实现里 AI 侧连写工具都没有，只有只读查询（§12.2）。
 5. `run_shell` 的 stdout/stderr 截断入审计，防止把凭据回灌进上下文。
 
 ### 12.4 已知未缓解风险（写在这里以便你日后反悔）
@@ -606,7 +640,7 @@ fobe/
 ├─ data/                      # 宿主挂载（gitignore）
 │  ├─ sqlite/fobe.db
 │  ├─ dl/                     # → 容器内 /srv/dl（**必须挂载**，见下）
-│  │  ├─ agent/<version>/     # agent 产物 + manifest.json
+│  │  ├─ agent/<version>/     # agent 产物 + manifest.json（首次启动由 seed 目录补进卷，§5.5）
 │  │  └─ singbox/<version>/   # §9.5 服务端自动下载的 sing-box 产物
 │  │     ├─ linux-amd64
 │  │     ├─ linux-amd64.sha256
@@ -642,6 +676,7 @@ services:
 
 - **没有 nginx 服务，也没有证书卷**：接入层完全外部化（见 §3 与 `README.md`）。
 - **`/data`、`/backup`、`/srv/dl` 三个卷一个都不能少**（`Dockerfile.server` 已 `VOLUME` 声明）。`/srv/dl` 尤其容易漏：它存 agent 产物与 §9.5 自动下载的 sing-box 版本，**没有独立挂载点时升级/重建容器会把这些版本全部丢掉**。服务端在容器内会自检 `FOBE_DL_DIR` 是否为 `/proc/self/mountinfo` 里的独立挂载点，不是就写 WARN 并置 `singbox.dl_mount_ok=false`（设置页标红）。症状与处置见 `README.md` 排障表。
+- **agent 产物必须放在卷外的 seed 目录**（实现修订 2026-09-15）：compose 把 `../data/dl` 挂到 `/srv/dl`，而挂载在容器启动时就生效——镜像里 `COPY` 进 `/srv/dl` 的东西**运行时根本读不到**，所以标准部署下 `/dl/agent/<version>/linux-amd64` 默认 404，`/install.sh` 也拉不到 agent。镜像因此把产物放进 `/srv/agent-seed/agent/<version>/`（`FOBE_AGENT_SEED_DIR`，非卷路径），服务端启动时**复制进 DL 卷**并把 `agent/latest` 指向自己这一版。这跟 §9.5 的 sing-box 缓存是两件事：sing-box 的产物由服务端自己联网下载，agent 的产物只能来自镜像（服务端不会自己编译 agent）。
 - **前端产物在镜像里，不挂载**：`Dockerfile.server` 的 node 阶段产出 `web/dist` 并 `COPY` 到 `/srv/web`。改前端 = 重新 `docker compose build`，不存在"改了源码忘了构建/挂载路径写错"这类事故。
 - **`/api/*` 永远不吃 SPA 兜底**（实现修订 2026-09-15）：静态处理器是最后的兜底（`mux.HandleFunc("/", s.handleStatic)`），未匹配的 `/api/...` 现在直接回 `404 {"error":{"code":"unknown_endpoint"}}`，不再吐出 API-only/`index.html` 那一页。原因是这个组合会造成一个很难查的假象：**旧代码的 server**（没重启的 dev 进程、没重建的镜像、没重启的容器）遇到新前端调用的新接口，会以 `200 text/html` 应答，前端 `resp.json()` 解析失败——而 `apiErrorMessage` 把任何非 `ApiError` 都当成 `network_error`，于是面板报"网络错误,无法连接服务器"，把人往 DNS/防火墙方向带，实际连接完全正常。现在同类情况会明确说是"接口不存在(服务端可能是旧版本)"。前端侧也补了 `bad_response`：2xx 但非 JSON 的响应单独报错，不再伪装成网络故障。（副作用：因为有 `/` 兜底模式，Go 1.22 ServeMux 的自动 405 在 `/api` 下不会触发，方法/路径不匹配统一落到这个 404。）
 - 注意：即使你从宿主机 `127.0.0.1` 发起请求，容器内看到的源地址通常是 Docker 网关（如 `172.17.0.1`），所以 `FOBE_TRUSTED_PROXIES` 默认包含 Docker 私网段。
@@ -664,6 +699,8 @@ services:
 
 每阶段可独立验收，M3 结束即具备"最小可用产品"价值。
 
+> 实现修订 2026-09-15：**agent 自更新（§5.5）** 是 M6 之后的运维增强项，不属于任何里程碑的验收前提——它只在"探针换上新 agent 之后"才开始生效（存量探针需人工重装一次，见 §20.8）。
+
 ---
 
 ## 19. 还需你拍板的默认项
@@ -673,7 +710,7 @@ services:
 1. 离线探针的指令入队后 TTL **10 分钟**，超时标失败（避免迟到指令突然生效）。
 2. 探针防火墙：agent **尝试自动放行** sing-box 端口（ufw / firewalld / nft / fw4），失败则把需要你手动执行的命令原文返回面板。
 3. 备份：每日 `VACUUM INTO` 快照保留 14 份 + 面板导出/导入。
-4. agent 自更新：与 sing-box 同样三道闸门 + 版本显式指定。
+4. agent 自更新：与 sing-box 同样三道闸门 + 版本显式指定。**（实现修订 2026-09-15：此条已被 §5.5 取代——agent 没有 `check`/观察期可用，实际是"下载 + sha256 + 旁路自检 + 原子替换"，且不保留 `.prev`；"跟随服务端"改为双向（含降级），触发是系统行为、不需确认，Kill Switch on 时冻结。）**
 5. anytls 端口默认随机高位端口，面板可改。
 6. **接入层完全外部化**：fobe 不碰 nginx、不签发也不续期证书；README 提供可直接复制的 nginx 配置（单上游 + WS 升级 + 真实 IP + 超时 + 上传体量）。
 7. 证书 pinning 替代 `insecure`：订阅里内嵌证书 PEM。
@@ -692,3 +729,9 @@ services:
 3. ⚠ **共享 anytls 密码**：无法按订阅吊销代理访问，泄漏只能全局轮换（会打断所有客户端）。
 4. ⚠ **指标只存 7 天**：7 天以外的曲线不可得（月曲线依赖永久日表，可信；但"上月某天下午的 CPU"查不到）。
 5. ⚠ **不做自动停服**：配额超标不会自动止损，完全依赖告警通道可达。
+6. ⚠ **agent 自更新不留 `.prev`**（§5.5）：没有本地回滚。旁路自检把"坏产物"挡在提交之前，但**自检过、`-run` 起不来**（只有 run 路径才用到的内核特性/配置）这种残余情形只能 SSH 上去跑面板给的重装命令。你选了省下 OpenWrt overlay 上的 10MB，代价就在这里。
+7. ⚠ **Kill Switch on 期间探针不跟随**："一直跟着服务端走"有例外——冻结是全局止损闸，优先级高于跟随。恢复跟随要你手动关掉它。
+8. ⚠ **存量探针必须人工重装一次**：今天已装的 agent 二进制里没有自更新代码，服务端下发 target 它也不认识（Go 忽略未知字段，照常跑）。面板按能力位把它标成"需人工重装"，不会自动跟上。
+9. ⚠ **服务端版本号成了对外契约**：随便打一个版本号（含把 `VERSION` 改成别的时间戳）就等于让**全部探针换一次二进制**，而降级路径是自动化测试里最容易缺的那条。发版前想清楚这个数字。
+10. ⚠ **混版窗口**：升级/降级过渡期一定是混版。承诺是"同大版本内双向兼容（新增字段可选、未知帧忽略）"，**不保证行为等价**。
+11. ⚠ **DL 卷是产物单点**：`/srv/dl` 没挂成独立卷（被重建容器清空）或换了机器，全部探针会停在原地并告警——fail-closed 不会把探针搞砖，但也绝不会跟上，直到你把产物补齐。
