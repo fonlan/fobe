@@ -1121,11 +1121,6 @@ function GeoIPCard({
   // The updater persists the failure reason on status.error, so the card shows
   // it from one place instead of repeating the live snapshot's copy.
   const stateError = status?.error && (status.state === 'failed' || status.state === 'disabled') ? status.error : null;
-  const sourceText = !status?.source
-    ? t('geoip_source_builtin')
-    : status.source === 'upload'
-      ? t('geoip_source_upload')
-      : status.source;
 
   return (
     <section className="card">
@@ -1159,13 +1154,6 @@ function GeoIPCard({
           <div className="tile-sub">
             {status?.database_type || '-'}
             {status?.exists ? ` · ${fmtBytes(status.size_bytes ?? 0)}` : ''}
-          </div>
-        </div>
-        <div className="tile">
-          <div className="tile-label">{t('geoip_source')}</div>
-          <div className="tile-value mono">{sourceText}</div>
-          <div className="tile-sub">
-            {status?.checked_at ? t('geoip_checked_at', { time: fmtTime(status.checked_at) }) : '-'}
           </div>
         </div>
       </div>
