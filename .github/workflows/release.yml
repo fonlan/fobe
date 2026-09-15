@@ -1,0 +1,99 @@
+name: Release
+
+# Tag push (v*) → test → build the production image → push to ghcr.io.
+#
+# One image is the whole deployment unit (design.md §10/§17): panel server +
+# compiled web bundle + agent artifacts (the agent seed copied into the DL
+# volume on first boot). The VERSION build-arg = tag without the "v" prefix;
+# it is injected into BOTH fobe-server and fobe-agent and drives the §5.5
+# probe self-update, so it must be a real release-shaped number — never "dev".
+#
+# linux/amd64 only: the agent artifacts and the sing-box cache handed out
+# through /dl are linux/amd64 by design (design.md §10); multi-arch would
+# double CI time without changing what probes can run.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # gofmt -l alone exits 0 even with findings — fail on any output.
+      - name: gofmt
+        run: test -z "$(gofmt -l internal cmd)"
+
+      - run: go vet ./...
+      - run: go test ./...
+
+      # The frontend has no unit tests; `npm run build` runs the tsc
+      # typecheck plus the vite bundle (the only gate the web side has).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci || npm install
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR image paths must be lowercase; repository may not be.
+      - id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.server
+          platforms: linux/amd64
+          push: true
+          # Plain single-platform manifest: attestation indexes confuse older
+          # docker engines pulling anonymously from GHCR.
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -22,7 +22,9 @@ internal/server/
   singbox/ geoip/ notify/ scheduler/ quota/
 internal/agent/       采集、sing-box 生命周期、终端、延迟、证书、系统服务
 web/src/              pages/ · components/ · api.ts · i18n.tsx · styles.css
-deploy/               Dockerfile.server（三段构建）· docker-compose.yml
+docker-compose.yml    仓库根：默认拉 GHCR 预构建镜像，--build 落回本地构建；零必填环境变量
+deploy/               Dockerfile.server（三段构建）· docker-entrypoint.sh（主密钥兜底）
+.github/workflows/    release.yml：v* tag → 测试 → 构建镜像 → 推送 GHCR
 scripts/              dev.sh · build.sh · install.sh.tmpl
 ```
 
@@ -45,10 +47,11 @@ go vet ./...
 
 cd web && npm run build           # tsc（类型检查）+ vite build
 scripts/build.sh [outdir]         # 本地/CI 三件套：server、linux/amd64 agent+manifest、web
-docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
+docker compose up -d              # 拉预构建镜像（ghcr.io/fonlan/fobe），零必填环境变量
+docker compose up -d --build      # 本机构建（VERSION 缺省 compose，非发布形态）
 
 # 进容器用的逃生口
-fobe-server admin unblock <ip|all> | reset-password | list-sessions --revoke | kill-switch on|off
+docker compose exec server fobe-server admin unblock <ip|all> | reset-password | list-sessions --revoke | kill-switch on|off
 ```
 
 前端没有单测与 lint；类型检查靠 `npm run build` 里的 `tsc`。改前端后请跑一次。
@@ -56,7 +59,7 @@ fobe-server admin unblock <ip|all> | reset-password | list-sessions --revoke | k
 ## 不要破坏的不变量
 
 1. **探针永不监听管理端口**，只主动外连 `/ws/agent`。fobe 内不含任何反代/证书逻辑——TLS 是使用者自备 nginx 的事（design §3）。
-2. **密钥**一律经 `security.Cryptor`（AES-GCM）存取；主密钥 `FOBE_MASTER_KEY` 缺失时**拒绝启动**，不降级成明文。凭据不得进日志；审计里的敏感值要脱敏（anytls 密码已用 `[redacted]`）。
+2. **密钥**一律经 `security.Cryptor`（AES-GCM）存取；主密钥 `FOBE_MASTER_KEY` 缺失时**拒绝启动**，不降级成明文（镜像入口脚本只是"替用户填上"——生成随机密钥落盘 `/data/.master_key` 并复用，见 design §4.4 修订；改入口脚本时不得引入明文回退）。凭据不得进日志；审计里的敏感值要脱敏（anytls 密码已用 `[redacted]`）。
 3. **黑名单语义**：`expires_at=0` 只是失败计数、不算封禁，只有 `expires_at > now` 才拦截；回环/私有/可信代理网段永不加黑。`NeverBlacklist` 必须在 `handleLogin` 里接线（曾漏接导致本机自锁）。
 4. **XFF 只信 `FOBE_TRUSTED_PROXIES` 内上游传来的最左地址**，范围外忽略 XFF 改用 socket 源地址。
 5. `server.public_url` 是安装命令与订阅域名的准绳，**优先于请求 Host**；改了它要同步改 `install.sh` 的渲染预期。
@@ -99,13 +102,13 @@ fobe-server admin unblock <ip|all> | reset-password | list-sessions --revoke | k
 - **`web/vite.config.js` 遮蔽 `.ts`**：Vite 配置查找里 `.js` 优先，`tsc` 曾生成它导致改了 `vite.config.ts` 却不生效。`tsconfig.node.json` 必须保持 `"emitDeclarationOnly": true`；改配置没生效就先 `ls web/vite.config.js`。
 - **前端热更新、后端不热**：`scripts/dev.sh` 只在启动时 `go build` 一次后端（产物 `data/dl/.dev-server`），Vite 那侧的改动即时生效。所以改了后端接口后会出现"新前端调旧后端"——旧后端不认识这个 `POST`，落到静态兜底处理器上以 `200 text/html` 应答，前端解析 JSON 失败后报"网络错误,无法连接服务器"（`apiErrorMessage` 把任何非 `ApiError` 都算 `network_error`）。现已加固：未匹配的 `/api/*` 回 `404 unknown_endpoint`（design §16 实现修订），2xx 非 JSON 响应报 `bad_response`。**改了后端仍然必须重启 `scripts/dev.sh`。**
 - **dev 库里 `server.public_url` 可能指向旧 IP**：它压过请求 Host，`/install.sh` 会渲染出错的 `DEFAULT_SERVER`，表现是"局域网服务器装不上探针"。换网络后先看这个设置。
-- **dev 默认监听 `0.0.0.0`**（固定密码、无 TLS，仅限可信内网）；生产的暴露控制仍由 compose 只发布到宿主机回环承担，两者互不影响。只想绑本机用 `FOBE_LISTEN=127.0.0.1:8080 scripts/dev.sh`。
+- **dev 默认监听 `0.0.0.0`**（固定密码、无 TLS，仅限可信内网）；生产的暴露面 = compose 的 `8080:8080` 全接口明文映射，要收敛改回 `127.0.0.1:8080:8080` 或用防火墙限制来源，两者互不影响。只想绑本机用 `FOBE_LISTEN=127.0.0.1:8080 scripts/dev.sh`。
 - **局域网探针集体掉线 → 先查监听地址，再查 `server.public_url`**：dev.sh 曾一度硬绑 `127.0.0.1`，探针装的是局域网地址（`server.public_url`），于是全部连不上、面板数据看起来「不会自动更新」（页面上其实是离线状态）。判断顺序：`lsof -nP -iTCP:8080 -sTCP:LISTEN` 看是不是 `*:8080`，再看 `server.public_url` 是否等于本机当前局域网 IP（`ipconfig getifaddr en0`）。改完 dev.sh 必须**重启**它才生效。
 - **`FOBE_ADMIN_PASSWORD` 是密码准绳**：每次启动同步为该值，变更时吊销全部旧会话；不设置则不动现有密码。首次启动无用户且未设置时才打印一次性初始密码。
 - **`.gitignore` 覆盖了 `.agents/`、`.zcode/`、`.mem/`**（本地 skills 与工具元数据）以及构建产物 `agent`、`agent.exe`、`server`、`web/dist/`、`data/`。仓库根目录里那些二进制是本地构建残留，不要提交。
-- **挂载卷遮蔽镜像内置的 agent 产物**：镜像里 `COPY` 了 `/srv/dl/agent/<version>/`，但 compose 把 `../data/dl` 挂到 `/srv/dl`——宿主机目录里没有的版本就看不见，标准部署下 `/dl/agent/<version>/linux-amd64` 默认 404，"探针跟随服务端"（design §5.5）会静默失效。所以服务端启动时必须把镜像自带产物**复制进 DL 卷**；排查"节点一直没跟上"先看 DL 卷里有没有该版本目录和 `.sha256`。
+- **挂载卷遮蔽镜像内置的 agent 产物**：compose 把 `./data` 挂为 `/data`，`FOBE_DL_DIR=/data/dl` 在卷内——镜像里 COPY 进卷的东西运行时读不到，所以 agent 产物放在卷外的 `/srv/agent-seed`，服务端启动时**复制进 DL 卷**（不做这一步，"探针跟随服务端" design §5.5 会静默失效）；DL 目录落到容器可写层时挂载自检会 WARN 并置 `singbox.dl_mount_ok=false`（判据是覆盖挂载不能只是 `/`，见 `singboxcache/mount.go`）。排查"节点一直没跟上"先看 `data/dl/agent/` 里有没有该版本目录和 `.sha256`。
 - **`data/dl/agent/latest` 是真实目录 → "重装"会把你装回旧二进制**：`pointLatest` 只重指自己建的符号链接布局（`ownedLatest` 一看到真实文件就放弃），而 `/install.sh` 与面板「重装命令」都固定取 `dl/agent/latest/linux-amd64`。本地手工 staged 的 `latest/` 因此会让重装永远装那份旧产物（可能就是没有自更新代码的那版），现象是"重装了还是不支持跟随"。删掉该目录，下次启动让 server 重建符号链接布局。
 - **`scripts/dev.sh` 自己产 agent 产物并注入内容寻址版本号 `dev-<哈希>`**（§5.5）：版本号 = 占位构建产物的 sha256 前 12 位，所以只随 **agent 编出来的二进制**变——改后端代码重启不换号，**只改注释/格式也不换号**（二进制相同；已验证：改日志字符串换号 `…afdfc60` → `…4286310`，还原后回到原号）；`FOBE_VERSION=<旧号>` 钉住版本号做降级演练；`FOBE_AGENT_UPDATE_STAGGER=1s` 把 0–5 分钟错峰压成"立即"。所以改了 `internal/agent` / `internal/protocol` 的**语义**后重启 dev.sh，局域网探针会**真的自更新一次**（自己 exit、systemd 拉起）——看到探针短暂掉线是预期，不是故障。
 - **重装命令 ≠ 生效**：`install.sh` 曾用 `systemctl enable --now` / `/etc/init.d/… start` 收尾，**对已经在跑的 agent 是 no-op** —— 重装只换磁盘上的文件，进程仍在跑被替换掉的旧 inode，于是"装好了却永远报旧版本"（`strings $(command -v fobe-agent)` 有新代码，`systemctl status` 的 `Active since` 却远早于这次安装）。已改成 `enable` + `restart`（procd 同理），fallback 分支先 `pkill -f "^$BIN_DIR/fobe-agent"` 再起。判断这类问题永远先对时间线：磁盘二进制 vs `/proc/<MainPID>/exe`。
 - **`fileExists` 语义是"存在且不是目录"**：它被拿去检测 `/run/systemd/system`（systemd 自己建的**目录**）⇒ 每台 systemd 机器都判成 fallback。症状看起来毫不相干，别按表面去查：面板报"no service manager to restart the agent / 不支持自更新"（caps `systemd=false,fallback=true` ⇒ 自更新被禁）、sing-box 走 agent 自己 spawn 的兜底分支而不是 `fobe-singbox.service`、面板 sing-box 启停回 `no service manager detected`。存在性检测用 `pathExists()`，`fileExists()` 只用于 unit/二进制/配置；`Detect()` 已拆出 `detectAt(root)` 可用假根目录单测。判定探针环境优先看探针**自己报的原因**，别只看 caps。
-- `data/sqlite/fobe.db` 是 WAL 单写者，别用多实例同时挂载。
+- `data/fobe.db` 是 WAL 单写者，别用多实例同时挂载。

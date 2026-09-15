@@ -57,7 +57,7 @@
                                         │  server (Go)     │  SQLite(WAL) 挂载在 /data
                                         │  ├ /api  /ws/*   │  AI key 等敏感设置 AES-GCM 加密
                                         │  ├ /sub /install │
-                                        │  ├ /dl → /srv/dl │  agent 与 sing-box 产物直出
+                                        │  ├ /dl → /data/dl│  agent 与 sing-box 产物直出
                                         │  ├ /   → /srv/web│  前端 dist（镜像内直出）
                                         │  + scheduler     │
                                         │  + CLI admin     │
@@ -80,7 +80,7 @@
 
 - **探针永不监听控制端口**，只主动外连面板 → 不需要在探针上开管理端口，NAT 后面也能用。
 - **单端口**：所有控制面流量都是普通 HTTPS/WSS 的路径，外部 nginx 只需一个 `location /` 透传，不需要 stream 模块做协议嗅探。
-- **server 只绑定回环端口**（`127.0.0.1:8080`），对外唯一入口是你自备的 nginx；fobe 仓库内不含任何反代组件，也不生成/管理证书。
+- **server 只绑定回环端口**（`127.0.0.1:8080`），对外唯一入口是你自备的 nginx；fobe 仓库内不含任何反代组件，也不生成/管理证书。**（实现修订 2026-09-15：compose 默认端口映射改为 `8080:8080`——面板明文 HTTP 直达宿主机全接口；要回到"nginx 唯一入口"的形态，把 compose 的 ports 改回 `127.0.0.1:8080:8080` 或用防火墙限制来源。容器内 `FOBE_LISTEN` 恒为 `0.0.0.0:8080`，绑定收敛只在端口映射层做。）**
 - 前端编译产物**在镜像构建阶段打进镜像**（`/srv/web`）由 **server 直出**（不嵌入 Go 二进制，避免体积膨胀；也不做宿主机挂载）。
 
 ---
@@ -138,7 +138,7 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 ### 4.4 密钥托管
 
 - 主密钥 `FOBE_MASTER_KEY`（32 字节，环境变量 / Docker secret）。用它 AES-GCM 加密：AI API Key、Telegram Bot Token、订阅模板中的敏感段。（2026-09-15：不再加密任何 SSH 凭据——Web 终端已改走 agent 本地 PTY，见 §11。）
-- 未设置主密钥时，服务端**拒绝启动**并打印生成命令（不静默降级为明文）。
+- 未设置主密钥时，服务端**拒绝启动**并打印生成命令（不静默降级为明文）。**（实现修订 2026-09-15：镜像入口脚本 `deploy/docker-entrypoint.sh` 在「未设置」时先行兜底，优先级 env > `FOBE_MASTER_KEY_FILE` > 生成随机 32 字节落盘到数据卷 `/data/.master_key`（0600，重启复用）。服务端的 fail-closed 语义不变——生成失败（如 `/data` 不可写）容器直接退出，绝无明文回退；admin CLI 跳过密钥解析，逃生口永不被堵。代价是密钥与密文同卷，见 §20.12；要分开就显式设置 `FOBE_MASTER_KEY`。）**
 - 所有审计写 `audit_logs`：谁、何时、对哪个节点、什么动作、命令原文、来源 IP。
 
 ---
@@ -218,7 +218,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 - **状态与面板**：`nodes` 增 `agent_target_version / agent_update_state / agent_update_attempts / agent_update_error / agent_update_planned_at / agent_update_done_at`（`migrateAdditive`，幂等）；节点页显示 当前版本 / 期望版本 / 计划时刻 / 上次结果与原因；`POST /api/nodes/{id}/agent/retry` 清计数（人工解锁）。每次尝试写 `audit_logs`（`actor=system`）。
 - **告警三档**：`terminal` 立即；`transient` 连续 3 次；分发后 15 分钟仍未收敛的节点**汇总一条**（与 §9.5 同一口径与去重窗口）。
 - **存量探针只能人工重装一次**：今天已装的 agent 二进制里没有这段代码，服务端下发 target 它也不认识（Go 忽略未知 JSON 字段，它会照常跑）。判定靠**能力位而非版本号猜测**：新 agent 在 `hello.Caps` 里报 `self_update=true`，不报的一律在面板标"需人工重装（不支持自更新）"并给出重装命令。**不许假装它会自动跟上。**
-- **产物供给**：镜像里**不能**把 agent 产物放在 `/srv/dl`——compose 把 `../data/dl` 挂到 `/srv/dl`，挂载点在容器启动时就已生效，镜像里那份**根本不可见**（不是"被覆盖"，是读不到）。因此镜像把产物放在卷外的 `/srv/agent-seed/agent/<version>/`，服务端启动时**复制进 DL 卷**（缺什么补什么，已有则不覆盖；`FOBE_AGENT_SEED_DIR` 可改，置空即关闭；与 §9.5 的 sing-box 缓存互不影响）。同一个启动步骤还会把卷里的 `agent/latest` 指向**服务端自己这一版**——否则升级容器后 `/install.sh` 会继续装上一版的 agent（`latest` 是本地脚手架留下的真实目录时不动它）。不这么做，"跟随服务端"在标准 compose 部署里默认就是 404。
+- **产物供给**：镜像里**不能**把 agent 产物放在 DL 目录——compose 把 `./data` 挂到 `/data`，`FOBE_DL_DIR=/data/dl` 在卷内，挂载在容器启动时就已生效，镜像里 COPY 进卷的东西**根本不可见**（不是"被覆盖"，是读不到）。因此镜像把产物放在卷外的 `/srv/agent-seed/agent/<version>/`，服务端启动时**复制进 DL 卷**（缺什么补什么，已有则不覆盖；`FOBE_AGENT_SEED_DIR` 可改，置空即关闭；与 §9.5 的 sing-box 缓存互不影响）。同一个启动步骤还会把卷里的 `agent/latest` 指向**服务端自己这一版**——否则升级容器后 `/install.sh` 会继续装上一版的 agent（`latest` 是本地脚手架留下的真实目录时不动它）。不这么做，"跟随服务端"在标准 compose 部署里默认就是 404。
 - **混版承诺**：同一大版本内双向兼容（新增字段一律可选、未知字段/帧忽略并记日志）。升级/降级过渡期必然是混版，"版本不匹配就拒绝"会把探针直接锁死。`protocol.Version` 保持 `1`。
 - **开关**：`settings.agent.auto_update`（默认开，面板可关）。关掉或 Kill Switch on = 不下发 target。AI 侧**不新增任何工具**（§12.2）：状态随既有节点查询返回，触发/冻结/解锁/重试都只能由人在面板操作。
 - **面板与接口**（全部走会话鉴权，`GET /api/agent/update` 集群状态、`POST /api/nodes/{id}/agent/retry` 人工解锁、`POST /api/nodes/{id}/agent/reinstall-command` 生成一次重装命令）。节点视图新增 `agent_target_version / agent_update_state / agent_update_attempts / agent_update_error / agent_update_planned_at / agent_update_done_at` 与能力位 `agent_self_update`（外加 `agent_caps_seen`：没握过手的节点不算"不支持"，否则新建节点会被误标重装）；`agent_update_state` 取 `planned|downloading|verifying|committed|failed|transient|suppressed|unsupported`。
@@ -655,57 +655,53 @@ fobe/
 │  │  └─ singboxupdate/       # §9.5 一键批量更新 job + 15 分钟收敛告警
 │  └─ agent/{collect,singbox,latency,terminal,cert,service,netinfo}
 ├─ web/                       # React + TS + Vite（src/、vite.config.ts、产物 dist/）
+├─ docker-compose.yml         # 仓库根：默认拉 GHCR 预构建镜像，--build 落回本地构建；零必填环境变量
 ├─ deploy/
-│  ├─ docker-compose.yml
-│  └─ Dockerfile.server       # 多阶段：node 构建前端 → go 构建 server/agent → 运行镜像（不含 nginx）
+│  ├─ Dockerfile.server       # 多阶段：node 构建前端 → go 构建 server/agent → 运行镜像（不含 nginx）
+│  └─ docker-entrypoint.sh    # 主密钥解析（env > KEY_FILE > 自动生成进 /data 卷），admin 子命令直通
+├─ .github/
+│  └─ workflows/release.yml   # v* tag → gofmt/vet/test + 前端构建 → 镜像 → ghcr.io/<owner>/<repo>
 ├─ scripts/
 │  ├─ build.sh                # 本地/CI 三件套构建（镜像内自行多阶段构建，不依赖它）
 │  └─ install.sh.tmpl         # 安装脚本文本模板（服务端注入 token 后下发）
-├─ data/                      # 宿主挂载（gitignore）
-│  ├─ sqlite/fobe.db
-│  ├─ dl/                     # → 容器内 /srv/dl（**必须挂载**，见下）
-│  │  ├─ agent/<version>/     # agent 产物 + manifest.json（首次启动由 seed 目录补进卷，§5.5）
-│  │  └─ singbox/<version>/   # §9.5 服务端自动下载的 sing-box 产物
-│  │     ├─ linux-amd64
-│  │     ├─ linux-amd64.sha256
-│  │     └─ manifest.json
-│  └─ backup/
+├─ data/                      # 宿主单一数据目录（gitignore；compose 挂为容器 /data）
+│  ├─ fobe.db
+│  ├─ .master_key             # 未显式设置主密钥时由入口脚本生成（§4.4）
+│  ├─ geoip/                  # GeoLite2-Country.mmdb（§14.1，与 fobe.db 同卷）
+│  ├─ dl/                     # 容器内 /data/dl：agent 产物（§5.5）+ sing-box 缓存（§9.5）
+│  │  ├─ agent/<version>/     # 二进制 + .sha256 + manifest.json（首次启动由 seed 目录补进卷）
+│  │  └─ singbox/<version>/   # 服务端自动下载或手动投放的 sing-box 产物
+│  └─ backup/                 # 每日 VACUUM INTO 快照（容器内 /data/backup）
 └─ docs/design.md
 ```
 
-`docker-compose.yml` 要点：
+`docker-compose.yml` 要点（实现修订 2026-09-15：从 `deploy/` 移到仓库根，默认拉 GHCR 预构建镜像，本地构建作 `--build` 兜底；主密钥由镜像入口脚本自动生成进 `/data` 卷（§4.4）；同日把 `/data`、`/backup`、`/srv/dl` 三个挂载**合一为单一 `./data:/data` 卷**，DL 与备份成为卷内子目录——compose 里不再需要任何环境变量，镜像 `ENV` 自带全部固定路径）：
 
 ```yaml
 services:
   server:
-    build: { context: ., dockerfile: deploy/Dockerfile.server }
+    image: ghcr.io/fonlan/fobe:latest   # v* tag 时由 .github/workflows/release.yml 推送
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+      args: { VERSION: "${FOBE_VERSION:-compose}" }  # 本地构建专用；无数字=非发布形态
     ports:
-      - "127.0.0.1:8080:8080"      # 只让本机 nginx 访问；nginx 不在本机时改绑定并限制来源
+      - "8080:8080"                # 默认全接口映射（明文 HTTP）；要收敛改回 127.0.0.1:8080:8080 或防火墙限来源
     volumes:
-      - ./data/sqlite:/data
-      - ./data/dl:/srv/dl
-      - ./data/backup:/backup
+      - ./data:/data               # 唯一数据卷：db、.master_key、geoip/、dl/、backup/
     environment:
-      FOBE_MASTER_KEY: ${FOBE_MASTER_KEY:?needed}
-      FOBE_DB: /data/fobe.db
-      FOBE_WEB_DIR: /srv/web
-      FOBE_DL_DIR: /srv/dl
-      FOBE_TRUSTED_PROXIES: "127.0.0.1/32,::1/128,172.16.0.0/12"
-      # §9.5 产物缓存：缓存为空才联网下载当时的最新稳定版；置 0 可关闭。
-      # 镜像源/离线环境改 API 与下载根地址（GitHub 兼容即可）。
-      FOBE_SINGBOX_AUTO_DOWNLOAD: "1"
-      FOBE_SINGBOX_API_BASE: ""          # 缺省 https://api.github.com
-      FOBE_SINGBOX_DOWNLOAD_BASE: ""     # 缺省 https://github.com
+      FOBE_ADMIN_PASSWORD: "${FOBE_ADMIN_PASSWORD:-}" # 唯一保留的可选项；主密钥/镜像源等要设就在这里照样式加
 ```
 
 - **没有 nginx 服务，也没有证书卷**：接入层完全外部化（见 §3 与 `README.md`）。
-- **`/data`、`/backup`、`/srv/dl` 三个卷一个都不能少**（`Dockerfile.server` 已 `VOLUME` 声明）。`/srv/dl` 尤其容易漏：它存 agent 产物与 §9.5 自动下载的 sing-box 版本，**没有独立挂载点时升级/重建容器会把这些版本全部丢掉**。服务端在容器内会自检 `FOBE_DL_DIR` 是否为 `/proc/self/mountinfo` 里的独立挂载点，不是就写 WARN 并置 `singbox.dl_mount_ok=false`（设置页标红）。症状与处置见 `README.md` 排障表。
-- **agent 产物必须放在卷外的 seed 目录**（实现修订 2026-09-15）：compose 把 `../data/dl` 挂到 `/srv/dl`，而挂载在容器启动时就生效——镜像里 `COPY` 进 `/srv/dl` 的东西**运行时根本读不到**，所以标准部署下 `/dl/agent/<version>/linux-amd64` 默认 404，`/install.sh` 也拉不到 agent。镜像因此把产物放进 `/srv/agent-seed/agent/<version>/`（`FOBE_AGENT_SEED_DIR`，非卷路径），服务端启动时**复制进 DL 卷**并把 `agent/latest` 指向自己这一版。这跟 §9.5 的 sing-box 缓存是两件事：sing-box 的产物由服务端自己联网下载，agent 的产物只能来自镜像（服务端不会自己编译 agent）。
+- **单一 `/data` 数据卷**（实现修订 2026-09-15：原先 `/data`、`/backup`、`/srv/dl` 三个挂载合一，DL 与备份成为卷内子目录，镜像 `ENV` 定为 `FOBE_DL_DIR=/data/dl`、`FOBE_BACKUP_DIR=/data/backup`；`VOLUME` 只声明 `/data`）。**DL 目录不能落在容器可写层**：那里的下载在升级/重建容器时全部丢失。挂载自检（`singboxcache/mount.go`）的判据是「`FOBE_DL_DIR` 的覆盖挂载（mountinfo 里最长的父挂载点）是否只是 `/`」——挂在 `/data` 卷下的 `/data/dl` 算通过；落在可写层才写 WARN 并置 `singbox.dl_mount_ok=false`（设置页标红）。症状与处置见 `README.md` 排障表。
+- **agent 产物必须放在卷外的 seed 目录**（实现修订 2026-09-15）：compose 把 `./data` 挂到 `/data`，`FOBE_DL_DIR=/data/dl` 在卷内，而挂载在容器启动时就生效——镜像里 `COPY` 进卷的东西**运行时根本读不到**，所以标准部署下 `/dl/agent/<version>/linux-amd64` 默认 404，`/install.sh` 也拉不到 agent。镜像因此把产物放进 `/srv/agent-seed/agent/<version>/`（`FOBE_AGENT_SEED_DIR`，非卷路径），服务端启动时**复制进 DL 卷**并把 `agent/latest` 指向自己这一版。这跟 §9.5 的 sing-box 缓存是两件事：sing-box 的产物由服务端自己联网下载，agent 的产物只能来自镜像（服务端不会自己编译 agent）。
 - **前端产物在镜像里，不挂载**：`Dockerfile.server` 的 node 阶段产出 `web/dist` 并 `COPY` 到 `/srv/web`。改前端 = 重新 `docker compose build`，不存在"改了源码忘了构建/挂载路径写错"这类事故。
 - **`/api/*` 永远不吃 SPA 兜底**（实现修订 2026-09-15）：静态处理器是最后的兜底（`mux.HandleFunc("/", s.handleStatic)`），未匹配的 `/api/...` 现在直接回 `404 {"error":{"code":"unknown_endpoint"}}`，不再吐出 API-only/`index.html` 那一页。原因是这个组合会造成一个很难查的假象：**旧代码的 server**（没重启的 dev 进程、没重建的镜像、没重启的容器）遇到新前端调用的新接口，会以 `200 text/html` 应答，前端 `resp.json()` 解析失败——而 `apiErrorMessage` 把任何非 `ApiError` 都当成 `network_error`，于是面板报"网络错误,无法连接服务器"，把人往 DNS/防火墙方向带，实际连接完全正常。现在同类情况会明确说是"接口不存在(服务端可能是旧版本)"。前端侧也补了 `bad_response`：2xx 但非 JSON 的响应单独报错，不再伪装成网络故障。（副作用：因为有 `/` 兜底模式，Go 1.22 ServeMux 的自动 405 在 `/api` 下不会触发，方法/路径不匹配统一落到这个 404。）
 - 注意：即使你从宿主机 `127.0.0.1` 发起请求，容器内看到的源地址通常是 Docker 网关（如 `172.17.0.1`），所以 `FOBE_TRUSTED_PROXIES` 默认包含 Docker 私网段。
 
-- **构建管线**：`Dockerfile.server` 是多阶段构建——`node:22-alpine` 阶段构建 React 前端 → `golang` 阶段构建 `server` 与 `agent`（agent 交叉编译 `linux/amd64`，`CGO_ENABLED=0`）→ 运行镜像里同时含：server 二进制、`/srv/web`（前端产物）、`/srv/dl/agent/<version>/`（agent 产物 + 带 sha256 的 `manifest.json`，安装脚本与面板版本选择都读它）。`scripts/build.sh` 提供同一套产物的本地/CI 构建，供不进容器的开发方式使用。
+- **构建管线**：`Dockerfile.server` 是多阶段构建——`node:22-alpine` 阶段构建 React 前端 → `golang` 阶段构建 `server` 与 `agent`（agent 交叉编译 `linux/amd64`，`CGO_ENABLED=0`）→ 运行镜像里同时含：server 二进制、`/srv/web`（前端产物）、`/srv/agent-seed/agent/<version>/`（agent 产物 + 带 sha256 的 `manifest.json`，启动时播种进 DL 卷，安装脚本与面板版本选择都读它）。`scripts/build.sh` 提供同一套产物的本地/CI 构建，供不进容器的开发方式使用。
+- **发布管线**（实现修订 2026-09-15）：推 `v*` tag 触发 `.github/workflows/release.yml`——先过 `gofmt`/`go vet`/`go test ./...`/前端 `tsc+vite build`，全绿才用 buildx 构建 `linux/amd64` 镜像推送到 `ghcr.io/<owner>/<repo>`，标签 `{version, v<tag>, latest}`；`$VERSION` = tag 去掉 `v` 前缀，同时注入 server 与 agent。镜像默认单平台、关 provenance：探针产物本就只有 linux/amd64（§10），attestation manifest list 会让旧 docker 引擎匿名拉取失败。compose 的 `image:` 指向它，`docker compose up -d` 即用预构建镜像；首次发布是 GHCR 私有包，转公开或 `docker login` 后再 `up`。
 - **备份**：每日 `VACUUM INTO` 快照到 `./data/backup/fobe-YYYYMMDD.db`（保留 14 份），另提供面板导出/导入 JSON（不含凭据明文）。
 
 ---
@@ -743,6 +739,7 @@ services:
 10. v1 不做 TOTP（按你的选择），但 `users` 表预留 `totp_secret` 字段。
 11. 首次启动密码：未设置 `FOBE_ADMIN_PASSWORD` 时生成一次性初始密码并打印到服务端日志，登录后强制修改；忘记密码用 `fobe-server admin reset-password`。**（实现修订 2026-09-14：`FOBE_ADMIN_PASSWORD` 从"仅首次生效"升级为密码准绳——每次启动都同步为该值，变更时吊销全部旧会话；不设置则不动现有密码。）**
 12. 前端形态：**React + TS + Vite**；生产镜像内置编译产物，本地开发用 Vite dev server + `go run`（`FOBE_WEB_DIR` 为空时 server 进 API-only 模式）。
+13. **主密钥零输入部署**（实现修订 2026-09-15）：镜像入口脚本在 `FOBE_MASTER_KEY` 与 `FOBE_MASTER_KEY_FILE` 都未设置时，自动生成随机 32 字节（base64）写进数据卷 `/data/.master_key`（0600）并复用——`docker compose up -d` 不再要求先填任何环境变量。要自己掌管密钥就显式设置 env；admin CLI 不经过密钥解析，逃生口不受影响。
 
 ---
 
@@ -758,4 +755,5 @@ services:
 8. ⚠ **存量探针必须人工重装一次**：今天已装的 agent 二进制里没有自更新代码，服务端下发 target 它也不认识（Go 忽略未知字段，照常跑）。面板按能力位把它标成"需人工重装"，不会自动跟上。
 9. ⚠ **服务端版本号成了对外契约**：随便打一个版本号（含把 `VERSION` 改成别的时间戳）就等于让**全部探针换一次二进制**，而降级路径是自动化测试里最容易缺的那条。发版前想清楚这个数字。
 10. ⚠ **混版窗口**：升级/降级过渡期一定是混版。承诺是"同大版本内双向兼容（新增字段可选、未知帧忽略）"，**不保证行为等价**。
-11. ⚠ **DL 卷是产物单点**：`/srv/dl` 没挂成独立卷（被重建容器清空）或换了机器，全部探针会停在原地并告警——fail-closed 不会把探针搞砖，但也绝不会跟上，直到你把产物补齐。
+11. ⚠ **DL 目录是产物单点**：`data/` 没挂载成持久卷（被重建容器清空）或换了机器，全部探针会停在原地并告警——fail-closed 不会把探针搞砖，但也绝不会跟上，直到你把产物补齐。
+12. ⚠ **主密钥与密文同卷**（实现修订 2026-09-15，§4.4/§19.13）：零输入部署把自动生成的主密钥放在 `/data/.master_key`，与它加密的设置同一个挂载卷——能读卷的人（宿主机 root、备份文件拿到手的人）就能解密 AI key / Bot Token。换来的是不填任何变量即可启动。不接受这个代价：显式设置 `FOBE_MASTER_KEY`（env / secret），入口脚本就完全不碰磁盘。

@@ -1,0 +1,23 @@
+# Build-context hygiene: the daemon receives everything not listed here
+# (deploy/Dockerfile.server only COPYs specific paths, but the whole context
+# is uploaded first). Keep local state, secrets and caches out of it —
+# especially .env, which holds the operator's master key.
+.git
+.env
+.github
+.agents
+.dsh
+.mem
+.zcode
+data/
+dist/
+docs/
+*.md
+LICENSE
+agent
+agent.exe
+server
+fobe-server
+fobe-agent
+web/node_modules/
+web/dist/

@@ -1,0 +1,15 @@
+services:
+  server:
+    image: ghcr.io/fonlan/fobe:latest
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+      args:
+        VERSION: ${FOBE_VERSION:-compose}
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      FOBE_ADMIN_PASSWORD: "${FOBE_ADMIN_PASSWORD:-}"
