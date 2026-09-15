@@ -49,6 +49,11 @@ type AgentUpdater interface {
 	// Desired fills the self-update fields of a desired state and returns the
 	// flat values for hello_ack; ok=false means "no target right now".
 	Desired(nodeID string, d *protocol.DesiredState) (version string, after int64)
+	// Reconcile re-evaluates the plan after the node reported its build (a hello
+	// arrives *after* hello_ack was already assembled: hub registers the socket,
+	// answers, then pumps frames), so a probe that converged on its own stops
+	// showing a stale verdict.
+	Reconcile(nodeID string)
 	// OnReport records what an agent said about one self-update attempt.
 	OnReport(nodeID string, r *protocol.AgentUpdate)
 }

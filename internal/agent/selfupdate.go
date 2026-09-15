@@ -149,6 +149,17 @@ func selfUpdateSupported() bool {
 	return service.Detect() != service.KindFallback
 }
 
+// selfUpdateBlockReason explains selfUpdateSupported() == false in words the
+// panel shows verbatim. Saying "no service manager" on a build that simply is
+// not linux is a wrong diagnosis sent to the operator, which is worse than no
+// message: it points at the host instead of at the platform.
+func selfUpdateBlockReason() string {
+	if runtime.GOOS != "linux" {
+		return fmt.Sprintf("self-update is only implemented on linux (this is %s)", runtime.GOOS)
+	}
+	return "no service manager to restart the agent"
+}
+
 // reanchor folds a freshly received plan into the local bookkeeping. The server
 // only re-anchors a (node, target) pair when the target changes or an operator
 // hits retry, so a different anchor for the *same* target is the unlock signal:
@@ -297,8 +308,9 @@ func (u *selfUpdater) Consider(target string, after int64) {
 		u.mu.Unlock()
 	case actUnsupported:
 		u.mu.Unlock()
-		u.log.Info("self-update not available on this host (no supervisor)", "target", target)
-		u.report(target, protocol.UpdateUnsupported, "", 0, "no service manager to restart the agent")
+		reason := selfUpdateBlockReason()
+		u.log.Info("self-update not available on this host", "target", target, "reason", reason)
+		u.report(target, protocol.UpdateUnsupported, "", 0, reason)
 	case actSuppressed:
 		attempts := u.state.TerminalAttempts
 		lastErr := u.state.LastError

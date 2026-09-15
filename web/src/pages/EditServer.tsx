@@ -110,6 +110,10 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
 
   const behind = node.agent_target_version !== '' && node.agent_target_version !== node.agent_version;
   const stateKey = node.agent_update_state ? `agent_state_${node.agent_update_state}` : '';
+  // "unsupported" is a capability verdict, not a failed attempt: attempts stays
+  // 0, no artifact was ever downloaded. Rendering it like a failure made the
+  // panel accuse a healthy host of being broken (design §5.5 fallback).
+  const unsupported = node.agent_update_state === 'unsupported';
 
   const retry = async () => {
     if (busy) return;
@@ -164,22 +168,28 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
         />
         <Tile
           label={t('agent_update_planned')}
-          value={node.agent_update_planned_at ? fmtTime(node.agent_update_planned_at) : '-'}
+          value={!unsupported && node.agent_update_planned_at ? fmtTime(node.agent_update_planned_at) : '-'}
           sub={node.agent_update_done_at ? `${t('agent_update_done')}: ${fmtTime(node.agent_update_done_at)}` : undefined}
         />
       </div>
 
       {node.agent_update_error && (
-        <p className="form-error">
-          {t('agent_update_error')}: <span className="mono">{node.agent_update_error}</span>
-        </p>
+        unsupported ? (
+          <p className="hint">
+            {t('agent_update_reason')}: <span className="mono">{node.agent_update_error}</span>
+          </p>
+        ) : (
+          <p className="form-error">
+            {t('agent_update_error')}: <span className="mono">{node.agent_update_error}</span>
+          </p>
+        )
       )}
 
       {/* Only an agent that has actually reported caps can be judged: a node
           that never said hello is not evidence of an outdated binary. */}
       {node.agent_caps_seen && !node.agent_self_update && (
         <div className="stack">
-          <p className="hint">{t('agent_reinstall_hint')}</p>
+          <p className="hint">{t(unsupported ? 'agent_no_supervisor_hint' : 'agent_reinstall_hint')}</p>
           <div className="row-gap">
             <button type="button" className="btn" disabled={busy} onClick={() => void reinstall()}>
               {t('agent_reinstall_title')}

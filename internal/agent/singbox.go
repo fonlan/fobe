@@ -600,30 +600,59 @@ func (m *singboxManager) processAlive(bin string) bool {
 		}
 		return p.Signal(syscall.Signal(0)) == nil
 	case service.KindSystemd:
-		return runQuiet("systemctl", "is-active", "--quiet", "fobe-singbox.service") == nil
+		return service.SingboxActive()
 	default: // procd — and anything else: find the process directly
 		return findProcByExe(bin) > 0
 	}
 }
 
 // start writes/refreshes the service definition and starts sing-box (§5.3).
+//
+// It restarts rather than starts, on purpose: the convergence path reaches here
+// whenever the config changed while the service is already up, and
+// `systemctl start` / `/etc/init.d/... start` on a running service is a no-op —
+// the new config would never be loaded, yet gate ③ would pass (the port is
+// answering, just from the old process) and the panel would report a version
+// that is not actually serving. `restart` also starts a stopped unit, so the
+// fresh-install case is covered by the same call (design §5.5 同一处修订).
 func (m *singboxManager) start(bin, configPath string) error {
 	switch service.Detect() {
 	case service.KindSystemd:
+		m.dropOrphan(bin)
 		if err := service.InstallSingbox(bin, configPath); err != nil {
 			return err
 		}
-		return service.StartSingbox()
+		return service.RestartSingbox()
 	case service.KindProcd:
+		m.dropOrphan(bin)
 		if err := service.InstallSingbox(bin, configPath); err != nil {
 			return err
 		}
 		if err := service.EnableSingbox(); err != nil {
 			return err
 		}
-		return service.StartSingbox()
+		return service.RestartSingbox()
 	default:
 		return m.spawn(bin, configPath)
+	}
+}
+
+// dropOrphan kills a sing-box that the service manager does not know about.
+//
+// This is the fallback → native migration (§5.3 实现修订): the fallback branch
+// spawns sing-box as a child of the agent, and such a child is reparented to
+// init when the agent restarts (reinstall, self-update, or the first start of
+// a build whose Detect() finally sees systemd) while still holding the inbound
+// port. The unit we are about to start would fail to bind, flap under
+// Restart=always, and gate ③ would blame the freshly installed version. A
+// sing-box the manager does own is left alone: `restart` handles it.
+func (m *singboxManager) dropOrphan(bin string) {
+	if service.SingboxActive() {
+		return
+	}
+	if pid := findProcByExe(bin); pid > 0 {
+		m.log.Info("killing a sing-box left over from the fallback supervisor", "pid", pid, "exe", bin)
+		killPID(pid)
 	}
 }
 

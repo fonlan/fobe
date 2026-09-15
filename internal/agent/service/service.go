@@ -32,11 +32,29 @@ func (k Kind) String() string {
 }
 
 // Detect picks the service manager for this host (§5.3 table).
-func Detect() Kind {
+func Detect() Kind { return detectAt("/") }
+
+// detectAt is Detect with the filesystem root spelled out so the table can be
+// unit-tested somewhere that is none of the three platforms (a dev Mac).
+//
+// /run/systemd/system is a *directory* — the marker systemd creates for itself
+// — so it must be probed with pathExists, NOT fileExists. Using the file
+// predicate here was a silent, system-wide bug: every systemd host (i.e. every
+// normal Debian/Ubuntu VPS, and the dev VM this was caught on) answered
+// KindFallback, which then
+//
+//   - reported caps.systemd=false / fallback=true to the panel,
+//   - disabled agent self-update (§5.5 hangs off Detect() != KindFallback),
+//     so the panel showed "no service manager to restart the agent" on hosts
+//     that were running the agent under systemd the whole time,
+//   - pushed sing-box onto the spawn-and-reap fallback branch instead of
+//     fobe-singbox.service, and made the panel's start/stop/restart errors say
+//     "no service manager detected".
+func detectAt(root string) Kind {
 	switch {
-	case fileExists("/run/systemd/system"):
+	case pathExists(filepath.Join(root, "/run/systemd/system")):
 		return KindSystemd
-	case fileExists("/sbin/procd"), fileExists("/etc/rc.common"):
+	case fileExists(filepath.Join(root, "/sbin/procd")), fileExists(filepath.Join(root, "/etc/rc.common")):
 		return KindProcd
 	default:
 		return KindFallback
@@ -174,7 +192,14 @@ WantedBy=multi-user.target
 		if err := os.WriteFile("/etc/systemd/system/fobe-singbox.service", []byte(unit), 0o644); err != nil {
 			return fmt.Errorf("write unit: %w", err)
 		}
-		return run("systemctl", "daemon-reload")
+		if err := run("systemctl", "daemon-reload"); err != nil {
+			return err
+		}
+		// WantedBy in the file does NOT create the multi-user.target.wants
+		// symlink — only `enable` does. Without it sing-box comes up only
+		// because the agent converges after boot, so a host whose agent is
+		// broken (or stopped) would reboot without its inbound.
+		return run("systemctl", "enable", "fobe-singbox.service")
 
 	case KindProcd:
 		init := fmt.Sprintf(`#!/bin/sh /etc/rc.common
@@ -200,8 +225,8 @@ start_service() {
 	}
 }
 
-// EnableSingbox marks the sing-box init script as enabled (procd only —
-// the systemd unit is enabled implicitly by WantedBy + daemon-reload).
+// EnableSingbox marks the sing-box service as enabled. systemd is handled by
+// InstallSingbox (it runs `systemctl enable`); this is the procd half.
 func EnableSingbox() error {
 	switch Detect() {
 	case KindProcd:
@@ -243,6 +268,20 @@ func StartSingbox() error {
 		return run("/etc/init.d/sing-box", "start")
 	default:
 		return fmt.Errorf("no service manager detected")
+	}
+}
+
+// SingboxActive reports whether the platform service manager currently owns a
+// live sing-box service (§5.3). The fallback path answers false by definition:
+// there the agent owns the process itself (singboxManager.proc).
+func SingboxActive() bool {
+	switch Detect() {
+	case KindSystemd:
+		return run("systemctl", "is-active", "--quiet", "fobe-singbox.service") == nil
+	case KindProcd:
+		return run("/etc/init.d/sing-box", "status") == nil
+	default:
+		return false
 	}
 }
 
@@ -397,6 +436,19 @@ func adoptForeignSingboxService(kind Kind, unitPath string) (bool, error) {
 	return true, nil
 }
 
+// pathExists reports whether anything at all (file or directory) is at p.
+//
+// The two predicates are not interchangeable, and mixing them up is exactly the
+// bug documented on detectAt: /run/systemd/system is a directory, so only this
+// one can see it.
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// fileExists reports whether a *regular-ish file* is at p; a directory answers
+// false on purpose (it is the right question for a unit file, a binary or a
+// config — see callers).
 func fileExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && !st.IsDir()

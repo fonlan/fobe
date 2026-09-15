@@ -403,6 +403,44 @@ func TestStartStopsWithContext(t *testing.T) {
 	cancel() // must not panic or leak; nothing else to assert here
 }
 
+func TestUnsupportedIsAVerdictNotAFailure(t *testing.T) {
+	dl := t.TempDir()
+	writeArtifact(t, dl, "20260915.000000")
+	st := testStore(t)
+	addNode(t, st, "n1", "old")
+	m := New(Config{Store: st, Log: testLog(), ServerVersion: "20260915.000000", DLDir: dl,
+		Enabled: func() bool { return true }, Now: func() int64 { return 1_700_000_000 }})
+
+	// A failure alert left behind by an older build (or by the panel's own
+	// retry history) must be cleared by the verdict.
+	if _, _, err := st.CreateAlert(AlertFailed, "n1", "{}", 3600); err != nil {
+		t.Fatal(err)
+	}
+	report := &protocol.AgentUpdate{
+		Target: "20260915.000000", Phase: protocol.UpdateUnsupported,
+		Error: "no service manager to restart the agent",
+	}
+	m.OnReport("n1", report)
+	n, _ := st.GetNode("n1")
+	if n.AgentUpdateState != StateUnsupported || n.AgentUpdateAttempts != 0 {
+		t.Fatalf("unsupported verdict not recorded: %+v", n)
+	}
+	if _, err := st.OpenAlert(AlertFailed, "n1"); err == nil {
+		t.Fatal("an unsupported probe is not failing; it must not keep a failure alert")
+	}
+
+	// The verdict repeats on every handshake. Raising an alert *after* the first
+	// report (the shape an older server produced) still has to clear, so the
+	// recovery cannot live behind the "nothing changed" shortcut.
+	if _, _, err := st.CreateAlert(AlertFailed, "n1", "{}", 3600); err != nil {
+		t.Fatal(err)
+	}
+	m.OnReport("n1", report)
+	if _, err := st.OpenAlert(AlertFailed, "n1"); err == nil {
+		t.Fatal("a repeat verdict must clear a stale failure alert too")
+	}
+}
+
 func countAudit(t *testing.T, st *store.Store, action string) int {
 	t.Helper()
 	entries, err := st.ListAudit(200)

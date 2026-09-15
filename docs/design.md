@@ -181,6 +181,13 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 `sing-box` 的服务文件由 agent 自己写（面板只下发期望状态），这样才能保证不同平台一致。
 
+> **实现修订 2026-09-15（检测谓词用错，systemd 全被误判为 fallback）**：`service.Detect()` 用 `fileExists("/run/systemd/system")` 检测第一行，而同一个包里的 `fileExists` 语义是"存在**且不是目录**"（它对 unit 文件/二进制/配置是对的）——`/run/systemd/system` 恰恰是 systemd 自己建的**目录**，于是**每一台 systemd 机器（所有常规 Debian/Ubuntu VPS）都返回 `KindFallback`**。这不是"这台没有 supervisor"，是压根没检测到 supervisor，症状分散在三处、互相看起来无关：
+> - `hello.Caps` 报 `systemd=false / fallback=true` ⇒ `self_update=false`（§5.5）⇒ 面板把这台"其实一直跑在 systemd 下"的探针标成"不支持自更新 / no service manager to restart the agent"；
+> - sing-box 落到 **spawn 兜底分支**（agent 自己 fork + reap）而不是自己写的 `fobe-singbox.service`，于是它不受 systemd 管、开机不自动起；
+> - 面板的 sing-box 启停/重启（`commands.go` 与 §9.x 动作）一律回 `no service manager detected`。
+>
+> 修法：检测存在性用新加的 `pathExists()`（`os.Stat` 成功即可，文件或目录都算），`fileExists()` 保持"文件"语义并只用于它该用的地方；`Detect()` 拆出 `detectAt(root)` 以便用假根目录单测（`internal/agent/service/detect_test.go` 钉住"目录必须算存在"）。**同批修掉被这次修正才第一次走到的 native 分支的两个潜伏问题**：① `singboxManager.start` 改用 `restart`（`systemctl start` 对已在跑的服务是 no-op，改了 config 也不会重载，而闸门③只看到"端口有人应答"；这与 §5.5 里 install.sh 的 `enable --now` 陷阱是同一类）；② 迁移到 native 前用 `dropOrphan()` 清掉 fallback 分支遗留的孤儿 sing-box——它被 reparent 到 init 后仍占着入站端口，会让新 unit 起不来、`Restart=always` 反复重启，闸门③却去怪新版本。另外 `InstallSingbox` 补上 `systemctl enable`：unit 文件里的 `WantedBy` 不会自己创建 `multi-user.target.wants` 符号链接。
+
 ### 5.4 OpenWrt 专项
 
 - 二进制与配置统一放 `/etc/one-sing/`（`sing-box` + `config.json` + `cert/`），与 one-sing.sh 同一套路径（实现修订 2026-09-15，见 §9.3）；`/etc` 在 OpenWrt 上同样是 overlay 持久。
@@ -203,6 +210,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
   4. 自检通过 → `rename` 覆盖目标二进制 → **主动 `exit`**，由 supervisor（systemd `Restart=always` / procd `respawn`）拉起新版本。**不保留 `.prev`**：不留就没有本地回滚，代价是"自检过但 `-run` 起不来"这种残余情形只能 SSH 重装（§20）；换来的是 OpenWrt overlay 上少 10MB 常驻占用；
   5. 自检或下载失败 → 线上二进制**一动不动**。
 - **fallback 不参与**：`install.sh` 的 fallback 分支用 `nohup` 起 agent，没有 supervisor，"重启自己"无处落地；这类节点上报 `self_update=false`，面板只显示需人工处理。
+  ⚠️ **`unsupported` 是能力判定，不是失败（实现修订 2026-09-15）**：它 `attempts=0`、什么都没试过，所以服务端**不为它建失败告警**（并顺手 recover 掉该节点既有的失败/环境告警，否则一条永远无法自愈的 high 风险告警会长期挂在面板上），`audit_logs` 的 risk 记 `low`；面板把它渲染成中性提示（`agent_update_reason`）而不是红字"上次错误"，并按"没有 supervisor"（本例）与"旧二进制"给出不同的重装提示文案。**判定"这台的探针是不是没 supervisor"必须看探针自己报的原因**，不能只看 `caps.fallback`：§5.3 那次检测 bug 期间，一台好好的 systemd 机器也会自报 fallback。
 - **失败分类（两本账）**：
   - `terminal`（不再重试，等 target 变更或人工重试）：sha256 不符 / 无法 exec / 自检报版本不符；
   - `transient`（退避 1m → 1h 封顶，不计入熔断）：连不上服务端、`/dl` 404/5xx、同目录剩余空间 < 2×产物、目标不可写。

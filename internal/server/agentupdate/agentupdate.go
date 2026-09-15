@@ -279,6 +279,25 @@ func fnv1a(s string) uint64 {
 	return h
 }
 
+// Reconcile re-evaluates the plan for a node that just reported its build.
+//
+// The hub assembles hello_ack *before* it reads the hello frame (it registers
+// the socket, answers, then pumps frames), so the target/plan decided there was
+// based on the version the node reported last time. A probe that converged in
+// the meantime — manual reinstall, its own self-update, a downgrade drill —
+// would otherwise keep the stale verdict on the panel until its *next*
+// reconnect, which can be hours away: the operator reinstalls, the panel still
+// says "unsupported / no service manager to restart the agent" and they
+// conclude the reinstall did nothing. Target() already closes a converged plan
+// (state=committed, planned_at=0), so reconciling is simply asking again now
+// that the answer is current.
+func (m *Manager) Reconcile(nodeID string) {
+	if m.cfg.Store == nil {
+		return
+	}
+	_, _, _ = m.Target(nodeID)
+}
+
 // Desired fills the §5.5 fields of a desired state / hello_ack. Both carriers
 // are always written by the same call so they cannot disagree.
 func (m *Manager) Desired(nodeID string, d *protocol.DesiredState) (flat string, after int64) {
@@ -318,6 +337,18 @@ func (m *Manager) OnReport(nodeID string, r *protocol.AgentUpdate) {
 		m.cfg.Log.Warn("agentupdate: record report", "node", nodeID, "err", err)
 		return
 	}
+
+	// "unsupported" is a capability verdict, not an attempt: the probe is
+	// telling us it has no supervisor to restart under (§5.5 fallback), so
+	// nothing was tried and nothing can be retried. It must therefore not feed
+	// the failure ledger — an alert here can never recover on its own and would
+	// sit in the panel forever calling a healthy host broken. The recovery runs
+	// before the "nothing changed" shortcut on purpose: a repeat report is
+	// exactly the case where an alert raised by an older build has to clear.
+	if state == StateUnsupported {
+		_ = m.cfg.Store.RecoverAlert(AlertFailed, nodeID)
+		_ = m.cfg.Store.RecoverAlert(AlertTransient, nodeID)
+	}
 	if !changed {
 		return
 	}
@@ -343,8 +374,6 @@ func (m *Manager) OnReport(nodeID string, r *protocol.AgentUpdate) {
 		m.raiseNodeAlert(AlertFailed, nodeID, "terminal failure", r)
 	case StateSuppressed:
 		m.raiseNodeAlert(AlertFailed, nodeID, "gave up after repeated failures", r)
-	case StateUnsupported:
-		m.raiseNodeAlert(AlertFailed, nodeID, "no supervisor to restart the agent", r)
 	case StateTransient:
 		if r.Attempts >= transientAlertAfter {
 			m.raiseNodeAlert(AlertTransient, nodeID, "repeated environment failures", r)
@@ -354,11 +383,12 @@ func (m *Manager) OnReport(nodeID string, r *protocol.AgentUpdate) {
 
 func alertRisk(state string) string {
 	switch state {
-	case StateFailed, StateSuppressed, StateUnsupported:
+	case StateFailed, StateSuppressed:
 		return "high"
 	case StateTransient:
 		return "medium"
 	default:
+		// Includes "unsupported": recorded for visibility, not as a failure.
 		return "low"
 	}
 }

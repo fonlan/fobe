@@ -189,6 +189,58 @@ func TestHelloAckCarriesAgentTargetAndStagger(t *testing.T) {
 
 // A dev/compose server has nothing to hand out; offering a target anyway would
 // turn every probe into a 404 retry loop.
+// A probe that converged by reinstalling itself (§5.5 存量探针路径) reports its
+// new build in the hello that follows — which arrives *after* hello_ack was
+// already assembled against the previous version. Without a reconcile the panel
+// keeps the old binary's verdict ("unsupported" + its reason) until the node's
+// next reconnect, which reads exactly like "the reinstall did nothing".
+func TestHelloReconcilesStaleAgentUpdateState(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := loginCookie(t, srv.URL)
+	wireAgentUpdate(t, api, "20260915.000000")
+	nodeID, secret := registerNode(t, srv, cookie, "probe-reconcile", "m-reconcile")
+
+	// What the panel looked like right before the reinstall: the old fallback
+	// verdict plus the plan that was handed out to it.
+	if err := api.Store.SetAgentUpdatePlanned(nodeID, "20260915.000000", 111); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Store.RecordAgentUpdate(nodeID, "20260915.000000", "unsupported", 0,
+		"no service manager to restart the agent", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	ack, ws := agentHello(t, srv, nodeID, secret, protocol.Hello{
+		MachineID: "m-reconcile", Version: "20260915.000000", OS: "linux", Arch: "amd64",
+		Caps: protocol.Caps{Systemd: true, SelfUpdate: true},
+	})
+	defer ws.Close()
+	// The ack is assembled before this hello is read, so it may still name the
+	// version the node is *already* running — the agent treats target==own
+	// build as "nothing to do", which is why that is harmless. What must not
+	// survive is the stored verdict.
+	_ = ack
+
+	// The hello is handled by the read pump, so the reconcile lands asynchronously.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		n, err := api.Store.GetNode(nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n.AgentUpdateState == "committed" {
+			if n.AgentUpdateError != "" || n.AgentUpdatePlannedAt != 0 || n.AgentUpdateDoneAt == 0 {
+				t.Fatalf("stale bookkeeping survived: %+v", n)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stale verdict survived the hello: %+v", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestHelloAckOmitsTargetForNonReleaseVersion(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := loginCookie(t, srv.URL)

@@ -27,6 +27,15 @@ func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 	}
 	caps, _ := json.Marshal(hello.Caps)
 	_ = h.store.SetNodeCaps(c.nodeID, caps)
+	// §5.5: the target was decided while building hello_ack, i.e. against the
+	// version this node reported *last* time. Now that this hello is in, ask
+	// again — Target() closes a converged plan, and without this a probe that
+	// came back on its own (manual reinstall, self-update, downgrade) would
+	// keep the previous binary's verdict ("planned" / "unsupported" + last
+	// error) on the panel until its next reconnect.
+	if h.agentUp != nil {
+		h.agentUp.Reconcile(c.nodeID)
+	}
 	if len(hello.IPs) > 0 {
 		rows := make([]store.IPRow, 0, len(hello.IPs))
 		primary := ""
