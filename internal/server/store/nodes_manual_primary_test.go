@@ -85,6 +85,23 @@ func TestManualPrimarySurvivesIPReplacement(t *testing.T) {
 		t.Fatalf("primary_ip after rebuild = %q err=%v, want 198.51.100.6", got.PrimaryIP, err)
 	}
 
+	// regression (2026-09-15 dev.db): an older build overwrote nodes.primary_ip
+	// with the agent's suggestion on every report. The drift stays inside the
+	// reported set, so it never self-heals through the hub guard — every
+	// rebuild must write the manual pick back into nodes.primary_ip.
+	if _, err := st.Exec(`UPDATE nodes SET primary_ip = '198.51.100.5' WHERE id = 'n1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceNodeIPs("n1", replaceRows([2]any{"198.51.100.5", 4}, [2]any{"198.51.100.6", 4})); err != nil {
+		t.Fatal(err)
+	}
+	if prim, manual := primary(); prim != "198.51.100.6" || manual != 1 {
+		t.Fatalf("after drifted rebuild primary=%q manual=%d, want 198.51.100.6/1", prim, manual)
+	}
+	if got, err := st.GetNode("n1"); err != nil || got.PrimaryIP != "198.51.100.6" {
+		t.Fatalf("drifted primary_ip not healed: %q err=%v, want 198.51.100.6", got.PrimaryIP, err)
+	}
+
 	// once the manual address disappears from the reports the pin is dropped
 	// and the heuristic re-pins
 	if err := st.ReplaceNodeIPs("n1", replaceRows([2]any{"198.51.100.7", 4}, [2]any{"198.51.100.9", 4})); err != nil {
@@ -93,4 +110,7 @@ func TestManualPrimarySurvivesIPReplacement(t *testing.T) {
 	if prim, manual := primary(); prim != "198.51.100.7" || manual != 0 {
 		t.Fatalf("after manual IP vanished primary=%q manual=%d, want 198.51.100.7/0", prim, manual)
 	}
+	// nodes.primary_ip still holds the vanished pick here on purpose: the store
+	// never invents a primary, the hub guard resets it because the pick is no
+	// longer in the reported set (same frame, hub.onState).
 }

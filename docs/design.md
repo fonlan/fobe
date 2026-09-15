@@ -243,7 +243,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `settings` | key, value, encrypted | 全局 anytls 密码、AI 配置、Telegram、保留期、延迟测量频率（`latency.interval_seconds`，默认 5）等 |
 | `reg_tokens` | token_hash, note, expires_at, used_at | 单次 |
 | `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, cpu_cores, primary_ip, country_code, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表；`tz` 由 agent 自动探测上报，只读 |
-| `node_ips` | node_id, ip, family, scope, is_primary | 多 IP 全量上报 |
+| `node_ips` | node_id, ip, family, scope, is_primary, manual_primary | 多 IP 全量上报 |
 | `node_interfaces` | node_id, name, is_default, updated_at | agent 上报的可选网卡清单与默认路由标记 |
 | `node_network` | node_id, iface, mode(in/out/both/max), quota_bytes, cycle_type(none/month/year), next_reset_at | 流量口径、配额与独立流量周期；空 `iface` 表示 agent 自动选择默认路由 |
 | `node_billing` | node_id, cycle_type(none/month/day/year), cycle_days(单位随 cycle_type), next_due_at, note | 缴费周期 |
@@ -588,7 +588,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
   1. 本地 GeoLite2-Country MMDB（离线，面板可上传更新，**也会自动下载**——见 §14.1）；
   2. 未命中且可配置在线 API（ip-api / ipinfo，可选配 key）作为回退。
 - 国旗 = ISO 3166-1 alpha-2 → emoji/图标资源（前端内置，不依赖 CDN）。
-- 主 IP 选择：默认第一个公网 IPv4，否则第一个公网 IPv6；面板可手动指定（`node_ips.is_primary`），订阅渲染使用主 IP（或你填的域名）。
+- 主 IP 选择：默认第一个公网 IPv4，否则第一个公网 IPv6；面板可手动指定（`node_ips.is_primary` + `manual_primary`），订阅渲染使用主 IP（或你填的域名）。**手动主 IP 的口径（修订 2026-09-15）**：`nodes.primary_ip` 是列表/卡片/订阅实际读取的字段，手动选择必须落在它上面——`ReplaceNodeIPs` 在每次全量上报时若手动选择仍在上报集内，就把 `nodes.primary_ip` 同步写回该地址（同事务）；hub 只在当前 primary 为空或不在上报集内时才重新指认（含 agent 未标 primary 的回退分支）。此前实现只在 `node_ips` 里保住标志、不同步 `nodes.primary_ip`，被旧版覆盖逻辑带偏的值（仍在上报集内）永远不会自愈，表现为列表一直显示 agent 自选地址。
 
 ### 14.1 数据库的自动下载与更新（实现修订 2026-09-15）
 

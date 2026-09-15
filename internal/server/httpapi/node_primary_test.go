@@ -165,3 +165,144 @@ func TestManualPrimarySurvivesAgentStateReport(t *testing.T) {
 		t.Fatalf("primaries = %d, want 1 (198.51.100.6): %s", primaries, detail.Body)
 	}
 }
+
+// TestPrimaryIPDriftHealsOnNextReport reproduces the field bug behind
+// "服务器列表主IP列不显示用户选择": a build that overwrote nodes.primary_ip with
+// the agent's suggestion (before the hub guard existed) leaves the drift
+// inside the reported set, where the hub guard can never see it. The next full
+// report must write the manual pick back into nodes.primary_ip.
+func TestPrimaryIPDriftHealsOnNextReport(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+	nodeID, secret := seedNode(t, api, "pin-drift", "m-pin-3", "")
+
+	hdr := http.Header{"X-Fobe-Node-ID": {nodeID}, "X-Fobe-Node-Secret": {secret}}
+	wsURL := "ws" + srv.URL[len("http"):] + "/ws/agent"
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	if err != nil {
+		t.Fatalf("agent dial: %v", err)
+	}
+	defer ws.Close()
+	ws.WriteJSON(protocol.NewEnvelope(protocol.TypeHello, "", protocol.Hello{MachineID: "m-pin-3", Version: "dev"}))
+	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var env protocol.Envelope
+	for {
+		if err := ws.ReadJSON(&env); err != nil {
+			t.Fatalf("read hello_ack: %v", err)
+		}
+		if env.Type == protocol.TypeHelloAck {
+			break
+		}
+	}
+
+	waitPrimary := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			detail := doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+nodeID, cookie, nil)
+			m := detail.JSONMap(t)
+			if got, _ := m["node"].(map[string]any)["primary_ip"].(string); got == want {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("primary_ip never became %q", want)
+	}
+
+	if err := ws.WriteJSON(protocol.NewEnvelope(protocol.TypeState, "", protocol.State{IPs: []protocol.IPInfo{
+		{IP: "198.51.100.5", Family: 4, Scope: "public", IsPrimary: true},
+		{IP: "198.51.100.6", Family: 4, Scope: "public"},
+	}})); err != nil {
+		t.Fatal(err)
+	}
+	waitPrimary("198.51.100.5")
+
+	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+nodeID+"/primary-ip", cookie,
+		map[string]string{"ip": "198.51.100.6"})
+	if r.Status != 200 {
+		t.Fatalf("set primary: %d %s", r.Status, r.Body)
+	}
+	waitPrimary("198.51.100.6")
+
+	// simulate the old build's damage: primary_ip clobbered to the agent's
+	// suggestion while manual_primary survives in node_ips
+	if _, err := api.Store.Exec(`UPDATE nodes SET primary_ip = '198.51.100.5' WHERE id = ?`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+
+	// the very next full report must heal the list column, not just the flags
+	if err := ws.WriteJSON(protocol.NewEnvelope(protocol.TypeState, "", protocol.State{IPs: []protocol.IPInfo{
+		{IP: "198.51.100.5", Family: 4, Scope: "public", IsPrimary: true},
+		{IP: "198.51.100.6", Family: 4, Scope: "public"},
+	}})); err != nil {
+		t.Fatal(err)
+	}
+	waitPrimary("198.51.100.6")
+}
+
+// TestManualPrimaryKeptWhenAgentMarksNone covers agents that report no
+// IsPrimary at all (old agents): the first-public-v4 fallback in hub.onState
+// must not overwrite a still-reported manual pick, or it would fight the
+// store's reconciliation on every report.
+func TestManualPrimaryKeptWhenAgentMarksNone(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+	nodeID, secret := seedNode(t, api, "pin-nomark", "m-pin-4", "")
+
+	hdr := http.Header{"X-Fobe-Node-ID": {nodeID}, "X-Fobe-Node-Secret": {secret}}
+	wsURL := "ws" + srv.URL[len("http"):] + "/ws/agent"
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	if err != nil {
+		t.Fatalf("agent dial: %v", err)
+	}
+	defer ws.Close()
+	ws.WriteJSON(protocol.NewEnvelope(protocol.TypeHello, "", protocol.Hello{MachineID: "m-pin-4", Version: "dev"}))
+	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var env protocol.Envelope
+	for {
+		if err := ws.ReadJSON(&env); err != nil {
+			t.Fatalf("read hello_ack: %v", err)
+		}
+		if env.Type == protocol.TypeHelloAck {
+			break
+		}
+	}
+
+	waitPrimary := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			detail := doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+nodeID, cookie, nil)
+			m := detail.JSONMap(t)
+			if got, _ := m["node"].(map[string]any)["primary_ip"].(string); got == want {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("primary_ip never became %q", want)
+	}
+
+	// no IsPrimary anywhere: the fallback pins the first public v4
+	if err := ws.WriteJSON(protocol.NewEnvelope(protocol.TypeState, "", protocol.State{IPs: []protocol.IPInfo{
+		{IP: "198.51.100.5", Family: 4, Scope: "public"},
+		{IP: "198.51.100.6", Family: 4, Scope: "public"},
+	}})); err != nil {
+		t.Fatal(err)
+	}
+	waitPrimary("198.51.100.5")
+
+	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+nodeID+"/primary-ip", cookie,
+		map[string]string{"ip": "198.51.100.6"})
+	if r.Status != 200 {
+		t.Fatalf("set primary: %d %s", r.Status, r.Body)
+	}
+
+	// the next no-mark report must leave the manual pick alone
+	if err := ws.WriteJSON(protocol.NewEnvelope(protocol.TypeState, "", protocol.State{IPs: []protocol.IPInfo{
+		{IP: "198.51.100.5", Family: 4, Scope: "public"},
+		{IP: "198.51.100.6", Family: 4, Scope: "public"},
+	}})); err != nil {
+		t.Fatal(err)
+	}
+	waitPrimary("198.51.100.6")
+}

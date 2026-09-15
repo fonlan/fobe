@@ -407,6 +407,15 @@ func (s *Store) ReplaceNodeIPs(nodeID string, ips []IPRow) error {
 		if _, err := tx.Exec(`UPDATE node_ips SET is_primary = 1 WHERE node_id = ? AND ip = ?`, nodeID, manualIP); err != nil {
 			return err
 		}
+		// nodes.primary_ip is what the list API, node cards and subscription
+		// rendering actually read; node_ips flags alone never reach them. A pin
+		// made before the guard existed (or drift left by an older build that
+		// overwrote primary_ip with the agent's suggestion) must heal here on
+		// the next full report, otherwise the panel shows the wrong "主 IP"
+		// forever — the drift is in the reported set, so the hub never re-pins.
+		if _, err := tx.Exec(`UPDATE nodes SET primary_ip = ? WHERE id = ?`, manualIP, nodeID); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	// keep exactly one primary: first public v4, else first public v6, else first row

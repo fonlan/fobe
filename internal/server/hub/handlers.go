@@ -221,12 +221,15 @@ func (h *Hub) onState(nodeID string, st *protocol.State) {
 		if err := h.store.ReplaceNodeIPs(nodeID, rows); err != nil {
 			h.log.Warn("replace node ips", "node", nodeID, "err", err)
 		}
-		// primary pinned server-side only when the agent didn't mark one
+		// primary pinned server-side only when the agent didn't mark one; even
+		// then a still-reported primary (e.g. a §14 manual pick) is left alone —
+		// unconditionally re-pinning here would fight the store's manual-pick
+		// sync and flip the list column back and forth on every report.
 		if primary != "" {
 			if n, err := h.store.GetNode(nodeID); err == nil && (n.PrimaryIP == "" || !ipInRows(st.IPs, n.PrimaryIP)) {
 				_ = h.store.SetNodePrimaryIP(nodeID, primary, h.countryFor(primary, n.CountryCode))
 			}
-		} else if n, err := h.store.GetNode(nodeID); err == nil {
+		} else if n, err := h.store.GetNode(nodeID); err == nil && (n.PrimaryIP == "" || !ipInRows(st.IPs, n.PrimaryIP)) {
 			for _, ip := range st.IPs {
 				if ip.Scope == "public" && ip.Family == 4 {
 					_ = h.store.SetNodePrimaryIP(nodeID, ip.IP, h.countryFor(ip.IP, n.CountryCode))
