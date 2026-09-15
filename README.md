@@ -348,3 +348,7 @@ export default defineConfig({
 | **节点详情磁盘占用率恒 0 / 每日流量为空** | 两个旧版 bug（磁盘的挂载点/文件系统字段解析错位、没有 `node_network` 行时整条流量上报被丢弃），已修复。**服务端与探针 agent 都要升级**：磁盘在 agent 侧采集，旧 agent 上报的磁盘恒空；升级后新样本才有值（历史样本仍是 0） |
 | 一键更新后个别节点没生效 | 离线节点要等重连后由 `hello_ack` 自动收敛（结果表里是"离线待生效"）；15 分钟后仍未收敛会发一条 `singbox_update_stale` 告警，逐台查 `journalctl -u fobe-agent` / agent 侧的 sing-box 日志 |
 | **探针上 sing-box 装在哪 / 升级后路径变了** | agent 侧统一用 `/etc/one-sing/`：`sing-box`（二进制）、`config.json`、`cert/{cert.crt,private.key}`（与 one-sing.sh 同一套路径，便于互相接管）。从旧版本升级的探针会在 agent 启动时自动搬迁旧路径（`/usr/local/bin/sing-box`、`/etc/sing-box/…`）并删掉空目录，日志里是 `sing-box layout migrated`。机器上原本有 one-sing.sh 的 `one-sing.service` 时，agent 首次收敛前会**停掉并 disable** 它（两个 supervisor 抢同一个进程只会互相重启）。注意 `config.json` 由面板独占：继续用 one-sing.sh 加协议会互相覆盖，要共存请改路径 |
+
+## 许可
+
+[MIT](LICENSE)
