@@ -5,6 +5,8 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/fobe-panel/fobe/internal/server/geoip"
 	"github.com/fobe-panel/fobe/internal/server/geoipupdate"
@@ -303,6 +307,82 @@ func TestGeoIPUpdateFailureIsReportedAndAudited(t *testing.T) {
 	resp, raw := doAuthed(t, "GET", srv.URL+"/api/audit?limit=20", cookie, nil)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "geoip_update_failed") {
 		t.Fatalf("audit is missing the failure: %d %s", resp.StatusCode, raw)
+	}
+}
+
+func TestGeoIPUpdateKeepsEventSocketOpen(t *testing.T) {
+	fixture := mmdbFixture(t)
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(fixture)
+	}))
+	defer mirror.Close()
+
+	srv, api := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "GeoLite2-Country.mmdb")
+	api.GeoIPMMDBPath = path
+	api.GeoIPResolver = geoip.NewMMDB(path)
+	api.Background = context.Background()
+	api.GeoIPUpdater = geoipupdate.New(geoipupdate.Config{
+		Path:       path,
+		Settings:   api.Store,
+		Log:        testLogger(),
+		Sources:    []string{mirror.URL},
+		AutoUpdate: true,
+		Progress:   api.OnGeoIPProgress,
+	})
+	cookie := loginSession(t, srv)
+
+	// The panel's live channel: a websocket to /ws/events, authenticated like
+	// the browser does it.
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws/events"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Cookie": []string{cookie}})
+	if err != nil {
+		t.Fatalf("dial /ws/events: %v (%v)", err, resp)
+	}
+	defer conn.Close()
+
+	if resp2, raw := doAuthed(t, "POST", srv.URL+"/api/geoip/update", cookie, nil); resp2.StatusCode != http.StatusAccepted {
+		t.Fatalf("update: got %d %s", resp2.StatusCode, raw)
+	}
+
+	// Every phase must arrive over the socket, and the socket must still be
+	// open afterwards: an update that closed it would make the panel drop its
+	// progress bar and (through a dev proxy) report a socket error.
+	seen := map[string]bool{}
+	deadline := time.Now().Add(5 * time.Second)
+	for !seen[geoipupdate.PhaseDone] && time.Now().Before(deadline) {
+		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("event socket broke during the update: %v (phases seen: %v)", err, seen)
+		}
+		var ev struct {
+			Kind string               `json:"kind"`
+			Data geoipupdate.Download `json:"data"`
+		}
+		if json.Unmarshal(data, &ev) != nil || ev.Kind != "geoip_update" {
+			continue
+		}
+		seen[ev.Data.Phase] = true
+	}
+	for _, phase := range []string{geoipupdate.PhaseConnecting, geoipupdate.PhaseDownloading, geoipupdate.PhaseVerifying, geoipupdate.PhaseDone} {
+		if !seen[phase] {
+			t.Fatalf("phase %q never arrived over the socket (seen: %v)", phase, seen)
+		}
+	}
+
+	// Idle reads must time out rather than close: the server keeps the channel
+	// open after the work is done. A late `geoip_updated` frame is expected —
+	// only a close (or any other error) is a failure.
+	conn.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			var timeout net.Error
+			if !errors.As(err, &timeout) || !timeout.Timeout() {
+				t.Fatalf("socket closed after the update: %v", err)
+			}
+			break
+		}
 	}
 }
 
