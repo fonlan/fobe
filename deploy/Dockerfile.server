@@ -28,13 +28,40 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -ldflags "-X main.version=$VERSION" -o /out/fobe-server ./cmd/server \
+# A placeholder VERSION ("", dev, compose — the shapes IsReleaseVersion rejects)
+# is replaced by a content-addressed build id, mirroring scripts/dev.sh (design
+# §5.5 / §227): fingerprint a placeholder agent build, take the first 12 hex
+# chars of its sha256, prepend a 0 when there is no digit at all. The target
+# version is compared by *equality* (agent version == server version), so a
+# constant "compose" could never trigger §5.5 follow-the-server even across a
+# rebuild; the fingerprint moves only when the agent binary actually changes.
+# Go builds are reproducible, so identical source keeps the same id.
+# An explicit non-placeholder VERSION (the release pipeline passes the tag)
+# goes through untouched.
+# The final id lives in $VER, not $VERSION on purpose: Docker substitutes ARG
+# names into the RUN text at parse time, so reassigning VERSION in the shell
+# cannot affect the already-substituted occurrences below.
+RUN set -eu; \
+    VER="$VERSION"; \
+    case "$VER" in \
+      ""|dev|compose) \
+        base="$VER"; \
+        if [ -z "$base" ]; then base="dev"; fi; \
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+          -ldflags "-s -w -X github.com/fobe-panel/fobe/internal/agent.Version=$base-pending" \
+          -o /tmp/agent-pending ./cmd/agent; \
+        fp="$(sha256sum /tmp/agent-pending | cut -c1-12)"; \
+        case "$fp" in *[0-9]*) ;; *) fp="0$fp" ;; esac; \
+        VER="$base-$fp"; \
+      ;; \
+    esac; \
+    CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o /out/fobe-server ./cmd/server \
  && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-      -ldflags "-s -w -X github.com/fobe-panel/fobe/internal/agent.Version=$VERSION" \
-      -o /out/agent-seed/agent/$VERSION/linux-amd64 ./cmd/agent \
- && sha256sum /out/agent-seed/agent/$VERSION/linux-amd64 | awk '{print $1}' > /out/agent-seed/agent/$VERSION/linux-amd64.sha256 \
- && printf '{"version":"%s","artifacts":[{"os":"linux","arch":"amd64","file":"linux-amd64"}]}\n' "$VERSION" \
-      > /out/agent-seed/agent/$VERSION/manifest.json
+      -ldflags "-s -w -X github.com/fobe-panel/fobe/internal/agent.Version=$VER" \
+      -o /out/agent-seed/agent/$VER/linux-amd64 ./cmd/agent \
+ && sha256sum /out/agent-seed/agent/$VER/linux-amd64 | awk '{print $1}' > /out/agent-seed/agent/$VER/linux-amd64.sha256 \
+ && printf '{"version":"%s","artifacts":[{"os":"linux","arch":"amd64","file":"linux-amd64"}]}\n' "$VER" \
+      > /out/agent-seed/agent/$VER/manifest.json
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata
