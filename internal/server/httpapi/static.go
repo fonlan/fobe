@@ -96,6 +96,18 @@ func (s *Server) dlHandler() http.Handler {
 // --- frontend static / API-only mode (design §16) ---
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
+	// The API contract is "structured data + snake_case error codes" (§19.6),
+	// and this is the last handler to run: an unmatched /api path must never
+	// fall through to the SPA / API-only page. It used to, and the failure mode
+	// was nasty — a server whose route table predates the call (a stale dev
+	// process, an image that was not rebuilt) answered a fresh endpoint with
+	// 200 text/html, so the panel reported "cannot reach the server" while the
+	// connection was perfectly healthy. An explicit code says what happened.
+	if p := r.URL.Path; p == "/api" || strings.HasPrefix(p, "/api/") {
+		writeErr(w, http.StatusNotFound, "unknown_endpoint")
+		return
+	}
+
 	if s.WebDir == "" {
 		// dev mode: point the user at the Vite dev server instead of 404/blank
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

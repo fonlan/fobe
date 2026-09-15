@@ -95,6 +95,7 @@ fobe-server admin unblock <ip|all> | reset-password | list-sessions --revoke | k
 ## 已知陷阱
 
 - **`web/vite.config.js` 遮蔽 `.ts`**：Vite 配置查找里 `.js` 优先，`tsc` 曾生成它导致改了 `vite.config.ts` 却不生效。`tsconfig.node.json` 必须保持 `"emitDeclarationOnly": true`；改配置没生效就先 `ls web/vite.config.js`。
+- **前端热更新、后端不热**：`scripts/dev.sh` 只在启动时 `go build` 一次后端（产物 `data/dl/.dev-server`），Vite 那侧的改动即时生效。所以改了后端接口后会出现"新前端调旧后端"——旧后端不认识这个 `POST`，落到静态兜底处理器上以 `200 text/html` 应答，前端解析 JSON 失败后报"网络错误,无法连接服务器"（`apiErrorMessage` 把任何非 `ApiError` 都算 `network_error`）。现已加固：未匹配的 `/api/*` 回 `404 unknown_endpoint`（design §16 实现修订），2xx 非 JSON 响应报 `bad_response`。**改了后端仍然必须重启 `scripts/dev.sh`。**
 - **dev 库里 `server.public_url` 可能指向旧 IP**：它压过请求 Host，`/install.sh` 会渲染出错的 `DEFAULT_SERVER`，表现是"局域网服务器装不上探针"。换网络后先看这个设置。
 - **dev 默认监听 `0.0.0.0`**（固定密码、无 TLS，仅限可信内网）；生产的暴露控制仍由 compose 只发布到宿主机回环承担，两者互不影响。
 - **`FOBE_ADMIN_PASSWORD` 是密码准绳**：每次启动同步为该值，变更时吊销全部旧会话；不设置则不动现有密码。首次启动无用户且未设置时才打印一次性初始密码。

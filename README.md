@@ -296,6 +296,7 @@ export default defineConfig({
 | 登录失败几次后自己也进不去 | 黑名单取错 IP；先 `docker compose exec server fobe-server admin unblock all` 自救，再核对 `FOBE_TRUSTED_PROXIES` |
 | 改了节点，订阅还是旧的 | `/sub/` 被缓存（检查 `no-store`，以及客户端自身的缓存） |
 | 模板/GeoIP 上传 413 | `client_max_body_size` |
+| 点新按钮提示**「接口不存在(服务端可能是旧版本)」**或「服务端返回了非 JSON 响应」 | 前端是新的、后端是旧的：`scripts/dev.sh` 只在启动时 `go build` 一次（生产是镜像里的二进制），改了后端必须**重启 dev.sh**（生产则重建镜像/重启容器）。旧后端不认识新接口，会以 SPA 兜底页应答 |
 | 安装命令里域名不对 | nginx 没传 `Host` |
 | 装完 agent 连不上、反复重连 | 探针能否解析并连通你的域名（DNS 污染 / 出网限制）；`journalctl -u fobe-agent` 或 OpenWrt 上 `logread` |
 | **升级容器后 sing-box 没了**（设置页版本列表空、节点更新失败） | `/srv/dl` 没挂成独立卷，重建容器把已下载版本留在了旧容器层。核对 `docker compose config` 里的 `./data/dl:/srv/dl`，以及设置页/日志里的 `singbox.dl_mount_ok=false` 警告；恢复做法是重新下载（设置页「重试」）或手动把产物放回 `data/dl/singbox/<version>/` |

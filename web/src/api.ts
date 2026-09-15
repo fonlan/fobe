@@ -106,7 +106,17 @@ async function send<T>(path: string, init: RequestInit = {}, skipUnauthorizedRed
     }
     throw new ApiError(code, resp.status);
   }
-  return (await resp.json()) as T;
+  // A 2xx whose body is not JSON does not come from this API's contract: it is
+  // an HTML page (a backend whose route table predates the call, a proxy error
+  // page) or something else entirely. Letting JSON.parse throw here would label
+  // it "network_error" — sending the operator to look for DNS problems while
+  // the connection is fine. Name the actual symptom instead.
+  const text = await resp.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError('bad_response', resp.status);
+  }
 }
 
 async function request<T>(path: string, opts: ReqOpts = {}): Promise<T> {
