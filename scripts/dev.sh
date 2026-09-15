@@ -67,6 +67,7 @@ export FOBE_LISTEN="${FOBE_LISTEN:-0.0.0.0:$PORT}"
 export FOBE_INSTALL_TMPL="$ROOT/scripts/install.sh.tmpl"
 export FOBE_BACKUP_DIR=""
 export FOBE_ADMIN_PASSWORD="${FOBE_ADMIN_PASSWORD:-devpass123}"
+export FOBE_AGENT_UPDATE_STAGGER="${FOBE_AGENT_UPDATE_STAGGER:-1s}"
 # 留空 FOBE_WEB_DIR → API-only 模式:server 的 / 提示去访问 Vite(§16)
 unset FOBE_WEB_DIR || true
 
