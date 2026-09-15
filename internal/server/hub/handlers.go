@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -82,8 +83,19 @@ func (h *Hub) onTraffic(nodeID string, ts int64, t *protocol.Traffic) {
 		ts = protocol.Now()
 	}
 	net, err := h.store.GetNodeNetwork(nodeID)
-	if err != nil {
-		return // node has no selected interface yet: keep raw counters only
+	if errors.Is(err, store.ErrNotFound) {
+		// §8.2 accounting does not depend on node configuration: a probe whose
+		// interface was never picked in the panel still accumulates. Returning
+		// early here (the previous behaviour) left traffic_counters and
+		// traffic_daily permanently empty — the daily-traffic chart and the
+		// card's "today" numbers had no data at all.
+		net = &store.NodeNetwork{NodeID: nodeID, Iface: t.Iface, Mode: quota.ModeBoth, TZ: "UTC"}
+		if n, err := h.store.GetNode(nodeID); err == nil && n.TZ != "" {
+			net.TZ = n.TZ // daily buckets follow the probe's clock (§8.2.3)
+		}
+	} else if err != nil {
+		h.log.Warn("get node network", "node", nodeID, "err", err)
+		return
 	}
 	if t.Iface != "" && t.Iface != net.Iface {
 		return // report for an interface the panel doesn't track

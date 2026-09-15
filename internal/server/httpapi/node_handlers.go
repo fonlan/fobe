@@ -115,6 +115,10 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 		v.NetRxRate, v.NetTxRate = m.NetRxRate, m.NetTxRate
 	}
 
+	// Today's bucket is computed outside the network-config branch: §8.2
+	// accounting runs from the probe's first traffic report, so the card's
+	// 今日下行/上行 must not stay 0 until someone fills in 网卡/配额.
+	tz := n.TZ
 	if net, err := s.Store.GetNodeNetwork(n.ID); err == nil {
 		v.Iface = net.Iface
 		v.Mode = net.Mode
@@ -127,10 +131,16 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 			v.PeriodUsed = used
 			v.PeriodPct = pct
 		}
-		today := quota.LocalDate(nowUnix(), net.TZ)
-		if rows, err := s.Store.ListTrafficDaily(n.ID, today); err == nil && len(rows) > 0 {
-			v.TodayRx, v.TodayTx = rows[0].RxBytes, rows[0].TxBytes
+		if net.TZ != "" {
+			tz = net.TZ
 		}
+	}
+	if tz == "" {
+		tz = "UTC"
+	}
+	today := quota.LocalDate(nowUnix(), tz)
+	if rows, err := s.Store.ListTrafficDaily(n.ID, today); err == nil && len(rows) > 0 {
+		v.TodayRx, v.TodayTx = rows[0].RxBytes, rows[0].TxBytes
 	}
 
 	if b, err := s.Store.GetNodeBilling(n.ID); err == nil {
@@ -307,6 +317,10 @@ func (s *Server) handleNodeTraffic(w http.ResponseWriter, r *http.Request) {
 	if net, err := s.Store.GetNodeNetwork(id); err == nil {
 		start := quota.PeriodStart(net.AnchorAt, net.CycleDays, net.TZ, time.Now())
 		rx, tx, _ = s.Store.SumTrafficSince(id, quota.LocalDate(start, net.TZ))
+	} else {
+		// No cycle configured yet: the window the chart shows is the only
+		// "period" that exists, and reporting 0 B there was pure noise.
+		rx, tx, _ = s.Store.SumTrafficSince(id, fromDate)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"daily": daily, "period_rx": rx, "period_tx": tx})
 }

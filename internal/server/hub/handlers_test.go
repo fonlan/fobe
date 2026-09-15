@@ -181,3 +181,29 @@ func TestRecordSingboxStateFirewallHint(t *testing.T) {
 		t.Fatalf("upsert clobbered firewall_hint: %q", hint)
 	}
 }
+
+// §8.2 accounting is configuration-independent: a probe whose 网卡/配额 was never
+// filled in still accumulates. Bailing out on a missing node_network row left
+// traffic_daily empty, which is exactly what the daily-traffic chart reads.
+func TestOnTrafficWithoutNodeNetwork(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n5")
+
+	// first report only baselines the counter: no delta, no daily bytes
+	h.onTraffic("n5", 1000, &protocol.Traffic{Iface: "eth0", Rx: 5000, Tx: 7000})
+	if rows, err := h.store.ListTrafficDaily("n5", "1970-01-01"); err != nil || len(rows) != 0 {
+		t.Fatalf("baseline report wrote daily bytes: %+v (%v)", rows, err)
+	}
+
+	h.onTraffic("n5", 1060, &protocol.Traffic{Iface: "eth0", Rx: 6000, Tx: 7500})
+	rows, err := h.store.ListTrafficDaily("n5", "1970-01-01")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("daily rows = %+v (%v), want exactly one bucket", rows, err)
+	}
+	if rows[0].RxBytes != 1000 || rows[0].TxBytes != 500 {
+		t.Fatalf("daily = %+v, want rx 1000 / tx 500", rows[0])
+	}
+	if c, err := h.store.GetTrafficCounter("n5", "eth0", "rx"); err != nil || c.PeriodUsed != 1000 {
+		t.Fatalf("counter = %+v (%v), want 1000 used", c, err)
+	}
+}
