@@ -99,8 +99,8 @@ CREATE TABLE IF NOT EXISTS node_network (
 
 CREATE TABLE IF NOT EXISTS node_billing (
     node_id    TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-    cycle_type TEXT NOT NULL DEFAULT 'monthly', -- monthly|quarterly|yearly|once
-    cycle_days INTEGER,
+    cycle_type TEXT NOT NULL DEFAULT 'none',  -- none|month|day|year (记账口径, 不驱动到期计算)
+    cycle_days INTEGER,                       -- 周期长度, 单位随 cycle_type (month=月/year=年/day=天)
     next_due_at INTEGER,
     note       TEXT NOT NULL DEFAULT ''
 );

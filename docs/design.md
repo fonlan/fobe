@@ -26,7 +26,7 @@
 | 12 | 订阅模型 | 单用户 + 多订阅，每订阅独立节点集与模板文件 | 模板管理 + 双格式引擎 |
 | 13 | 探针凭据 | 一个入站 + 一个**全局共享** anytls 密码 | 无法按订阅吊销代理访问，只能全局轮换 |
 | 14 | 重置锚点 | 循环锚点，填一次自动滚动；缺省继承缴费锚点 | 需处理月末边界与时区 |
-| 15 | 缴费周期 | 周期类型 + 下次到期日，手动改；**无续费按钮、无历史** | 查不到"上期什么时候交的" |
+| 15 | 缴费周期 | 周期类型（无 / 按月 / 按天 / 按年，2026-09-15 增按年）+ 周期长度 + 下次到期日，手动改；**周期长度单位随类型（天/月/年），类型只作记账口径、不参与任何到期计算**；**无续费按钮、无历史** | 查不到"上期什么时候交的" |
 | 16 | 指标保留 | 明细只存 7 天；另存永久「按天流量」表 | 7 天以外的曲线不可得（月曲线靠日表） |
 | 17 | 延迟测量 | 探针**主动**测面板配置的目标；5s 本地测、60s 批量上报；ICMP + TCP 握手两种 | 拿不到"用户→探针"的真实延迟 |
 | 18 | 登录加固 | 失败 3 次拉黑 IP（持久化）+ CLI 解封；**不做 2FA** | 黑名单依赖 XFF 信任链；无第二因子 |
@@ -237,7 +237,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, cpu_cores, primary_ip, country_code, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表 |
 | `node_ips` | node_id, ip, family, scope, is_primary | 多 IP 全量上报 |
 | `node_network` | node_id, iface, mode(in/out/both/max), quota_bytes, cycle_days, anchor_at, tz | 流量口径与配额 |
-| `node_billing` | node_id, cycle_type, cycle_days, next_due_at, note | 缴费周期 |
+| `node_billing` | node_id, cycle_type(none/month/day/year), cycle_days(单位随 cycle_type), next_due_at, note | 缴费周期 |
 | `traffic_counters` | node_id, iface, direction, last_raw, last_ts, period_start, period_used | 回绕/重启检测 |
 | `traffic_daily` | node_id, date, rx_bytes, tx_bytes | **永久**，月曲线与配额靠它 |
 | `metrics_samples` | node_id, ts, cpu, mem_used, mem_total, disk_used, disk_total, net_rx_rate, net_tx_rate, uptime | 保留 7 天 |

@@ -216,6 +216,27 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
 
 const MODES = ['in', 'out', 'both', 'max'] as const;
 
+// Billing cycle length shares one column (node_billing.cycle_days) whose unit is
+// whatever cycle_type names: "3 months" is stored as 3, not 90.
+const CYCLE_LEN_LABEL: Record<string, string> = {
+  day: 'cycle_days',
+  month: 'cycle_months',
+  year: 'cycle_years',
+};
+const CYCLE_UNIT_DAYS: Record<string, number> = { day: 1, month: 30, year: 365 };
+
+// Switching the unit converts the number so it stays meaningful (30 days -> 1
+// month); "none" has no unit, so the raw text is kept as typed.
+function convertCycleLen(raw: string, from: string, to: string): string {
+  const n = Number(raw);
+  const fromDays = CYCLE_UNIT_DAYS[from];
+  const toDays = CYCLE_UNIT_DAYS[to];
+  if (raw.trim() === '' || !Number.isFinite(n) || n <= 0 || !fromDays || !toDays || fromDays === toDays) {
+    return raw;
+  }
+  return String(Math.max(1, Math.round((n * fromDays) / toDays)));
+}
+
 function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: () => void }) {
   const { t } = useI18n();
   const node = data.node;
@@ -322,14 +343,22 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
       <div className="form-grid">
         <label className="field">
           <span>{t('cycle_type')}</span>
-          <select value={cycleType} onChange={(e) => setCycleType(e.target.value)}>
+          <select
+            value={cycleType}
+            onChange={(e) => {
+              const next = e.target.value;
+              setBillingDays((v) => convertCycleLen(v, cycleType, next));
+              setCycleType(next);
+            }}
+          >
             <option value="none">{t('cycle_none')}</option>
             <option value="month">{t('cycle_month')}</option>
             <option value="day">{t('cycle_day')}</option>
+            <option value="year">{t('cycle_year')}</option>
           </select>
         </label>
         <label className="field">
-          <span>{t('cycle_days')}</span>
+          <span>{t(CYCLE_LEN_LABEL[cycleType] ?? 'cycle_days')}</span>
           <input type="number" min="1" value={billingDays} onChange={(e) => setBillingDays(e.target.value)} />
         </label>
         <label className="field">
