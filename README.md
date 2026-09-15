@@ -186,7 +186,7 @@ environment:
 | `FOBE_SINGBOX_AUTO_DOWNLOAD` | `1` | 启动时若 `<FOBE_DL_DIR>/singbox` 里没有任何有效版本，后台自动下载当时的最新**稳定版**；已有缓存则完全不联网；置 `0` 关闭。失败不阻塞启动，只记 WARN 并把状态与原因写进设置页 |
 | `FOBE_SINGBOX_API_BASE` | `https://api.github.com` | sing-box release 列表来源（GitHub 兼容 API）；镜像源/离线环境改这里 |
 | `FOBE_SINGBOX_DOWNLOAD_BASE` | `https://github.com` | sing-box 产物下载根地址（asset 没带下载 URL 时用它拼路径） |
-| `FOBE_GEOIP_MMDB` | `/data/geoip/GeoLite2-Country.mmdb` | 国别数据库路径。自动下载、手动上传与国别判定写/读的都是这个文件（放挂载卷，见「数据与备份」） |
+| `FOBE_GEOIP_MMDB` | `/data/geoip/GeoLite2-Country.mmdb` | 国别数据库路径。自动下载、手动上传与国别判定写/读的都是这个文件（放挂载卷，见「数据与备份」）。**默认值是容器内路径**——本机直接跑二进制时要指到可写目录（`scripts/dev.sh` 已设为 `./data/geoip/...`），否则自动更新会报 `mkdir /data: read-only file system` |
 | `FOBE_GEOIP_AUTO_UPDATE` | `1` | GeoIP 库的自动更新总闸：每天检查一次，文件超过「最长使用天数」就从免密钥镜像重新下载；置 `0` 连启动补缺都不做（设置页的开关随之失效，但「立即更新」与上传仍可用） |
 | `FOBE_GEOIP_URL` | 内置镜像链 | 钉死一个下载源（内网镜像/离线环境）。设置后不再回退到内置的三个 GitHub 镜像；设置页「自定义下载源」等价，优先级低于本变量 |
 | `FOBE_GEOIP_ONLINE` | `0` | 本地库未命中时用 ip-api.com 在线兜底（会把节点 IP 发给第三方，默认关闭） |
@@ -257,6 +257,7 @@ scripts/dev.sh --no-web     # 只起后端,前端自己跑
 FOBE_MASTER_KEY=dev-key-not-for-prod \
 FOBE_DB=./data/dev.db \
 FOBE_DL_DIR=./data/dl \
+FOBE_GEOIP_MMDB=./data/geoip/GeoLite2-Country.mmdb \
 go run ./cmd/server
 
 # 终端 2：前端

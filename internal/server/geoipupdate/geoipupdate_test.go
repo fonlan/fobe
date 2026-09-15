@@ -380,6 +380,37 @@ func TestStartDownloadsMissingDatabaseInBackground(t *testing.T) {
 	t.Fatalf("startup download did not finish: status = %+v", m.Status())
 }
 
+func TestEnsureFailsFastWhenPathIsUnwritable(t *testing.T) {
+	fixture := fixtureBytes(t)
+	mir := newMirror(t, fixture)
+	// A file where the directory should be: MkdirAll fails with ENOTDIR, which
+	// stands in for the real-world case (the container default /data/geoip when
+	// the binary runs on a host whose /data is read-only).
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(blocked, "geoip", "GeoLite2-Country.mmdb")
+
+	m := newManager(t, path, newMemSettings(), Config{
+		Sources:    []string{mir.url("/db.mmdb")},
+		AutoUpdate: true,
+	})
+	got := m.Ensure(context.Background(), true)
+	if got.State != StateFailed || got.Error == "" {
+		t.Fatalf("status = %+v, want a failure naming the path", got)
+	}
+	if !strings.Contains(got.Error, "not-a-dir") {
+		t.Fatalf("error = %q, want the offending path in it", got.Error)
+	}
+	if n := mir.count("/db.mmdb"); n != 0 {
+		t.Fatalf("mirror hit %d times: an unwritable destination must fail before the download", n)
+	}
+	if dl := m.Download(); dl.Active || dl.Phase != PhaseFailed {
+		t.Fatalf("download snapshot = %+v, want a terminal failure", dl)
+	}
+}
+
 func TestSourcesPrecedence(t *testing.T) {
 	st := newMemSettings()
 	st.set(SettingSourceURL, "https://internal.example/db.mmdb")

@@ -42,6 +42,21 @@ func (m *Manager) download(ctx context.Context) Status {
 	m.lastBytesAt, m.lastBytes = time.Time{}, 0
 	m.mu.Unlock()
 
+	// Fail before spending bandwidth on a destination that cannot hold the file
+	// — an unwritable FOBE_GEOIP_MMDB (the container default /data/geoip is
+	// read-only when the binary runs on a host directly) would otherwise cost a
+	// whole ~9MB download per mirror and then report the same local error three
+	// times over.
+	if f, err := geoip.CreateMMDBTemp(m.cfg.Path); err != nil {
+		m.emit(Download{Active: false, Phase: PhaseFailed, Error: err.Error(), StartedAt: m.cfg.Now().Unix()})
+		m.logWarn("geoipupdate: database path is not writable", "path", m.cfg.Path, "err", err)
+		return m.setStatus(Status{State: StateFailed, Error: err.Error()})
+	} else {
+		name := f.Name()
+		f.Close()
+		os.Remove(name)
+	}
+
 	started := m.cfg.Now().Unix()
 	var lastErr error
 	for i, src := range sources {

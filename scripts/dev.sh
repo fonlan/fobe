@@ -33,6 +33,10 @@ command -v go >/dev/null || { echo "dev.sh: 未找到 go,请先安装 Go" >&2; e
 export FOBE_MASTER_KEY="${FOBE_MASTER_KEY:-$(printf 'fobe-dev-master-key-not-for-prod' | base64)}"
 export FOBE_DB="${FOBE_DB:-$ROOT/data/dev.db}"
 export FOBE_DL_DIR="${FOBE_DL_DIR:-$ROOT/data/dl}"
+# 国别库默认路径是容器里的 /data/geoip —— 本机跑时 /data 通常不可写
+# (macOS 上直接是只读根),自动更新会在那里报 mkdir /data: read-only file
+# system。所以 dev 显式指到仓库内的 data/ 下,和 dev.db / dl 同一层。
+export FOBE_GEOIP_MMDB="${FOBE_GEOIP_MMDB:-$ROOT/data/geoip/GeoLite2-Country.mmdb}"
 export FOBE_LISTEN="127.0.0.1:$PORT"
 export FOBE_INSTALL_TMPL="$ROOT/scripts/install.sh.tmpl"
 export FOBE_BACKUP_DIR=""
@@ -44,7 +48,7 @@ if [ "$RESET" = 1 ]; then
     rm -f "$FOBE_DB" "$FOBE_DB-wal" "$FOBE_DB-shm"
     echo "dev.sh: 已重置开发数据库 $FOBE_DB"
 fi
-mkdir -p "$(dirname "$FOBE_DB")" "$FOBE_DL_DIR"
+mkdir -p "$(dirname "$FOBE_DB")" "$FOBE_DL_DIR" "$(dirname "$FOBE_GEOIP_MMDB")"
 
 BACKEND_PID=""
 FRONTEND_PID=""
