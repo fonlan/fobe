@@ -97,7 +97,8 @@ fobe-server admin unblock <ip|all> | reset-password | list-sessions --revoke | k
 - **`web/vite.config.js` 遮蔽 `.ts`**：Vite 配置查找里 `.js` 优先，`tsc` 曾生成它导致改了 `vite.config.ts` 却不生效。`tsconfig.node.json` 必须保持 `"emitDeclarationOnly": true`；改配置没生效就先 `ls web/vite.config.js`。
 - **前端热更新、后端不热**：`scripts/dev.sh` 只在启动时 `go build` 一次后端（产物 `data/dl/.dev-server`），Vite 那侧的改动即时生效。所以改了后端接口后会出现"新前端调旧后端"——旧后端不认识这个 `POST`，落到静态兜底处理器上以 `200 text/html` 应答，前端解析 JSON 失败后报"网络错误,无法连接服务器"（`apiErrorMessage` 把任何非 `ApiError` 都算 `network_error`）。现已加固：未匹配的 `/api/*` 回 `404 unknown_endpoint`（design §16 实现修订），2xx 非 JSON 响应报 `bad_response`。**改了后端仍然必须重启 `scripts/dev.sh`。**
 - **dev 库里 `server.public_url` 可能指向旧 IP**：它压过请求 Host，`/install.sh` 会渲染出错的 `DEFAULT_SERVER`，表现是"局域网服务器装不上探针"。换网络后先看这个设置。
-- **dev 默认监听 `0.0.0.0`**（固定密码、无 TLS，仅限可信内网）；生产的暴露控制仍由 compose 只发布到宿主机回环承担，两者互不影响。
+- **dev 默认监听 `0.0.0.0`**（固定密码、无 TLS，仅限可信内网）；生产的暴露控制仍由 compose 只发布到宿主机回环承担，两者互不影响。只想绑本机用 `FOBE_LISTEN=127.0.0.1:8080 scripts/dev.sh`。
+- **局域网探针集体掉线 → 先查监听地址，再查 `server.public_url`**：dev.sh 曾一度硬绑 `127.0.0.1`，探针装的是局域网地址（`server.public_url`），于是全部连不上、面板数据看起来「不会自动更新」（页面上其实是离线状态）。判断顺序：`lsof -nP -iTCP:8080 -sTCP:LISTEN` 看是不是 `*:8080`，再看 `server.public_url` 是否等于本机当前局域网 IP（`ipconfig getifaddr en0`）。改完 dev.sh 必须**重启**它才生效。
 - **`FOBE_ADMIN_PASSWORD` 是密码准绳**：每次启动同步为该值，变更时吊销全部旧会话；不设置则不动现有密码。首次启动无用户且未设置时才打印一次性初始密码。
 - **`.gitignore` 覆盖了 `.agents/`、`.zcode/`、`.mem/`**（本地 skills 与工具元数据）以及构建产物 `agent`、`agent.exe`、`server`、`web/dist/`、`data/`。仓库根目录里那些二进制是本地构建残留，不要提交。
 - `data/sqlite/fobe.db` 是 WAL 单写者，别用多实例同时挂载。
