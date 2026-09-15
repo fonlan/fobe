@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/fobe-panel/fobe/internal/agent/service"
 )
 
 func TestBuildNodeConfig(t *testing.T) {
@@ -27,7 +29,8 @@ func TestBuildNodeConfig(t *testing.T) {
 			Users      []struct {
 				Password string `json:"password"`
 			} `json:"users"`
-			TLS struct {
+			PaddingScheme []string `json:"padding_scheme"`
+			TLS           struct {
 				Enabled         bool   `json:"enabled"`
 				ServerName      string `json:"server_name"`
 				CertificatePath string `json:"certificate_path"`
@@ -52,8 +55,13 @@ func TestBuildNodeConfig(t *testing.T) {
 		t.Fatalf("inbound users wrong: %+v", in)
 	}
 	if !in.TLS.Enabled || in.TLS.ServerName != ServerName ||
-		in.TLS.CertificatePath != CertDir+"/cert.pem" || in.TLS.KeyPath != CertDir+"/key.pem" {
+		in.TLS.CertificatePath != CertDir+"/"+CertFile || in.TLS.KeyPath != CertDir+"/"+KeyFile {
 		t.Fatalf("inbound tls wrong: %+v", in.TLS)
+	}
+	// The anytls padding scheme comes from one-sing.sh (§9.3 实现修订) and is
+	// part of the config hash, so changing it re-pushes every node.
+	if len(in.PaddingScheme) != len(AnytlsPaddingScheme) || in.PaddingScheme[0] != "stop=6" {
+		t.Fatalf("padding scheme wrong: %+v", in.PaddingScheme)
 	}
 	if len(cfg.Outbounds) == 0 || cfg.Outbounds[0].Type != "direct" {
 		t.Fatalf("outbound missing: %+v", cfg.Outbounds)
@@ -73,6 +81,27 @@ func TestBuildNodeConfig(t *testing.T) {
 	}
 	if _, err := BuildNodeConfig(70000, "pw"); err == nil {
 		t.Fatal("out-of-range port accepted")
+	}
+}
+
+// TestCertPathsMatchAgentLayout pins the one cross-package invariant of the
+// §9.3 layout revision: the server writes the certificate paths into every
+// node's config.json, and the agent writes the files. If the two disagree,
+// sing-box fails its `check` gate on every probe at once — a config-hash change
+// pushed fleet-wide against files that are not there.
+func TestCertPathsMatchAgentLayout(t *testing.T) {
+	bin, config, certDir := service.SingboxPaths()
+	if certDir != CertDir {
+		t.Fatalf("cert dir: server says %q, agent uses %q", CertDir, certDir)
+	}
+	if bin != service.SingboxWorkDir+"/sing-box" || config != service.SingboxWorkDir+"/config.json" {
+		t.Fatalf("agent layout drifted: bin=%q config=%q", bin, config)
+	}
+	if CertFile != service.SingboxCertFile || KeyFile != service.SingboxKeyFile {
+		t.Fatalf("cert names: server %q/%q, agent %q/%q", CertFile, KeyFile, service.SingboxCertFile, service.SingboxKeyFile)
+	}
+	if CertDir != service.SingboxWorkDir+"/cert" {
+		t.Fatalf("cert dir %q not under the work dir %q", CertDir, service.SingboxWorkDir)
 	}
 }
 

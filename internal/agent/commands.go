@@ -1,0 +1,131 @@
+package agent
+
+import (
+	"encoding/json"
+	"os/exec"
+	"runtime"
+	"time"
+
+	"github.com/fobe-panel/fobe/internal/agent/collect"
+	"github.com/fobe-panel/fobe/internal/agent/service"
+	"github.com/fobe-panel/fobe/internal/protocol"
+)
+
+const (
+	cmdTimeout    = 30 * time.Second
+	outputMaxKeep = 32 * 1024 // stdout/stderr truncated before reply (§7)
+)
+
+// executeCommand runs a server command and replies with cmd_result.
+// The execMu channel serializes execution; duplicate IDs are ignored so a
+// re-sent command after reconnect never runs twice (§7 幂等).
+func (s *agentSession) executeCommand(env protocol.Envelope) {
+	select {
+	case s.execMu <- struct{}{}:
+		defer func() { <-s.execMu }()
+	case <-s.done:
+		return
+	}
+
+	result := s.runCommand(env.ID, env.Type, env.Payload)
+	s.sendEnvelope(protocol.NewEnvelope(protocol.TypeCmdResult, env.ID, result))
+}
+
+func (s *agentSession) runCommand(id, kind string, payload json.RawMessage) protocol.CmdResult {
+	res := protocol.CmdResult{ID: id}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		switch kind {
+		case "run_shell":
+			var p struct {
+				Command string `json:"command"`
+			}
+			if err := json.Unmarshal(payload, &p); err != nil || p.Command == "" {
+				res.Error = "missing command"
+				return
+			}
+			res.ExitCode, res.Stdout, res.Stderr = runShell(p.Command, cmdTimeout)
+		case "restart_singbox":
+			if err := service.RestartSingbox(); err != nil {
+				res.Error = err.Error()
+			}
+			s.sbx.Nudge() // re-observe and report the new state (§9)
+		case "start_singbox":
+			if err := service.StartSingbox(); err != nil {
+				res.Error = err.Error()
+			}
+			s.sbx.Nudge()
+		case "stop_singbox":
+			if err := service.StopSingbox(); err != nil {
+				res.Error = err.Error()
+			}
+			s.sbx.Nudge()
+		case "tail_logs":
+			// §12.1: AI-triggered log read. Best-effort by design —
+			// missing log sources answer empty with exit 0.
+			var p struct {
+				Lines int `json:"lines"`
+			}
+			_ = json.Unmarshal(payload, &p) // bad/empty payload → default lines
+			res.Stdout = collect.TailSingboxLogs(service.Detect().String(), p.Lines)
+		default:
+			res.Error = "unsupported command kind: " + kind
+		}
+	}()
+	select {
+	case <-done:
+	case <-s.done:
+	}
+	return res
+}
+
+func runShell(command string, timeout time.Duration) (exitCode int, stdout, stderr string) {
+	shell := "/bin/sh"
+	if runtime.GOOS == "windows" {
+		shell = "cmd"
+	}
+	cmd := exec.Command(shell, "-c", command)
+	var outBuf, errBuf limitedBuffer
+	outBuf.limit = outputMaxKeep
+	errBuf.limit = outputMaxKeep
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Start(); err != nil {
+		return -1, "", err.Error()
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- cmd.Wait() }()
+	select {
+	case err := <-finished:
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				return ee.ExitCode(), outBuf.String(), errBuf.String()
+			}
+			return -1, outBuf.String(), errBuf.String() + err.Error()
+		}
+		return 0, outBuf.String(), errBuf.String()
+	case <-time.After(timeout):
+		_ = cmd.Process.Kill()
+		return -1, outBuf.String(), errBuf.String() + "command timed out"
+	}
+}
+
+// limitedBuffer caps memory when a command spews output.
+type limitedBuffer struct {
+	buf   []byte
+	limit int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if len(b.buf) < b.limit {
+		room := b.limit - len(b.buf)
+		if room > len(p) {
+			room = len(p)
+		}
+		b.buf = append(b.buf, p[:room]...)
+	}
+	return len(p), nil // swallow the rest, report full write to the pipe
+}
+
+func (b *limitedBuffer) String() string { return string(b.buf) }

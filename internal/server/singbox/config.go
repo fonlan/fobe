@@ -18,10 +18,33 @@ const (
 	// ServerName is the TLS SNI every node presents; clients pin the agent's
 	// self-signed certificate against it instead of using insecure=true.
 	ServerName = "www.bing.com"
-	// CertDir is where the agent keeps its self-signed keypair. The private
-	// key never leaves the probe (§9.3); only the PEM is reported back.
-	CertDir = "/etc/sing-box/cert"
+	// CertDir is where the agent keeps its self-signed keypair, and
+	// CertFile/KeyFile name the two files inside it. The private key never
+	// leaves the probe (§9.3); only the PEM is reported back.
+	//
+	// 实现修订 2026-09-15: the layout follows one-sing.sh (/etc/one-sing/cert),
+	// so a probe already managed by that script can be taken over as-is. These
+	// three values must stay in sync with internal/agent/service
+	// (SingboxWorkDir / SingboxCertFile / SingboxKeyFile) — the agent writes the
+	// files at the paths this config declares.
+	CertDir  = "/etc/one-sing/cert"
+	CertFile = "cert.crt"
+	KeyFile  = "private.key"
 )
+
+// AnytlsPaddingScheme is the inbound padding scheme, taken verbatim from
+// one-sing.sh (§9.3 实现修订: 「服务管理与 anytls 配置参考 one-sing.sh」). It is
+// the traffic-shaping half of anytls: shorter first records and a stop marker
+// after the sixth, instead of sing-box's own defaults.
+var AnytlsPaddingScheme = []string{
+	"stop=6",
+	"0=30-30",
+	"1=80-120",
+	"2=350-550,c",
+	"3=900-1400",
+	"4=250-600",
+	"5=250-600",
+}
 
 // MinPort / MaxPort bound the random high inbound port (§9.3: 10000-60000).
 const (
@@ -76,7 +99,10 @@ type anytlsInbound struct {
 	Listen     string       `json:"listen"`
 	ListenPort int          `json:"listen_port"`
 	Users      []anytlsUser `json:"users"`
-	TLS        inboundTLS   `json:"tls"`
+	// PaddingScheme is the anytls traffic-shaping scheme (one-sing.sh's list,
+	// §9.3 实现修订).
+	PaddingScheme []string   `json:"padding_scheme"`
+	TLS           inboundTLS `json:"tls"`
 }
 
 type directOutbound struct {
@@ -105,16 +131,17 @@ func BuildNodeConfig(port int, password string) ([]byte, error) {
 			{Tag: "local-dns", Address: "local", Detour: "direct"},
 		}},
 		Inbounds: []anytlsInbound{{
-			Type:       "anytls",
-			Tag:        "anytls-in",
-			Listen:     "::",
-			ListenPort: port,
-			Users:      []anytlsUser{{Name: "default", Password: password}},
+			Type:          "anytls",
+			Tag:           "anytls-in",
+			Listen:        "::",
+			ListenPort:    port,
+			Users:         []anytlsUser{{Name: "default", Password: password}},
+			PaddingScheme: AnytlsPaddingScheme,
 			TLS: inboundTLS{
 				Enabled:         true,
 				ServerName:      ServerName,
-				CertificatePath: CertDir + "/cert.pem",
-				KeyPath:         CertDir + "/key.pem",
+				CertificatePath: CertDir + "/" + CertFile,
+				KeyPath:         CertDir + "/" + KeyFile,
 			},
 		}},
 		Outbounds: []directOutbound{{Type: "direct", Tag: "direct"}},

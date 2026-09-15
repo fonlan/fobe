@@ -159,7 +159,7 @@ func runServer() {
 	// release when the cache is empty, record the verdict in settings for the
 	// panel, and warn when the artifact directory would not survive a container
 	// upgrade. It never blocks startup.
-	api.SingboxCache = startSingboxCache(bgCtx, st, log, dlDir)
+	api.SingboxCache = startSingboxCache(bgCtx, st, log, api.SingboxDL())
 
 	// §9.2 one-click batch update: build the manager now and re-arm the
 	// convergence check of a job that was still pending when the process last
@@ -203,14 +203,14 @@ func runServer() {
 // and the failure reason, and offer a manual retry; a container whose
 // FOBE_DL_DIR is not on a mount of its own is flagged in
 // singbox.dl_mount_ok (upgrading such a container loses downloaded versions).
-func startSingboxCache(ctx context.Context, st *store.Store, log *slog.Logger, dlDir string) *singboxcache.Manager {
+//
+// dl is the process-wide artifact client (httpapi.Server.SingboxDL): the
+// startup download must share it with the batch updater, because singboxdl
+// serializes Install per client — two clients would download the same tarball
+// twice (design §9.5.3).
+func startSingboxCache(ctx context.Context, st *store.Store, log *slog.Logger, dl *singboxdl.Client) *singboxcache.Manager {
 	mgr := singboxcache.New(singboxcache.Config{
-		DL: singboxdl.New(singboxdl.Config{
-			DLDir:        dlDir,
-			APIBase:      env("FOBE_SINGBOX_API_BASE", ""),
-			DownloadBase: env("FOBE_SINGBOX_DOWNLOAD_BASE", ""),
-			Log:          log,
-		}),
+		DL:           dl,
 		Settings:     st,
 		Log:          log,
 		AutoDownload: singboxAutoDownloadEnabled(),

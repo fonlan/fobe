@@ -36,7 +36,7 @@ func (s *Server) SingboxUpdater() *singboxupdate.Manager {
 		}
 		s.SingboxUpdate = singboxupdate.New(singboxupdate.Config{
 			Store:  s.Store,
-			DL:     s.singboxDL(),
+			DL:     s.SingboxDL(),
 			Online: online,
 			Log:    s.Log,
 			Push: func(nodeID string) bool {
@@ -75,8 +75,8 @@ type singboxCacheVersion struct {
 
 // handleSingboxCache answers GET /api/singbox/cache: the cached releases with
 // their size/download time/reference count, the newest one, the startup
-// download state, the container mount verdict and the last batch update. It is
-// entirely local.
+// download state, the container mount verdict, the live download progress and
+// the last batch update. It is entirely local.
 func (s *Server) handleSingboxCache(w http.ResponseWriter, r *http.Request) {
 	versions := s.singboxVersions()
 	out := make([]singboxCacheVersion, 0, len(versions))
@@ -96,6 +96,11 @@ func (s *Server) handleSingboxCache(w http.ResponseWriter, r *http.Request) {
 		"mount_ok":         mountOK,
 		"mount_applicable": mountApplicable,
 		"last_update":      s.SingboxUpdater().Current(),
+		// Live download progress. Deliberately not part of the persisted cache
+		// status: a byte counter would write to SQLite several times a second
+		// (§5 single writer). A page that loads mid-download gets its bar here
+		// and the outcome from cache_status.
+		"download": s.sbProg.snapshot(),
 	}
 	if st, ok := singboxcache.LoadStatus(s.Store); ok {
 		body["cache_status"] = st
@@ -144,7 +149,7 @@ func (s *Server) resolveSingboxTarget(ctx context.Context, requested string) (st
 	if requested == "" || strings.EqualFold(requested, "latest") {
 		cctx, cancel := context.WithTimeout(ctx, singboxReleaseTimeout)
 		defer cancel()
-		rel, err := s.singboxDL().LatestStable(cctx)
+		rel, err := s.SingboxDL().LatestStable(cctx)
 		if err != nil {
 			return "", nil, err
 		}

@@ -16,6 +16,7 @@ import (
 	"github.com/fobe-panel/fobe/internal/server/hub"
 	"github.com/fobe-panel/fobe/internal/server/security"
 	"github.com/fobe-panel/fobe/internal/server/singboxcache"
+	"github.com/fobe-panel/fobe/internal/server/singboxdl"
 	"github.com/fobe-panel/fobe/internal/server/singboxupdate"
 	"github.com/fobe-panel/fobe/internal/server/store"
 )
@@ -65,6 +66,20 @@ type Server struct {
 	evMu   sync.Mutex
 	evSubs map[chan []byte]struct{}
 	evOnce sync.Once
+
+	// sbDL is the process-wide artifact cache client (§9.5.3). One client per
+	// process is load-bearing, not an optimization: the startup auto-download
+	// and an "update sing-box" job must serialize on the same install mutex,
+	// otherwise both fetch the same tarball (see SingboxDL).
+	sbDLOnce sync.Once
+	sbDL     *singboxdl.Client
+	// sbProg is the in-flight download snapshot pushed over /ws/events and
+	// read by GET /api/singbox/cache.
+	sbProg singboxProgress
+	// sbRel memoizes the upstream release listing behind the version picker
+	// (GET /api/singbox/releases). Memory-only: a listing is a convenience,
+	// never a source of truth — the versions on disk are (§9.2).
+	sbRel singboxReleasesCache
 }
 
 func NewServer(st *store.Store, h *hub.Hub, trust *security.TrustChain, crypt *security.Cryptor, log *slog.Logger) *Server {
@@ -128,6 +143,10 @@ func (s *Server) Handler() http.Handler {
 
 	// sing-box lifecycle (§9): desired-state management + release manifest
 	mux.HandleFunc("GET /api/singbox/versions", s.requireSession(s.handleSingboxVersions))
+	// §9.5 upstream listing + explicit per-version download (the settings page
+	// picker). Both are operator-triggered: no page render calls upstream.
+	mux.HandleFunc("GET /api/singbox/releases", s.requireSession(s.handleSingboxReleases))
+	mux.HandleFunc("POST /api/singbox/versions/{version}/download", s.requireSession(s.handleSingboxVersionDownload))
 	// §9.2 server-side artifact cache + §9.2 one-click batch update
 	mux.HandleFunc("GET /api/singbox/cache", s.requireSession(s.handleSingboxCache))
 	mux.HandleFunc("POST /api/singbox/cache/retry", s.requireSession(s.handleSingboxCacheRetry))

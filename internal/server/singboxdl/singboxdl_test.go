@@ -9,11 +9,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -538,5 +542,246 @@ func TestVersionParsingAndOrdering(t *testing.T) {
 	}
 	if AssetName("1.10.0") != "sing-box-1.10.0-linux-amd64-musl.tar.gz" {
 		t.Fatalf("AssetName = %s", AssetName("1.10.0"))
+	}
+}
+
+// legacyMaxJSONBytes is the response cap that used to truncate the real
+// listing (8 MiB). Kept here so the regression guard below stays meaningful if
+// the cap is ever lowered again.
+const legacyMaxJSONBytes = 8 << 20
+
+// TestListReleasesHandlesPageLargerThanLegacyCap is the regression guard for
+// the reported "unexpected EOF": SagerNet/sing-box answers
+// /releases?per_page=100 with ~33 MB uncompressed (every release repeats
+// ~170 assets), so any cap under ~30 MB truncates the array mid-element.
+func TestListReleasesHandlesPageLargerThanLegacyCap(t *testing.T) {
+	const releases = 100
+	// A release body large enough to push the page past the old 8 MiB cap;
+	// GitHub really sends one (unmapped here, so the decoder skips it).
+	body := strings.Repeat("x", 120<<10)
+
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	// Newest first, the order the API returns (ListReleases preserves it).
+	for i := releases - 1; i >= 0; i-- {
+		if i != releases-1 {
+			buf.WriteByte(',')
+		}
+		fmt.Fprintf(&buf,
+			`{"tag_name":"v1.%d.0","draft":false,"prerelease":false,"body":%q,`+
+				`"assets":[{"name":%q,"browser_download_url":"https://example.test/x","digest":"sha256:%s","size":1}]}`,
+			i, body, AssetName(fmt.Sprintf("1.%d.0", i)), zeroSum)
+	}
+	buf.WriteByte(']')
+	if buf.Len() <= legacyMaxJSONBytes {
+		t.Fatalf("fixture is %d bytes, must exceed the old %d-byte cap", buf.Len(), legacyMaxJSONBytes)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer srv.Close()
+
+	c := New(Config{APIBase: srv.URL, DownloadBase: srv.URL, Owner: testOwner, Repo: testRepo, HTTPClient: srv.Client()})
+	got, err := c.ListReleases(context.Background())
+	if err != nil {
+		t.Fatalf("ListReleases on a %d-byte page: %v", buf.Len(), err)
+	}
+	if len(got) != releases {
+		t.Fatalf("ListReleases = %d releases, want %d", len(got), releases)
+	}
+	if got[0].Version != "1.99.0" || got[0].Prerelease {
+		t.Fatalf("first release = %+v, want newest 1.99.0 stable", got[0])
+	}
+}
+
+// TestDecodeJSONBodyOverflowIsNotReportedAsEOF pins the error text: hitting the
+// size cap must not masquerade as a truncated download (io.ErrUnexpectedEOF),
+// while a genuinely short stream must keep its real cause.
+func TestDecodeJSONBodyOverflowIsNotReportedAsEOF(t *testing.T) {
+	full := []byte(`[{"tag_name":"v1.10.0"}]`)
+
+	var out []githubRelease
+	err := decodeJSONBody(bytes.NewReader(full), 8, &out)
+	if err == nil || !strings.Contains(err.Error(), "response exceeds 8 bytes") {
+		t.Fatalf("overflow error = %v, want a size report", err)
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("overflow must not be reported as EOF: %v", err)
+	}
+
+	var truncated []githubRelease
+	err = decodeJSONBody(bytes.NewReader(full[:10]), 4096, &truncated)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated stream = %v, want io.ErrUnexpectedEOF", err)
+	}
+}
+
+// pagedAPI serves a multi-page releases listing the way GitHub does (Link
+// header with rel="next") and counts the pages actually fetched, so the tests
+// below can assert that single-target lookups stop early.
+type pagedAPI struct {
+	pages [][]fakeRelease
+	srv   *httptest.Server
+	mu    sync.Mutex
+	hits  int
+	// perPage records the per_page each request asked for, so the tests can
+	// pin the "latest" fast path to a small page.
+	perPage []string
+}
+
+func newPagedAPI(t *testing.T, pages ...[]fakeRelease) *pagedAPI {
+	t.Helper()
+	p := &pagedAPI{pages: pages}
+	p.srv = httptest.NewServer(http.HandlerFunc(p.serve))
+	t.Cleanup(p.srv.Close)
+	return p
+}
+
+func (p *pagedAPI) serve(w http.ResponseWriter, r *http.Request) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.hits++
+	p.perPage = append(p.perPage, r.URL.Query().Get("per_page"))
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	if page > len(p.pages) {
+		http.NotFound(w, r)
+		return
+	}
+	if page < len(p.pages) {
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repos/%s/%s/releases?per_page=100&page=%d>; rel="next", `+
+			`<%s/repos/%s/%s/releases?per_page=100&page=%d>; rel="last"`,
+			p.srv.URL, testOwner, testRepo, page+1, p.srv.URL, testOwner, testRepo, len(p.pages)))
+	}
+	out := []map[string]any{}
+	for _, rl := range p.pages[page-1] {
+		out = append(out, map[string]any{
+			"tag_name":   "v" + rl.Version,
+			"draft":      rl.Draft,
+			"prerelease": rl.Prerelease,
+			"assets": []map[string]any{{
+				"name": AssetName(rl.Version), "browser_download_url": p.srv.URL + "/dl/" + AssetName(rl.Version),
+				"digest": "sha256:" + zeroSum, "size": 1,
+			}},
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (p *pagedAPI) client() *Client {
+	return New(Config{
+		APIBase: p.srv.URL, DownloadBase: p.srv.URL,
+		Owner: testOwner, Repo: testRepo, HTTPClient: p.srv.Client(),
+	})
+}
+
+func (p *pagedAPI) requests() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.hits
+}
+
+func (p *pagedAPI) pageSizes() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.perPage...)
+}
+
+func TestListReleasesFollowsLinkPagination(t *testing.T) {
+	p := newPagedAPI(t,
+		[]fakeRelease{{Version: "1.12.0-beta.1", Prerelease: true}, {Version: "1.11.0"}},
+		[]fakeRelease{{Version: "1.10.0"}, {Version: "not-a-version"}, {Version: "1.9.0", Draft: true}},
+	)
+	got, err := p.client().ListReleases(context.Background())
+	if err != nil {
+		t.Fatalf("ListReleases: %v", err)
+	}
+	want := []string{"1.12.0-beta.1", "1.11.0", "1.10.0"}
+	if len(got) != len(want) {
+		t.Fatalf("ListReleases = %+v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i].Version != want[i] {
+			t.Fatalf("ListReleases[%d] = %s, want %s", i, got[i].Version, want[i])
+		}
+	}
+	if !got[0].Prerelease || got[1].Prerelease {
+		t.Fatalf("prerelease flags wrong: %+v", got)
+	}
+	if n := p.requests(); n != 2 {
+		t.Fatalf("fetched %d pages, want 2", n)
+	}
+	if got := p.pageSizes(); len(got) != 2 || got[0] != "100" {
+		t.Fatalf("per_page = %v, want 100", got)
+	}
+}
+
+func TestLatestStableStopsAtFirstStablePage(t *testing.T) {
+	p := newPagedAPI(t,
+		[]fakeRelease{{Version: "1.13.0-alpha.1", Prerelease: true}, {Version: "1.12.0"}},
+		[]fakeRelease{{Version: "1.11.0"}},
+	)
+	rel, err := p.client().LatestStable(context.Background())
+	if err != nil {
+		t.Fatalf("LatestStable: %v", err)
+	}
+	if rel.Version != "1.12.0" {
+		t.Fatalf("latest = %s, want 1.12.0", rel.Version)
+	}
+	if n := p.requests(); n != 1 {
+		t.Fatalf("fetched %d pages, want 1 (the rest of the history is older)", n)
+	}
+	// The fast path must keep asking for the small page: at 100 the single
+	// request alone is ~33 MB and eats most of the panel's resolve budget.
+	if got := p.pageSizes(); len(got) != 1 || got[0] != "30" {
+		t.Fatalf("per_page = %v, want 30", got)
+	}
+}
+
+func TestLatestStableWalksPastPrereleaseOnlyPages(t *testing.T) {
+	p := newPagedAPI(t,
+		[]fakeRelease{{Version: "1.13.0-beta.2", Prerelease: true}, {Version: "1.13.0-beta.1", Prerelease: true}},
+		[]fakeRelease{{Version: "1.12.0"}},
+	)
+	rel, err := p.client().LatestStable(context.Background())
+	if err != nil {
+		t.Fatalf("LatestStable: %v", err)
+	}
+	if rel.Version != "1.12.0" {
+		t.Fatalf("latest = %s, want 1.12.0", rel.Version)
+	}
+	if n := p.requests(); n != 2 {
+		t.Fatalf("fetched %d pages, want 2", n)
+	}
+}
+
+func TestReleaseByVersionStopsAtMatchingPage(t *testing.T) {
+	p := newPagedAPI(t,
+		[]fakeRelease{{Version: "1.11.0"}, {Version: "1.10.0"}},
+		[]fakeRelease{{Version: "1.9.0"}},
+	)
+	c := p.client()
+	rel, err := c.ReleaseByVersion(context.Background(), "v1.10.0")
+	if err != nil {
+		t.Fatalf("ReleaseByVersion: %v", err)
+	}
+	if rel.Version != "1.10.0" || rel.Tag != "v1.10.0" {
+		t.Fatalf("resolved %+v, want 1.10.0 / v1.10.0", rel)
+	}
+	if n := p.requests(); n != 1 {
+		t.Fatalf("fetched %d pages for a page-1 hit, want 1", n)
+	}
+
+	if _, err := c.ReleaseByVersion(context.Background(), "1.8.0"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing version = %v, want ErrNotFound", err)
+	}
+	if n := p.requests(); n != 3 {
+		t.Fatalf("fetched %d pages total, want 3 (miss walks the whole history)", n)
 	}
 }

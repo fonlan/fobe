@@ -351,6 +351,27 @@ export interface SingboxImpact {
   nodes: SingboxImpactNode[];
 }
 
+/**
+ * Live artifact install progress. Rides /ws/events as `singbox_download` and is
+ * also part of GET /api/singbox/cache, so a page loaded mid-download shows the
+ * same bar. It is never persisted: the byte counter would hammer SQLite.
+ */
+export interface SingboxDownload {
+  /** True while an install holds the downloader (including queued behind one). */
+  active: boolean;
+  version?: string;
+  phase?: 'waiting' | 'resolving' | 'downloading' | 'verifying' | 'extracting' | 'publishing' | 'done' | 'failed' | string;
+  downloaded: number;
+  /** 0/undefined when upstream sends no Content-Length. */
+  total?: number;
+  percent?: number;
+  /** Bytes per second over the last sample (download phase only). */
+  speed?: number;
+  started_at?: number;
+  updated_at?: number;
+  error?: string;
+}
+
 /** GET /api/singbox/cache — everything the settings section renders. */
 export interface SingboxCache {
   dl_dir: string;
@@ -361,6 +382,44 @@ export interface SingboxCache {
   mount_applicable: boolean;
   cache_status: SingboxCacheStatus | null;
   last_update: SingboxUpdateJob | null;
+  download?: SingboxDownload | null;
+}
+
+/**
+ * One upstream release in the "download a new version" picker.
+ * GET /api/singbox/releases — the only endpoint that talks upstream while an
+ * operator watches; it answers from a 10-minute server-side cache.
+ */
+export interface SingboxRelease {
+  version: string;
+  /** Raw upstream tag (v1.12.0) — tooltip material only. */
+  tag?: string;
+  /** Betas/rcs: downloadable, but never preselected. */
+  prerelease: boolean;
+  /** Upstream publication time, unix seconds (0 = upstream did not say). */
+  published_at?: number;
+  /** Already on the server's disk. */
+  cached: boolean;
+  /** The newest non-prerelease entry of the listing. */
+  latest_stable: boolean;
+}
+
+/** GET /api/singbox/releases. */
+export interface SingboxReleases {
+  releases: SingboxRelease[];
+  fetched_at: number;
+  /** True when the refresh failed and this is the last good listing. */
+  stale: boolean;
+  error?: string | null;
+}
+
+/** POST /api/singbox/versions/{version}/download. */
+export interface SingboxDownloadAccepted {
+  ok: boolean;
+  version: string;
+  /** True when the version was already on disk (the call was a no-op). */
+  cached: boolean;
+  download?: SingboxDownload | null;
 }
 
 export interface WsEvent {

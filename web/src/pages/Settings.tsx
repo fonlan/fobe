@@ -3,9 +3,11 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import Modal from '../components/Modal';
+import ProgressBar from '../components/ProgressBar';
+import { DownloadIcon, PublishIcon, RefreshIcon, RetryIcon, TrashIcon } from '../components/Icons';
 import { useI18n } from '../i18n';
 import { useTheme, type ThemeMode } from '../theme';
-import { fmtBytes, fmtTime } from '../format';
+import { fmtBytes, fmtRate, fmtTime } from '../format';
 import type {
   BlacklistRow,
   SessionRow,
@@ -14,12 +16,21 @@ import type {
   ImportStats,
   SingboxCache,
   SingboxCacheVersion,
+  SingboxDownload,
   SingboxImpact,
+  SingboxReleases,
   SingboxUpdateJob,
 } from '../types';
 
 /** Job states that mean the batch is over (mirrors internal/server/singboxupdate). */
 const SINGBOX_JOB_TERMINAL = new Set(['done', 'failed']);
+
+/**
+ * How long a failed download keeps its row in the version list (seconds). Long
+ * enough to read the reason, short enough that a stale failure from yesterday
+ * does not sit next to a healthy list.
+ */
+const DL_FAILURE_VISIBLE = 30 * 60;
 
 const SERVER_KEYS = ['server.public_url'] as const;
 const AI_KEYS = ['ai.base_url', 'ai.model', 'ai.api_key', 'ai.default_policy'] as const;
@@ -301,23 +312,29 @@ function FileButton({
 
 // --- sing-box artifact cache + one-click batch update (design §9.2) ---
 
-/** Select value that asks the server to resolve the current stable release. */
-const SINGBOX_LATEST = 'latest';
-
 /**
- * Settings section for the server-side artifact cache: cached versions, the
- * startup auto-download state (with a manual retry), the container mount
- * warning, and the one-click batch update — impact list, second confirmation,
- * then per-node progress pushed over /ws/events.
+ * Settings section for the server-side artifact cache: one row per local
+ * sing-box version, each with the two row actions — publish it to every
+ * sing-box node, or delete it from the server's disk.
+ *
+ * A download started from here (or by the startup auto-download) becomes a row
+ * of its own, with its progress bar in place: the list is the single place that
+ * answers "what sing-box versions do I have, and what am I fetching".
+ *
+ * Publishing still goes through the impact list and a second confirmation
+ * (§9.5.2): one click here changes every enabled node.
  */
 function SingboxCacheCard() {
   const { t } = useI18n();
   const [cache, setCache] = useState<SingboxCache | null>(null);
   const [job, setJob] = useState<SingboxUpdateJob | null>(null);
+  const [download, setDownload] = useState<SingboxDownload | null>(null);
+  const [releases, setReleases] = useState<SingboxReleases | null>(null);
+  const [pick, setPick] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [target, setTarget] = useState<string>(SINGBOX_LATEST);
+  const [relBusy, setRelBusy] = useState(false);
   const [impact, setImpact] = useState<SingboxImpact | null>(null);
   const [impactBusy, setImpactBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -327,6 +344,7 @@ function SingboxCacheCard() {
       const c = await api.singboxCache();
       setCache(c);
       setJob(c.last_update ?? null);
+      setDownload(c.download ?? null);
       setErr(null);
     } catch (e) {
       setErr(apiErrorMessage(e, t));
@@ -337,12 +355,35 @@ function SingboxCacheCard() {
     void load();
   }, [load]);
 
+  /**
+   * The upstream listing is fetched on demand only (an operator pressing the
+   * refresh button or opening the picker), never on page render: it is a
+   * multi-megabyte API answer. Failures are non-fatal — the version list from
+   * disk is what the section is actually about.
+   */
+  const loadReleases = useCallback(
+    async (refresh = false) => {
+      setRelBusy(true);
+      try {
+        setReleases(await api.singboxReleases(refresh));
+      } catch (e) {
+        setErr(apiErrorMessage(e, t));
+      } finally {
+        setRelBusy(false);
+      }
+    },
+    [t],
+  );
+
   // Live progress: the server pushes a full job snapshot for every node it
-  // handles (SSE singbox_update) and pings singbox_cache when the disk changes.
+  // handles (SSE singbox_update), one snapshot per download tick
+  // (singbox_download) and pings singbox_cache when the disk changes.
   useEffect(() => {
     const close = api.openEvents((ev) => {
       if (ev.kind === 'singbox_update' && ev.data) {
         setJob(ev.data as SingboxUpdateJob);
+      } else if (ev.kind === 'singbox_download' && ev.data) {
+        setDownload(ev.data as SingboxDownload);
       } else if (ev.kind === 'singbox_cache') {
         void load();
       }
@@ -368,18 +409,31 @@ function SingboxCacheCard() {
     return () => window.clearInterval(h);
   }, [jobId, jobState]);
 
-  // A finished job may have downloaded a new version and moved node references.
+  // Same fallback for the download row: a dropped singbox_download event would
+  // otherwise leave it stuck at its last tick. Faster than the job poll — the
+  // bar moves in sub-second steps.
+  const downloadActive = download?.active === true;
   useEffect(() => {
-    if (jobState === 'done') void load();
-  }, [jobState, load]);
+    if (!downloadActive) return;
+    const h = window.setInterval(() => {
+      api
+        .singboxCache()
+        .then((c) => {
+          setCache(c);
+          setDownload(c.download ?? null);
+        })
+        .catch(() => {
+          /* transient: the next tick retries */
+        });
+    }, 1500);
+    return () => window.clearInterval(h);
+  }, [downloadActive]);
 
-  // A deleted version must not linger as the selected target (a stale <select>
-  // value would render blank).
+  // A finished download/job may have added a version on disk: re-read both the
+  // cache and the picker's "already cached" flags.
   useEffect(() => {
-    if (target !== SINGBOX_LATEST && cache && !cache.versions.some((v) => v.version === target)) {
-      setTarget(SINGBOX_LATEST);
-    }
-  }, [cache, target]);
+    if (jobState === 'done' || (download && download.phase === 'done')) void load();
+  }, [jobState, download, load]);
 
   const label = (prefix: string, value: string) => {
     const key = prefix + value;
@@ -394,6 +448,28 @@ function SingboxCacheCard() {
     try {
       await api.singboxRetryCache();
       setMsg(t('sb_cache_retry_queued'));
+      await load();
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startDownload = async (version: string) => {
+    if (!version) return;
+    setBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      const r = await api.downloadSingboxVersion(version);
+      if (r.cached) {
+        setMsg(t('sb_cache_download_cached', { version: r.version }));
+      } else {
+        setMsg(t('sb_cache_download_started', { version: r.version }));
+        if (r.download) setDownload(r.download);
+      }
+      setPick('');
       await load();
     } catch (e) {
       setErr(apiErrorMessage(e, t));
@@ -422,13 +498,14 @@ function SingboxCacheCard() {
     }
   };
 
-  const checkImpact = async () => {
-    if (impactBusy) return;
+  /** Row action: confirm the blast radius, then distribute one version. */
+  const checkImpact = async (version: string) => {
+    if (impactBusy || downloadActive) return;
     setImpactBusy(true);
     setErr(null);
     setMsg(null);
     try {
-      setImpact(await api.singboxUpdateImpact(target));
+      setImpact(await api.singboxUpdateImpact(version));
     } catch (e) {
       setErr(apiErrorMessage(e, t));
     } finally {
@@ -437,13 +514,11 @@ function SingboxCacheCard() {
   };
 
   const confirmUpdate = async () => {
-    if (!impact || submitting) return;
+    if (!impact || submitting || downloadActive) return;
     setSubmitting(true);
     setErr(null);
     try {
-      const r = await api.singboxUpdate(
-        target === SINGBOX_LATEST ? { latest: true, confirm: true } : { version: target, confirm: true },
-      );
+      const r = await api.singboxUpdate({ version: impact.target_version, confirm: true });
       setJob(r.job);
       setImpact(null);
       setMsg(t('sb_update_submitted'));
@@ -463,6 +538,45 @@ function SingboxCacheCard() {
   const handled = job
     ? job.counts.already_current + job.counts.pushed + job.counts.offline_pending + job.counts.failed
     : 0;
+  const jobRunning = !!jobState && !SINGBOX_JOB_TERMINAL.has(jobState);
+  const dlPercent = download?.total ? download.percent ?? 0 : 0;
+  // Bytes/speed only: the phase is the bar's label, so repeating it in the
+  // text would waste the width the row needs.
+  const dlText = download
+    ? [
+        // Bytes only once there are some: the resolving/waiting phases would
+        // otherwise read "0 B".
+        download.downloaded > 0
+          ? download.total
+            ? `${fmtBytes(download.downloaded)} / ${fmtBytes(download.total)}`
+            : t('sb_download_bytes_so_far', { done: fmtBytes(download.downloaded) })
+          : '',
+        download.speed ? fmtRate(download.speed) : '',
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : '';
+
+  /**
+   * The in-flight download is a row too — but only while its version is not in
+   * the disk list yet (once it is published, the real row takes over). A failed
+   * install keeps its row so the reason stays visible next to the version that
+   * failed, instead of vanishing with the progress bar.
+   *
+   * The failure row expires: the server keeps the last snapshot until the next
+   * download replaces it, and a day-old "failed" line next to a healthy version
+   * list is just noise (the on-disk truth never changed).
+   */
+  const dlVersion = download?.version ?? '';
+  const dlFailedFresh =
+    download?.phase === 'failed' &&
+    (download.updated_at ?? 0) > 0 &&
+    Date.now() / 1000 - (download.updated_at ?? 0) < DL_FAILURE_VISIBLE;
+  const dlIsRow =
+    !!dlVersion && !versions.some((v) => v.version === dlVersion) && (downloadActive || dlFailedFresh);
+  // Every upstream release is listed; the ones already on disk are disabled
+  // rather than hidden, so "do I already have this?" is answerable in place.
+  const relList = releases?.releases ?? [];
 
   return (
     <section className="card">
@@ -504,64 +618,151 @@ function SingboxCacheCard() {
       {status && status.state !== 'ok' && status.state !== 'pending' && (
         <div className="row-wrap" style={{ marginTop: 10 }}>
           {status.error && <span className="form-error">{status.error}</span>}
-          <button type="button" className="btn small" disabled={busy} onClick={() => void retry()}>
+          <button type="button" className="btn small" disabled={busy || downloadActive} onClick={() => void retry()}>
             {busy ? '…' : t('sb_cache_retry')}
           </button>
         </div>
       )}
 
-      {versions.length === 0 ? (
-        <div className="hint" style={{ marginTop: 12 }}>
-          {t('sb_cache_empty')}
-        </div>
-      ) : (
-        <table className="table" style={{ marginTop: 12 }}>
-          <thead>
-            <tr>
-              <th>{t('sb_cache_col_version')}</th>
-              <th>{t('sb_cache_col_size')}</th>
-              <th>{t('sb_cache_col_downloaded')}</th>
-              <th>{t('sb_cache_col_refs')}</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {versions.map((v) => (
-              <tr key={v.version}>
-                <td className="mono">
-                  {v.version}
-                  {v.is_latest && <span className="chip primary-chip">{t('sb_cache_latest')}</span>}
-                </td>
-                <td className="mono nowrap">{fmtBytes(v.size)}</td>
-                <td className="mono nowrap">{fmtTime(v.downloaded_at)}</td>
-                <td className="mono">{v.refs}</td>
-                <td className="nowrap">
-                  <button type="button" className="btn small danger" disabled={busy} onClick={() => void delVersion(v)}>
-                    {t('sb_cache_delete')}
+      <table className="table" style={{ marginTop: 12 }}>
+        <thead>
+          <tr>
+            <th>{t('sb_cache_col_version')}</th>
+            <th>{t('sb_cache_col_size')}</th>
+            <th>{t('sb_cache_col_downloaded')}</th>
+            <th>{t('sb_cache_col_refs')}</th>
+            <th className="col-actions" />
+          </tr>
+        </thead>
+        <tbody>
+          {dlIsRow && download && (
+            <tr key={'dl-' + dlVersion} className="row-downloading">
+              <td className="mono nowrap">
+                {dlVersion}
+                <span className={'chip' + (download.phase === 'failed' ? ' status-failed' : ' primary-chip')}>
+                  {download.phase === 'failed' ? t('sb_cache_download_failed') : t('sb_cache_downloading')}
+                </span>
+              </td>
+              <td colSpan={3}>
+                {download.phase === 'failed' ? (
+                  <span className="form-error mono">{download.error || t('err_internal')}</span>
+                ) : (
+                  <ProgressBar
+                    tone="plain"
+                    label={label('sb_download_phase_', download.phase ?? '')}
+                    pct={dlPercent}
+                    text={dlText}
+                  />
+                )}
+              </td>
+              <td className="nowrap col-actions">
+                {download.phase === 'failed' && (
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title={t('sb_cache_download_retry')}
+                    aria-label={t('sb_cache_download_retry')}
+                    disabled={busy || downloadActive}
+                    onClick={() => void startDownload(dlVersion)}
+                  >
+                    <RetryIcon />
                   </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+                )}
+              </td>
+            </tr>
+          )}
+          {versions.map((v) => (
+            <tr key={v.version}>
+              <td className="mono nowrap">
+                {v.version}
+                {v.is_latest && <span className="chip primary-chip">{t('sb_cache_latest')}</span>}
+              </td>
+              <td className="mono nowrap">{fmtBytes(v.size)}</td>
+              <td className="mono nowrap">{fmtTime(v.downloaded_at)}</td>
+              <td className="mono">{v.refs}</td>
+              <td className="nowrap col-actions">
+                <button
+                  type="button"
+                  className="icon-btn"
+                  title={t('sb_cache_publish_title', { version: v.version })}
+                  aria-label={t('sb_cache_publish_title', { version: v.version })}
+                  disabled={busy || impactBusy || downloadActive || jobRunning}
+                  onClick={() => void checkImpact(v.version)}
+                >
+                  <PublishIcon />
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn danger"
+                  title={t('sb_cache_delete_title', { version: v.version })}
+                  aria-label={t('sb_cache_delete_title', { version: v.version })}
+                  disabled={busy}
+                  onClick={() => void delVersion(v)}
+                >
+                  <TrashIcon />
+                </button>
+              </td>
+            </tr>
+          ))}
+          {versions.length === 0 && !dlIsRow && (
+            <tr>
+              <td colSpan={5} className="hint">
+                {t('sb_cache_empty')}
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
 
       <div className="row-wrap" style={{ marginTop: 12 }}>
         <label className="field inline">
-          <span>{t('sb_update_target')}</span>
-          <select value={target} onChange={(e) => setTarget(e.target.value)}>
-            <option value={SINGBOX_LATEST}>{t('sb_update_latest_opt')}</option>
-            {versions.map((v) => (
-              <option key={v.version} value={v.version}>
-                {v.version}
+          <span>{t('sb_cache_download_new')}</span>
+          <select
+            value={pick}
+            onFocus={() => {
+              if (!releases) void loadReleases(false);
+            }}
+            onChange={(e) => setPick(e.target.value)}
+          >
+            <option value="">{releases ? t('sb_cache_pick_placeholder') : t('sb_cache_pick_loading')}</option>
+            {relList.map((r) => (
+              <option key={r.version} value={r.version} disabled={r.cached}>
+                {r.version}
+                {r.latest_stable ? ' · ' + t('sb_cache_latest') : ''}
+                {r.prerelease ? ' · ' + t('sb_cache_prerelease') : ''}
+                {r.cached ? ' · ' + t('sb_cache_pick_cached') : ''}
               </option>
             ))}
           </select>
         </label>
-        <button type="button" className="btn primary" disabled={impactBusy} onClick={() => void checkImpact()}>
-          {impactBusy ? t('sb_update_checking') : t('sb_update')}
+        <button
+          type="button"
+          className="btn primary"
+          disabled={!pick || busy || downloadActive}
+          onClick={() => void startDownload(pick)}
+        >
+          <DownloadIcon />
+          {t('sb_cache_download_btn')}
         </button>
+        <button
+          type="button"
+          className="btn ghost small"
+          disabled={relBusy}
+          onClick={() => void loadReleases(true)}
+          title={t('sb_cache_releases_refresh')}
+        >
+          <RefreshIcon />
+          {relBusy ? '…' : t('sb_cache_releases_refresh')}
+        </button>
+        {releases && (
+          <span className="hint">
+            {releases.stale
+              ? t('sb_cache_releases_stale')
+              : t('sb_cache_releases_fetched', { time: fmtTime(releases.fetched_at) })}
+          </span>
+        )}
       </div>
+      {downloadActive && <div className="hint">{t('sb_download_hint')}</div>}
 
       {job && <SingboxJobView job={job} handled={handled} label={label} />}
 
@@ -574,6 +775,7 @@ function SingboxCacheCard() {
           {impact.count === 0 && <p className="form-error">{t('err_no_targets')}</p>}
           {impact.already_current > 0 && <p className="hint">{t('sb_update_impact_current', { n: impact.already_current })}</p>}
           {impact.download_needed && <p className="hint">{t('sb_update_download_needed')}</p>}
+          {downloadActive && <p className="form-error">{t('sb_update_blocked_download')}</p>}
           {impact.count > 0 && <p className="hint">{t('sb_update_confirm_hint')}</p>}
           {impact.nodes.length > 0 && (
             <div style={{ maxHeight: 240, overflow: 'auto' }}>
@@ -614,7 +816,7 @@ function SingboxCacheCard() {
             <button
               type="button"
               className="btn primary"
-              disabled={submitting || impact.count === 0}
+              disabled={submitting || downloadActive || impact.count === 0}
               onClick={() => void confirmUpdate()}
             >
               {submitting ? '…' : t('sb_update_confirm')}

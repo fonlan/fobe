@@ -47,6 +47,7 @@ type cacheBody struct {
 	} `json:"versions"`
 	CacheStatus json.RawMessage `json:"cache_status"`
 	LastUpdate  *jobBody        `json:"last_update"`
+	Download    SingboxDownload `json:"download"`
 }
 
 type jobBody struct {
@@ -132,65 +133,87 @@ func TestSingboxCacheEndpoint(t *testing.T) {
 	}
 }
 
+// TestSingboxUpdateImpactEndpoint covers the three upstream shapes behind the
+// confirmation dialog. Each scenario gets its own server: the artifact client
+// is built once per server process and bound to SingboxAPIBase at that moment
+// (§9.5.3), so a test that swaps the base mid-flight would silently talk to
+// the previous host.
 func TestSingboxUpdateImpactEndpoint(t *testing.T) {
-	srv, api := newTestServer(t)
-	api.DLDir = t.TempDir()
-	writeCachedVersion(t, api.DLDir, "1.10.0", []byte("bin"), 1700000000)
-	seedSingboxNode(t, api, "n1", "old", "1.9.0", "1.9.0", 1000)
-	seedSingboxNode(t, api, "n2", "current", "1.10.0", "1.10.0", 1001)
-	// no desired state → not part of any distribution
-	if err := api.Store.CreateNode(&store.Node{ID: "n3", Name: "unmanaged", MachineID: "m-n3"}, "hash"); err != nil {
-		t.Fatal(err)
+	seed := func(t *testing.T) (*httptest.Server, *Server, string) {
+		t.Helper()
+		srv, api := newTestServer(t)
+		api.DLDir = t.TempDir()
+		writeCachedVersion(t, api.DLDir, "1.10.0", []byte("bin"), 1700000000)
+		seedSingboxNode(t, api, "n1", "old", "1.9.0", "1.9.0", 1000)
+		seedSingboxNode(t, api, "n2", "current", "1.10.0", "1.10.0", 1001)
+		// no desired state → not part of any distribution
+		if err := api.Store.CreateNode(&store.Node{ID: "n3", Name: "unmanaged", MachineID: "m-n3"}, "hash"); err != nil {
+			t.Fatal(err)
+		}
+		return srv, api, loginSession(t, srv)
+	}
+	impact := func(t *testing.T, srv *httptest.Server, cookie, query string) (int, []byte) {
+		t.Helper()
+		resp, raw := doAuthed(t, http.MethodGet, srv.URL+"/api/singbox/update/impact?version="+query, cookie, nil)
+		return resp.StatusCode, raw
 	}
 
-	cookie := loginSession(t, srv)
-	resp, raw := doAuthed(t, http.MethodGet, srv.URL+"/api/singbox/update/impact?version=1.10.0", cookie, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d: %s", resp.StatusCode, raw)
-	}
-	var imp struct {
-		TargetVersion  string `json:"target_version"`
-		Requested      string `json:"requested"`
-		Cached         bool   `json:"cached"`
-		DownloadNeeded bool   `json:"download_needed"`
-		Count          int    `json:"count"`
-		Offline        int    `json:"offline"`
-		AlreadyCurrent int    `json:"already_current"`
-		Nodes          []struct {
-			NodeID string `json:"node_id"`
-		} `json:"nodes"`
-	}
-	if err := json.Unmarshal(raw, &imp); err != nil {
-		t.Fatalf("decode impact: %v", err)
-	}
-	if imp.TargetVersion != "1.10.0" || imp.Count != 2 || imp.AlreadyCurrent != 1 || imp.Offline != 2 {
-		t.Fatalf("impact = %+v", imp)
-	}
-	if !imp.Cached || imp.DownloadNeeded {
-		t.Fatalf("cache flags = %+v", imp)
-	}
+	t.Run("explicit version stays local", func(t *testing.T) {
+		srv, _, cookie := seed(t)
+		status, raw := impact(t, srv, cookie, "1.10.0")
+		if status != http.StatusOK {
+			t.Fatalf("status = %d: %s", status, raw)
+		}
+		var imp struct {
+			TargetVersion  string `json:"target_version"`
+			Cached         bool   `json:"cached"`
+			DownloadNeeded bool   `json:"download_needed"`
+			Count          int    `json:"count"`
+			Offline        int    `json:"offline"`
+			AlreadyCurrent int    `json:"already_current"`
+		}
+		if err := json.Unmarshal(raw, &imp); err != nil {
+			t.Fatalf("decode impact: %v", err)
+		}
+		if imp.TargetVersion != "1.10.0" || imp.Count != 2 || imp.AlreadyCurrent != 1 || imp.Offline != 2 {
+			t.Fatalf("impact = %+v", imp)
+		}
+		if !imp.Cached || imp.DownloadNeeded {
+			t.Fatalf("cache flags = %+v", imp)
+		}
+	})
 
 	// "latest" is the one case that talks upstream; v-prefixed tags normalize
-	apiBase := fakeReleaseServer(t, "v1.12.0")
-	api.SingboxAPIBase = apiBase
-	api.SingboxDownloadBase = apiBase
-	resp, raw = doAuthed(t, http.MethodGet, srv.URL+"/api/singbox/update/impact?version=latest", cookie, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("latest impact status = %d: %s", resp.StatusCode, raw)
-	}
-	if err := json.Unmarshal(raw, &imp); err != nil {
-		t.Fatalf("decode latest impact: %v", err)
-	}
-	if imp.TargetVersion != "1.12.0" || imp.Requested != "latest" || !imp.DownloadNeeded {
-		t.Fatalf("latest impact = %+v", imp)
-	}
+	t.Run("latest resolves upstream", func(t *testing.T) {
+		srv, api, cookie := seed(t)
+		apiBase := fakeReleaseServer(t, "v1.12.0")
+		api.SingboxAPIBase = apiBase
+		api.SingboxDownloadBase = apiBase
+		status, raw := impact(t, srv, cookie, "latest")
+		if status != http.StatusOK {
+			t.Fatalf("latest impact status = %d: %s", status, raw)
+		}
+		var imp struct {
+			TargetVersion  string `json:"target_version"`
+			Requested      string `json:"requested"`
+			DownloadNeeded bool   `json:"download_needed"`
+		}
+		if err := json.Unmarshal(raw, &imp); err != nil {
+			t.Fatalf("decode latest impact: %v", err)
+		}
+		if imp.TargetVersion != "1.12.0" || imp.Requested != "latest" || !imp.DownloadNeeded {
+			t.Fatalf("latest impact = %+v", imp)
+		}
+	})
 
-	// an unreachable release host is a 502, not a broken page
-	api.SingboxAPIBase = "http://127.0.0.1:1"
-	resp, raw = doAuthed(t, http.MethodGet, srv.URL+"/api/singbox/update/impact?version=latest", cookie, nil)
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("unreachable host status = %d: %s", resp.StatusCode, raw)
-	}
+	t.Run("unreachable host is a 502", func(t *testing.T) {
+		srv, api, cookie := seed(t)
+		api.SingboxAPIBase = "http://127.0.0.1:1"
+		api.SingboxDownloadBase = "http://127.0.0.1:1"
+		if status, raw := impact(t, srv, cookie, "latest"); status != http.StatusBadGateway {
+			t.Fatalf("unreachable host status = %d: %s", status, raw)
+		}
+	})
 }
 
 // fakeReleaseServer serves just enough of the GitHub releases API to resolve

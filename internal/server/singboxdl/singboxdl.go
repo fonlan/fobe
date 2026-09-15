@@ -91,6 +91,10 @@ type Config struct {
 	Refs func(version string) int
 	// MaxDownloadBytes caps a single asset download (default 256 MiB).
 	MaxDownloadBytes int64
+	// Progress observes an install in flight (phases + downloaded bytes). It
+	// is called from the download loop, so it must be cheap and non-blocking;
+	// nil disables reporting entirely.
+	Progress func(Progress)
 }
 
 // Client talks to the release source and owns the on-disk cache. It is safe

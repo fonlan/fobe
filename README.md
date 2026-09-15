@@ -213,8 +213,8 @@ data/
 ```
 
 - `data/dl/`（容器内的 `/srv/dl`）**必须挂载**：它存放 agent 产物与自动下载的 sing-box 版本。跑在容器里且没有独立挂载点时，服务端会打一条 WARN 并在设置页标红（`singbox.dl_mount_ok=false`）——升级/重建容器会把这些版本全部丢掉。
-- **sing-box 版本从哪来**：默认由服务端自己在启动时下载（仅当 `data/dl/singbox/` 里一个有效版本都没有；已有缓存则完全不联网）。也可以不联网：按上面的布局手动放一份 `singbox/<version>/{linux-amd64,linux-amd64.sha256,manifest.json}` 进去即可。
-- **批量更新**：面板「设置 → sing-box → 更新 sing-box」，会先列出受影响节点并要求二次确认，然后异步把新版本写进各节点的期望版本；15 分钟后仍未生效的节点会汇总发一条告警。旧版本不会自动删，按钮旁边显示占用与引用节点数。
+- **sing-box 版本从哪来**：默认由服务端自己在启动时下载（仅当 `data/dl/singbox/` 里一个有效版本都没有；已有缓存则完全不联网）。也可以不联网：按上面的布局手动放一份 `singbox/<version>/{linux-amd64,linux-amd64.sha256,manifest.json}` 进去即可。想主动补一个版本，用设置页的「下载新版本」下拉（列的是上游 release，已缓存的那几条是灰的），或点「刷新版本列表」重新拉一次；下载中出现的那一行会就地显示阶段、字节与速度，失败的那一行保留原因并给重试图标。
+- **发布与删除**：设置页 sing-box 区块一行一个本地版本，行尾两个图标按钮——「发布」把这一行的版本下发到所有已启用 sing-box 的节点（会先列出受影响节点并要求二次确认；15 分钟后仍未生效的节点汇总发一条告警），「删除」把该版本从服务端磁盘删掉（仍被某节点 `desired_version` 引用时需要确认）。旧版本不会自动删，列表里能看到每个版本的占用、下载时间与被多少节点引用。**同一个产物只会下载一次**：下载进行中「发布」置灰，另一个版本的下载请求会返回 `download_in_progress`。
 - 恢复：停服 → 用快照替换 `data/sqlite/fobe.db` → 起服。
 - 探针节点无需重建：agent 用落盘的 machine-id 重连即复用原节点。
 - 换了 `FOBE_MASTER_KEY` = 已加密的 AI key / SSH 凭据 / Bot Token 全部失效，需要重填（节点与指标数据不受影响）。
@@ -294,3 +294,4 @@ export default defineConfig({
 | **升级容器后 sing-box 没了**（设置页版本列表空、节点更新失败） | `/srv/dl` 没挂成独立卷，重建容器把已下载版本留在了旧容器层。核对 `docker compose config` 里的 `./data/dl:/srv/dl`，以及设置页/日志里的 `singbox.dl_mount_ok=false` 警告；恢复做法是重新下载（设置页「重试」）或手动把产物放回 `data/dl/singbox/<version>/` |
 | **拉不到 GitHub / 自动下载失败**（设置页显示失败原因） | 服务端出网受限。三选一：① 配镜像源 `FOBE_SINGBOX_API_BASE` + `FOBE_SINGBOX_DOWNLOAD_BASE`（GitHub 兼容即可）后点「重试」；② 手动把 `linux-amd64` 与 `linux-amd64.sha256` 放进 `data/dl/singbox/<version>/`；③ 用 `FOBE_SINGBOX_AUTO_DOWNLOAD=0` 关掉自动下载，完全手动管理。注意**校验失败会拒绝安装**（fail-closed），不会留半成品 |
 | 一键更新后个别节点没生效 | 离线节点要等重连后由 `hello_ack` 自动收敛（结果表里是"离线待生效"）；15 分钟后仍未收敛会发一条 `singbox_update_stale` 告警，逐台查 `journalctl -u fobe-agent` / agent 侧的 sing-box 日志 |
+| **探针上 sing-box 装在哪 / 升级后路径变了** | agent 侧统一用 `/etc/one-sing/`：`sing-box`（二进制）、`config.json`、`cert/{cert.crt,private.key}`（与 one-sing.sh 同一套路径，便于互相接管）。从旧版本升级的探针会在 agent 启动时自动搬迁旧路径（`/usr/local/bin/sing-box`、`/etc/sing-box/…`）并删掉空目录，日志里是 `sing-box layout migrated`。机器上原本有 one-sing.sh 的 `one-sing.service` 时，agent 首次收敛前会**停掉并 disable** 它（两个 supervisor 抢同一个进程只会互相重启）。注意 `config.json` 由面板独占：继续用 one-sing.sh 加协议会互相覆盖，要共存请改路径 |

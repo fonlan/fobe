@@ -22,7 +22,9 @@ import type {
   SettingView,
   SingboxCache,
   SingboxCacheStatus,
+  SingboxDownloadAccepted,
   SingboxImpact,
+  SingboxReleases,
   SingboxStatus,
   SingboxUpdateJob,
   SingboxVersion,
@@ -550,6 +552,23 @@ export function singboxUpdateStatus(jobId: string): Promise<{ job: SingboxUpdate
 export function deleteSingboxVersion(version: string, force = false): Promise<{ ok: boolean; version: string }> {
   const q = force ? '?force=1' : '';
   return request(`/api/singbox/versions/${encodeURIComponent(version)}${q}`, { method: 'DELETE' });
+}
+
+/**
+ * Upstream releases for the "download a new version" picker. refresh bypasses
+ * the server's 10-minute listing cache (the panel's refresh button).
+ */
+export function singboxReleases(refresh = false): Promise<SingboxReleases> {
+  return request(`/api/singbox/releases${refresh ? '?refresh=1' : ''}`);
+}
+
+/**
+ * Fetch one explicitly named version into the server's cache. Returns as soon
+ * as the job is accepted; the row it creates is fed by the
+ * `singbox_download` event and GET /api/singbox/cache.
+ */
+export function downloadSingboxVersion(version: string): Promise<SingboxDownloadAccepted> {
+  return request(`/api/singbox/versions/${encodeURIComponent(version)}/download`, { method: 'POST' });
 }
 
 // --- per-node SSH credentials (design §11; secrets are write-only) -----------

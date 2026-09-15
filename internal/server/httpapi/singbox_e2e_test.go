@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -57,6 +58,16 @@ type e2eRelease struct {
 	bodies   map[string][]byte
 	digests  map[string]string
 	assets   atomic.Int64
+	// lists counts release-listing fetches, so a test can prove the picker
+	// answered from its TTL cache instead of refetching the upstream listing.
+	lists atomic.Int64
+	// failListings makes the releases endpoint answer 500 (the "stale picker"
+	// path). It is read per request, so a test can flip it after a good fetch.
+	failListings atomic.Bool
+	// hold, when non-nil, makes the asset handler write half the body, flush
+	// and wait for the channel before finishing: a download that is provably
+	// still in flight. Nil keeps the plain "serve it all at once" behaviour.
+	hold chan struct{}
 }
 
 func newE2ERelease(t *testing.T, mode string, versions ...string) *e2eRelease {
@@ -97,6 +108,11 @@ func e2eTarGz(t *testing.T, member string, body []byte) []byte {
 
 func (f *e2eRelease) serve(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/repos/"+e2eOwner+"/"+e2eRepo+"/releases" {
+		f.lists.Add(1)
+		if f.failListings.Load() {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		type assetJSON struct {
 			Name               string `json:"name"`
 			BrowserDownloadURL string `json:"browser_download_url"`
@@ -132,6 +148,15 @@ func (f *e2eRelease) serve(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/dl/")
 		if body, ok := f.bodies[name]; ok {
 			f.assets.Add(1)
+			if f.hold != nil {
+				w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+				half := len(body) / 2
+				_, _ = w.Write(body[:half])
+				w.(http.Flusher).Flush()
+				<-f.hold
+				_, _ = w.Write(body[half:])
+				return
+			}
 			_, _ = w.Write(body)
 			return
 		}

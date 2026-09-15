@@ -17,9 +17,17 @@ web/*.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts
 
-# Local build products and ZCode workspace metadata
-agent
-agent.exe
-.zcode/
-.mem/
-.agents/
+# Local build products and workspace metadata.
+#
+# Every binary pattern is anchored to the repository root on purpose: an
+# unanchored `agent` also matches the directory `internal/agent`, which silently
+# kept the whole probe agent out of version control. Build products live at the
+# root (or under /dist, /data), never inside a package directory.
+/agent
+/agent.exe
+/.zcode/
+/.mem/
+/.agents/
+
+# @fonlan/dsh-task-kanban
+.dsh/

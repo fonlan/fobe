@@ -182,7 +182,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 ### 5.4 OpenWrt 专项
 
-- 二进制放 `/usr/bin`（overlay 持久），配置 `/etc/sing-box/config.json`，证书 `/etc/sing-box/cert/`。
+- 二进制与配置统一放 `/etc/one-sing/`（`sing-box` + `config.json` + `cert/`），与 one-sing.sh 同一套路径（实现修订 2026-09-15，见 §9.3）；`/etc` 在 OpenWrt 上同样是 overlay 持久。
 - **写放大控制**：指标与日志不落盘（内存环形缓冲），仅上报；错误日志按行数上限写 `/tmp`（tmpfs）。
 - 内存：agent 目标常驻 < 30MB；采集周期在低内存设备上可从 60s 放宽（面板可配）。
 - 首次运行检测 overlay 剩余空间，低于阈值时拒绝安装 sing-box 并给出提示（避免把路由器写满）。
@@ -327,7 +327,14 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 ### 9.3 anytls 与自签证书
 
-- **私钥永不离开探针**：首次启用时由 agent 用 Go 标准库 `crypto/x509` 现场生成自签证书（不依赖 openssl——OpenWrt 常常没有），存 `/etc/sing-box/cert/{cert.pem,key.pem}`（0600）。
+> **实现修订 2026-09-15（探针侧布局与服务管理对齐 one-sing.sh）**：入站配置与服务管理参考 `one-sing.sh`（同类需求的成熟实现），落地三件事，**协议与订阅语义不变**：
+> - **目录/证书布局**：探针上统一为 `/etc/one-sing/{sing-box,config.json,cert/{cert.crt,private.key}}`（原 `/usr/local/bin/sing-box`、`/etc/sing-box/{config.json,cert/{cert.pem,key.pem}}`）。同名同路径意味着**已经用 one-sing.sh 管起来的机器可以直接被接管**，不必重下二进制或重签证书。证书文件名由服务端写进 `config.json`，两侧必须一致，`internal/server/singbox` 有一条跨包测试盯着（`TestCertPathsMatchAgentLayout`）。
+> - **anytls `padding_scheme`**：采用 one-sing.sh 的方案（`stop=6` / `0=30-30` / `1=80-120` / `2=350-550,c` / `3=900-1400` / `4=250-600` / `5=250-600`），不再用 sing-box 默认值。它进 `config.json`，因此**改这一项等于改 `config_hash`，会在下一次收敛时把全部节点重新下发一遍**——有意的、一次性的代价。
+> - **systemd 单元对齐**：`fobe-singbox.service` 补上 `CapabilityBoundingSet` / `AmbientCapabilities`、`ExecReload=/bin/kill -HUP $MAINPID`、`LimitNOFILE=infinity`、`RestartSec=10s`（保留 `User=root`、`NoNewPrivileges=true`）。**单元名仍是 fobe 自己的**：写 `one-sing.service` 会与 one-sing.sh 抢同一个进程，卸载 fobe 时还会删掉别人的单元；作为补偿，agent 首次收敛前会把已存在的 `one-sing.service` **停掉并 disable**（`AdoptForeignSingboxService`，只认 systemd）——两个 supervisor 抢一个进程只会反复重启，而面板的启停会作用在一个它并不拥有的进程上。
+> - **迁移是幂等的**：agent 启动时 `MigrateSingboxLayout` 只在「目标不存在且源存在」时搬文件（二进制连同 `.prev`/`.download`、配置连同 `.prev`、证书改名 `cert.pem→cert.crt`、`key.pem→private.key`），搬完删空的旧目录；搬不动只记 WARN，收敛循环照样能把缺的东西重新下载回来。
+> - **`config.json` 是 fobe 独占的**：同一台机器上又跑 one-sing.sh 又由 fobe 托管，两边会互相覆盖同一份 `config.json`（one-sing.sh 加的协议会消失）。要共存就改路径，别只改服务名。
+
+- **私钥永不离开探针**：首次启用时由 agent 用 Go 标准库 `crypto/x509` 现场生成自签证书（不依赖 openssl——OpenWrt 常常没有），存 `/etc/one-sing/cert/{cert.crt,private.key}`（0600）。密钥算法保持 ECDSA P-256（而非 one-sing.sh 的 RSA-4096）：探针是小机器、密钥在设备上现场生成，而客户端是按 SHA256 指纹 pinning 的，算法对客户端不可见。
 - agent 上报**证书 PEM + SHA256 指纹 + 有效期**给面板（不含私钥）。
 - 订阅渲染时把证书 PEM 写进客户端的 `tls.certificate` 字段做 **pinning**，而不是让客户端 `insecure: true`。这样自签也不会被中间人。
 - 入站口令 = `settings.anytls_password`（全局共享，见 §11.3 的取舍）。
@@ -342,11 +349,12 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
   "listen": "::",
   "listen_port": 23456,
   "users": [{ "name": "default", "password": "<全局密码>" }],
+  "padding_scheme": ["stop=6", "0=30-30", "1=80-120", "2=350-550,c", "3=900-1400", "4=250-600", "5=250-600"],
   "tls": {
     "enabled": true,
     "server_name": "www.bing.com",
-    "certificate_path": "/etc/sing-box/cert/cert.pem",
-    "key_path": "/etc/sing-box/cert/key.pem"
+    "certificate_path": "/etc/one-sing/cert/cert.crt",
+    "key_path": "/etc/one-sing/cert/private.key"
   }
 }
 ```
@@ -354,6 +362,13 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 ### 9.5 服务端产物缓存与批量更新（实现修订 2026-09-15）
 
 > 背景：§9.2 假定"面板能列出可选版本"，但**从来没有任何一条链路负责把产物取回来**——`/dl` 只是直出 `<FOBE_DL_DIR>` 里已有的文件，`GET /api/singbox/versions` 只读 `<FOBE_DL_DIR>/singbox/<version>/manifest.json`。缓存空的部署里，面板永远只有一个空版本列表。本节补齐"取货"与"分发"两段，且**不新增安装路径**：agent 侧的下载 → 校验 → 备份 → 三道闸门 → 回滚完全不变，批量更新只是把 `desired_version` 批量改掉。
+
+> **实现修订 2026-09-15（版本列表 = 一版本一行 + 显式下载）**：设置页的 sing-box 区块就是缓存列表本身，**一行一个本地版本**，行尾两个图标按钮——**发布**（把这一行的版本下发到所有已启用 sing-box 的节点，仍走 §9.5.2 的影响面 + 二次确认）与**删除**（从服务端磁盘删除，仍被 `desired_version` 引用时要 force）。下载中的版本也是同一张表里的一行：`download` 快照带 `version`，面板把「不在磁盘上且正在下载/刚失败」的版本合成一行，就地显示阶段、字节与速度；失败的那一行保留原因并给一个重试图标——服务端在 release 查找失败时会补一个 `failed` 相位（`failSingboxDownload`），否则这一行会永远停在「获取校验信息」。
+>
+> 两条新接口，都是操作员显式触发，**页面渲染永不联网**：
+>
+> - `GET /api/singbox/releases`：上游 release 列表（新 → 旧，只取**一页 30 条**，不翻页——一页解压后约 10 MB），10 分钟内存缓存，`?refresh=1` 绕过；每条带 `cached`（磁盘上已有）与 `latest_stable`（该页最大的非 prerelease）。上游不可达时返回上一次的好列表并置 `stale:true`（一次都没成功过才 502）。
+> - `POST /api/singbox/versions/{version}/download`：按**显式版本**下载，不接受 `latest`（§9.2「版本必须显式指定」不破）。已缓存 → 200 `cached:true`；另一个版本正在下载 → 409 `download_in_progress`（面板只有一根进度条，不做队列）；受理 → 202，进度沿用同一个 `singbox_download` 快照。写 `audit_logs`（`singbox_version_download`）。受理后立刻合成 `resolving` 相位，否则「查找 release」这段时间（最多走满几页）面板上没有任何东西可显示。
 
 #### 9.5.1 缓存布局与下载源
 
@@ -365,8 +380,9 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 ```
 
 - **下载源**：GitHub Release（默认 `SagerNet/sing-box`）。`FOBE_SINGBOX_API_BASE`（默认 `https://api.github.com`）覆盖 release 列表来源，`FOBE_SINGBOX_DOWNLOAD_BASE`（默认 `https://github.com`）用于拼路径；两者都指向 GitHub 兼容镜像即可在拉不到 GitHub 的环境里工作。
-- **选版本**：只认**稳定版**——跳过 draft，跳过 prerelease；语义化版本比较（`1.10.0 > 1.9.9`，不是字典序）。
-- **产物变体固定为 `linux-amd64-musl`**：官方标准构建是 tar.gz 且带 `libcronet.so`，而 agent 的安装路径是**单文件二进制**（下载 → sha256 → 直接写 `/usr/local/bin/sing-box`），两者不兼容。musl 变体是同一个 tar.gz 里唯一的静态单文件产物，装到常规发行版也能跑（无 glibc 依赖），代价是失去 cronet 相关能力（fobe 只用 anytls 入站，不受影响）。
+- **选版本**：只认**稳定版**——跳过 draft，跳过 prerelease；语义化版本比较（`1.10.0 > 1.9.9`，不是字典序）。**列表按页取，且尽早停**（实现修订 2026-09-15，见下）。
+- **列表页很大，别按"小接口"对待**（实现修订 2026-09-15）：releases 列表把每个 release 的 ~170 个 asset 全量返回，`per_page=100` 一页解压后约 33 MB（gzip 约 2 MB；上游单个 release 约 300 KB）。因此：① 解码上限为 64 MiB，且触顶时报 `response exceeds N bytes`——此前 8 MiB 的 `io.LimitReader` 会把 body 截断，json 报出误导性的 `unexpected EOF`（真实原因是尺寸，不是网络）；② 「当前最新稳定版」只请求 `per_page=30`，并在**第一个含稳定版的页就停**（页按创建时间倒序，能超过该页最大稳定版的版本只可能创建得更晚、即更靠前），单版本查找命中即停。原实现固定走满 5 页 × 33 MB（实测 ~18 s），已贴着面板 `latest` 解析的 20 s 上限。
+- **产物变体固定为 `linux-amd64-musl`**：官方标准构建是 tar.gz 且带 `libcronet.so`，而 agent 的安装路径是**单文件二进制**（下载 → sha256 → 直接写 `/etc/one-sing/sing-box`），两者不兼容。musl 变体是同一个 tar.gz 里唯一的静态单文件产物，装到常规发行版也能跑（无 glibc 依赖），代价是失去 cronet 相关能力（fobe 只用 anytls 入站，不受影响）。
 
 #### 9.5.2 校验：fail-closed
 
@@ -386,11 +402,12 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
   - `singbox.cache_status` = `{state: ok|disabled|failed|pending, version, updated_at, error, auto_download}`
   - `singbox.dl_mount_ok` = `"true"`/`"false"`，**仅容器内**写入：检测到 `/.dockerenv` 或 cgroup 标记时，检查 `FOBE_DL_DIR` 是否为 `/proc/self/mountinfo` 中的独立挂载点；不是则以 WARN 提示"升级容器会丢失已下载版本"并在设置页标红。非容器环境跳过（避免 dev 噪声）。
 - **旧版本不自动删**：缓存里的历史版本一直保留；设置页显示每个版本的占用、下载时间与被多少节点引用，手动删除（`DELETE /api/singbox/versions/{version}`），仍被 `desired_version` 引用时需要显式 force。
+- **下载进度可见 + 同一产物只下一次**（实现修订 2026-09-15）：安装过程经 `singboxdl.Config.Progress` 上报阶段（`waiting` / `resolving` / `downloading` / `verifying` / `extracting` / `publishing` / `done` / `failed`；下载阶段带已下载字节与总大小，末次必报精确值），服务端折成一个 `download` 快照：既随 `GET /api/singbox/cache` 返回（中途打开页面也有进度条），也走 `/ws/events` 的 `singbox_download` 事件（已打开的页面实时刷新；字节级事件按 250ms 节流，相位变化、首字节与终态立即推送）。快照**只存内存**——字节计数器若落库就是每秒多次写 SQLite，撞 §5 的单写者。同时**全进程只有一个 `singboxdl.Client`**（`httpapi.Server.SingboxDL()`，`cmd/server` 把它交给启动缓存管理器）：`Install` 按该 client 的互斥量串行，启动自动下载 / 手动重试 / 批量更新撞同一个版本时后来者只报 `waiting` 并排队，拿到锁后发现版本已发布即返回 `ErrVersionExists`（调用方按成功处理），**同一个 tarball 不会被下载第二次**。此前每个请求各自 `singboxdl.New` 一个 client，"启动自动下载"与"更新 sing-box"各持一把锁，同一版本会被并行抓两遍。面板在下载进行中将「更新 sing-box」置灰并提示原因。
 
 #### 9.5.4 一键批量更新
 
 ```
-设置页「更新 sing-box」
+设置页版本行尾的「发布」图标（实现修订后没有全局选择器：发布的永远是这一行的版本）
   → GET  /api/singbox/update/impact        列出受影响节点（已启用 sing-box、desired_version 非空）
   → 二次确认（强制，不可跳过；弹窗列出节点名单与目标版本）
   → POST /api/singbox/update {version|latest, confirm:true}   → 返回 job id

@@ -30,6 +30,18 @@ func newTestStore(t *testing.T) *store.Store {
 
 func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// testDLClient builds the artifact client the way runServer does — the server
+// owns the one process-wide instance (§9.5.3), so these tests keep exercising
+// the same upstream overrides the environment provides.
+func testDLClient(dlDir string) *singboxdl.Client {
+	return singboxdl.New(singboxdl.Config{
+		DLDir:        dlDir,
+		APIBase:      os.Getenv("FOBE_SINGBOX_API_BASE"),
+		DownloadBase: os.Getenv("FOBE_SINGBOX_DOWNLOAD_BASE"),
+		Log:          testLogger(),
+	})
+}
+
 // writeCachedVersion lays out a valid cached release (<DLDir>/singbox/<ver>/).
 func writeCachedVersion(t *testing.T, dlDir, version string) {
 	t.Helper()
@@ -97,7 +109,7 @@ func TestStartSingboxCacheDisabledWritesStatus(t *testing.T) {
 	st := newTestStore(t)
 	dlDir := t.TempDir()
 
-	mgr := startSingboxCache(context.Background(), st, testLogger(), dlDir)
+	mgr := startSingboxCache(context.Background(), st, testLogger(), testDLClient(dlDir))
 
 	s := loadCacheStatus(t, st)
 	if s.State != singboxcache.StateDisabled {
@@ -124,7 +136,7 @@ func TestStartSingboxCacheWithoutDLDirWritesDisabledStatus(t *testing.T) {
 	t.Setenv("FOBE_SINGBOX_AUTO_DOWNLOAD", "1")
 	st := newTestStore(t)
 
-	startSingboxCache(context.Background(), st, testLogger(), "")
+	startSingboxCache(context.Background(), st, testLogger(), testDLClient(""))
 
 	s := loadCacheStatus(t, st)
 	if s.State != singboxcache.StateDisabled || !strings.Contains(s.Error, "FOBE_DL_DIR") {
@@ -147,7 +159,7 @@ func TestStartSingboxCacheWarmCacheNeverCallsTheAPI(t *testing.T) {
 	dlDir := t.TempDir()
 	writeCachedVersion(t, dlDir, "1.9.0")
 
-	startSingboxCache(context.Background(), st, testLogger(), dlDir)
+	startSingboxCache(context.Background(), st, testLogger(), testDLClient(dlDir))
 
 	s := loadCacheStatus(t, st)
 	if s.State != singboxcache.StateOK || s.Version != "1.9.0" {
@@ -159,6 +171,36 @@ func TestStartSingboxCacheWarmCacheNeverCallsTheAPI(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if n := hits.Load(); n != 0 {
 		t.Fatalf("a warm cache must stay offline, got %d API requests", n)
+	}
+}
+
+// TestStartSingboxCacheUsesTheInjectedClient pins the §9.5.3 wiring: runServer
+// hands the cache manager api.SingboxDL(), the process-wide client. A manager
+// that built its own client would hold a second install mutex, and the startup
+// download plus an "update sing-box" job would fetch the same tarball twice.
+func TestStartSingboxCacheUsesTheInjectedClient(t *testing.T) {
+	t.Setenv("FOBE_SINGBOX_AUTO_DOWNLOAD", "1")
+	st := newTestStore(t)
+	dlDir := t.TempDir()
+	writeCachedVersion(t, dlDir, "1.9.0")
+
+	// Refs is only reachable through the injected client (the warm-cache probe
+	// scans the cache with it), so it doubles as a "was this client used?" flag.
+	used := false
+	dl := singboxdl.New(singboxdl.Config{
+		DLDir: dlDir,
+		Refs:  func(string) int { used = true; return 0 },
+	})
+	mgr := startSingboxCache(context.Background(), st, testLogger(), dl)
+
+	if !used {
+		t.Fatal("startSingboxCache did not use the client it was given")
+	}
+	if s := loadCacheStatus(t, st); s.State != singboxcache.StateOK || s.Version != "1.9.0" {
+		t.Fatalf("status = %+v, want the cached 1.9.0", s)
+	}
+	if mgr.Status().State != singboxcache.StateOK {
+		t.Fatalf("manager status = %+v", mgr.Status())
 	}
 }
 
@@ -174,7 +216,7 @@ func TestStartSingboxCacheFailureIsRecordedAndNonFatal(t *testing.T) {
 	st := newTestStore(t)
 	dlDir := t.TempDir()
 
-	mgr := startSingboxCache(context.Background(), st, testLogger(), dlDir)
+	mgr := startSingboxCache(context.Background(), st, testLogger(), testDLClient(dlDir))
 
 	s := waitForCacheState(t, st, singboxcache.StateFailed)
 	if s.Error == "" {

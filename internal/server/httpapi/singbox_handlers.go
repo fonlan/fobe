@@ -31,24 +31,45 @@ type SingboxVersion struct {
 	Refs int `json:"refs"`
 }
 
-// singboxDL builds the release-cache client used by panel reads. The upstream
-// bases are overridable (s.SingboxAPIBase / s.SingboxDownloadBase) so a mirror
-// or an air-gapped test server can be pointed at; Refs annotates each version
-// with the nodes that still point at it.
-func (s *Server) singboxDL() *singboxdl.Client {
-	refs := map[string]int{}
-	if s.Store != nil {
-		if m, err := s.Store.SingboxDesiredVersionRefs(); err == nil {
-			refs = m
-		}
-	}
-	return singboxdl.New(singboxdl.Config{
-		DLDir:        s.DLDir,
-		APIBase:      s.SingboxAPIBase,
-		DownloadBase: s.SingboxDownloadBase,
-		Log:          s.Log,
-		Refs:         func(v string) int { return refs[v] },
+// SingboxDL returns the process-wide release-cache client (built on first use).
+// The upstream bases are overridable (s.SingboxAPIBase / s.SingboxDownloadBase)
+// so a mirror or an air-gapped test server can be pointed at; Refs annotates
+// each version with the nodes that still point at it.
+//
+// There is exactly one client per server process, and that is what keeps a
+// download single-flight: singboxdl serializes Install on a per-client mutex,
+// so the startup auto-download, a manual retry and an "update sing-box" job
+// that needs the same version all wait on each other instead of fetching the
+// same tarball again (design §9.5.3). Building a client per request would
+// silently restore the duplicate download this exists to prevent.
+func (s *Server) SingboxDL() *singboxdl.Client {
+	s.sbDLOnce.Do(func() {
+		s.sbDL = singboxdl.New(singboxdl.Config{
+			DLDir:        s.DLDir,
+			APIBase:      s.SingboxAPIBase,
+			DownloadBase: s.SingboxDownloadBase,
+			Log:          s.Log,
+			// Refs is resolved per call rather than captured once: the client
+			// outlives every node edit, so a snapshot would show stale
+			// reference counts (ScanCache asks once per cached version).
+			Refs:     func(v string) int { return s.singboxRefs()[v] },
+			Progress: s.onSingboxProgress,
+		})
 	})
+	return s.sbDL
+}
+
+// singboxRefs counts nodes per desired_version. A store failure degrades to an
+// empty map (the badge shows 0) instead of failing the read.
+func (s *Server) singboxRefs() map[string]int {
+	if s.Store == nil {
+		return nil
+	}
+	m, err := s.Store.SingboxDesiredVersionRefs()
+	if err != nil {
+		return nil
+	}
+	return m
 }
 
 // singboxVersions lists <DLDir>/singbox/<version>/ entries, newest first by
@@ -59,7 +80,7 @@ func (s *Server) singboxVersions() []SingboxVersion {
 	if s.DLDir == "" {
 		return out
 	}
-	cached, err := s.singboxDL().ScanCache()
+	cached, err := s.SingboxDL().ScanCache()
 	if err != nil {
 		return out
 	}

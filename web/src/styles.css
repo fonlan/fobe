@@ -245,6 +245,19 @@ section.card { margin-bottom: 0; }
   border-radius: 6px;
 }
 .icon-btn:hover { background: var(--panel-2); color: var(--text); }
+.icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.icon-btn:disabled:hover { background: transparent; color: var(--text-dim); }
+.icon-btn.danger:hover:not(:disabled) { background: var(--red); color: #fff; }
+
+/* Row actions: keep the two per-row icons together and right-aligned, so a
+   version row reads "version … [publish][delete]" at a glance. */
+.col-actions { text-align: right; white-space: nowrap; }
+.col-actions .icon-btn + .icon-btn { margin-left: 2px; }
+
+/* The in-flight download row: visually distinct from "this version is on
+   disk", with the progress bar owning the middle of the table. */
+.row-downloading > td { background: var(--panel-2); }
+.row-downloading .pbar { min-width: 180px; }
 
 .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
 .field > span { font-size: 13px; color: var(--text-dim); font-weight: 500; }
@@ -442,9 +455,11 @@ section.card { margin-bottom: 0; }
   margin-bottom: 8px;
 }
 
-.tile { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.tile { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; min-width: 0; }
 .tile-label { font-size: 12px; color: var(--text-dim); }
-.tile-value { font-size: 16px; font-weight: 600; margin-top: 2px; }
+/* overflow-wrap: anywhere — a long unbroken value (e.g. the sing-box cache dir) has no
+   break opportunity, so without it the text paints outside the tile box. */
+.tile-value { font-size: 16px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
 .tile-sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .quota-row { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }

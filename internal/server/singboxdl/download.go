@@ -44,6 +44,12 @@ type Manifest struct {
 //
 // An already-cached version returns ErrVersionExists unless force is set; a
 // forced install replaces the directory.
+//
+// Installs made through one Client are serialized: a caller that arrives while
+// another download runs waits (reporting PhaseWaiting) and then finds the
+// version already published, so the same tarball is never fetched twice
+// (design §9.5.3). Sharing one Client per process is therefore load-bearing,
+// not an optimization.
 func (c *Client) Install(ctx context.Context, rel Release, force bool) (*CachedVersion, error) {
 	if c.cfg.DLDir == "" {
 		return nil, ErrNoDLDir
@@ -52,13 +58,33 @@ func (c *Client) Install(ctx context.Context, rel Release, force bool) (*CachedV
 	if err != nil {
 		return nil, err
 	}
+	started := time.Now().Unix()
+	emit := func(p Progress) {
+		p.Version = version
+		p.StartedAt = started
+		c.emit(p)
+	}
+	// A failure past this point is reported once, so the panel never shows a
+	// bar stuck at "downloading" for a download that is already over.
+	failed := func(err error) error {
+		emit(Progress{Phase: PhaseFailed, Error: err.Error()})
+		return err
+	}
 
-	c.installMu.Lock()
+	// TryLock only tells us whether we are queued; the panel then shows
+	// "waiting" instead of a stalled bar. The lock itself is what guarantees a
+	// single download (§9.5.3).
+	if !c.installMu.TryLock() {
+		emit(Progress{Phase: PhaseWaiting})
+		c.installMu.Lock()
+	}
 	defer c.installMu.Unlock()
 
 	target := c.VersionDir(version)
 	if _, err := os.Stat(target); err == nil {
 		if !force {
+			// Not a failure: whoever held the lock (or an earlier run) already
+			// published this version.
 			return nil, fmt.Errorf("%w: %s", ErrVersionExists, version)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -68,17 +94,17 @@ func (c *Client) Install(ctx context.Context, rel Release, force bool) (*CachedV
 	assetName := AssetName(version)
 	asset, ok := rel.Asset(assetName)
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrAssetNotFound, assetName)
+		return nil, failed(fmt.Errorf("%w: %s", ErrAssetNotFound, assetName))
 	}
 	assetURL := c.assetURL(rel, asset)
 
 	base := c.SingboxDir()
 	if err := os.MkdirAll(base, 0o755); err != nil {
-		return nil, fmt.Errorf("singboxdl: mkdir %s: %w", base, err)
+		return nil, failed(fmt.Errorf("singboxdl: mkdir %s: %w", base, err))
 	}
 	tmp, err := os.MkdirTemp(base, tempPrefix+version+"-")
 	if err != nil {
-		return nil, fmt.Errorf("singboxdl: mkdir temp: %w", err)
+		return nil, failed(fmt.Errorf("singboxdl: mkdir temp: %w", err))
 	}
 	committed := false
 	defer func() {
@@ -91,40 +117,46 @@ func (c *Client) Install(ctx context.Context, rel Release, force bool) (*CachedV
 
 	// 1. resolve the expected digest first: an artifact with no checksum
 	// anywhere is refused before we waste a download on it (fail-closed)
+	emit(Progress{Phase: PhaseResolving})
 	want, err := c.resolveDigest(ctx, asset, assetURL)
 	if err != nil {
-		return nil, err
+		return nil, failed(err)
 	}
 
 	// 2. download into the temp dir, hashing as we go
 	archive := filepath.Join(tmp, assetName)
-	sum, size, err := c.download(ctx, assetURL, archive)
+	emit(Progress{Phase: PhaseDownloading})
+	sum, size, err := c.download(ctx, assetURL, archive, func(downloaded, total int64) {
+		emit(Progress{Phase: PhaseDownloading, Downloaded: downloaded, Total: total})
+	})
 	if err != nil {
-		return nil, err
+		return nil, failed(err)
 	}
+	emit(Progress{Phase: PhaseVerifying})
 	if !strings.EqualFold(sum, want) {
-		return nil, fmt.Errorf("%w: %s: got %s want %s", ErrChecksumMismatch, assetName, sum, want)
+		return nil, failed(fmt.Errorf("%w: %s: got %s want %s", ErrChecksumMismatch, assetName, sum, want))
 	}
 
 	// 3. unpack the single static binary
+	emit(Progress{Phase: PhaseExtracting})
 	binTmp := filepath.Join(tmp, BinaryName)
 	if err := extractBinary(archive, binTmp); err != nil {
-		return nil, fmt.Errorf("singboxdl: extract %s: %w", assetName, err)
+		return nil, failed(fmt.Errorf("singboxdl: extract %s: %w", assetName, err))
 	}
 	if err := os.Chmod(binTmp, 0o755); err != nil {
-		return nil, fmt.Errorf("singboxdl: chmod binary: %w", err)
+		return nil, failed(fmt.Errorf("singboxdl: chmod binary: %w", err))
 	}
 	// The upstream digest covers the archive; the agent verifies the binary
 	// it downloads from /dl, so the published sidecar hashes the binary.
 	binSum, binSize, err := hashFile(binTmp)
 	if err != nil {
-		return nil, fmt.Errorf("singboxdl: hash binary: %w", err)
+		return nil, failed(fmt.Errorf("singboxdl: hash binary: %w", err))
 	}
 
 	// 4. the two sidecars the agent/panel read
 	sidecar := binSum + "  " + BinaryName
 	if err := os.WriteFile(filepath.Join(tmp, ChecksumName), []byte(sidecar), 0o644); err != nil {
-		return nil, fmt.Errorf("singboxdl: write checksum: %w", err)
+		return nil, failed(fmt.Errorf("singboxdl: write checksum: %w", err))
 	}
 	now := time.Now()
 	manifest := Manifest{
@@ -139,24 +171,26 @@ func (c *Client) Install(ctx context.Context, rel Release, force bool) (*CachedV
 	}
 	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("singboxdl: encode manifest: %w", err)
+		return nil, failed(fmt.Errorf("singboxdl: encode manifest: %w", err))
 	}
 	if err := os.WriteFile(filepath.Join(tmp, ManifestName), append(raw, byte(10)), 0o644); err != nil {
-		return nil, fmt.Errorf("singboxdl: write manifest: %w", err)
+		return nil, failed(fmt.Errorf("singboxdl: write manifest: %w", err))
 	}
 	// the archive is an intermediate: /dl must only expose the binary
 	_ = os.Remove(archive)
 
 	// 5. publish atomically
+	emit(Progress{Phase: PhasePublishing})
 	if force {
 		if err := os.RemoveAll(target); err != nil {
-			return nil, fmt.Errorf("singboxdl: replace %s: %w", target, err)
+			return nil, failed(fmt.Errorf("singboxdl: replace %s: %w", target, err))
 		}
 	}
 	if err := os.Rename(tmp, target); err != nil {
-		return nil, fmt.Errorf("singboxdl: publish %s: %w", target, err)
+		return nil, failed(fmt.Errorf("singboxdl: publish %s: %w", target, err))
 	}
 	committed = true
+	emit(Progress{Phase: PhaseDone})
 
 	out := CachedVersion{
 		Version:      version,
@@ -177,7 +211,13 @@ func (c *Client) Install(ctx context.Context, rel Release, force bool) (*CachedV
 
 // download streams a URL to dst, returning its sha256 and byte count. The
 // size cap is enforced against the actual body.
-func (c *Client) download(ctx context.Context, u, dst string) (string, int64, error) {
+//
+// report (optional) receives byte-level progress; the final call always fires
+// with the exact size, so a finished download never reports a stale count.
+func (c *Client) download(ctx context.Context, u, dst string, report func(downloaded, total int64)) (string, int64, error) {
+	if report == nil {
+		report = func(int64, int64) {}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return "", 0, fmt.Errorf("singboxdl: request %s: %w", u, err)
@@ -198,14 +238,22 @@ func (c *Client) download(ctx context.Context, u, dst string) (string, int64, er
 	}
 	defer f.Close()
 
+	// ContentLength is -1 when upstream does not say; 0 means "unknown size"
+	// to the panel, which then shows bytes instead of a percentage.
+	total := resp.ContentLength
+	if total < 0 {
+		total = 0
+	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, c.cfg.MaxDownloadBytes+1))
+	body := &progressReader{r: resp.Body, total: total, report: report}
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(body, c.cfg.MaxDownloadBytes+1))
 	if err != nil {
 		return "", 0, fmt.Errorf("singboxdl: download %s: %w", u, err)
 	}
 	if n > c.cfg.MaxDownloadBytes {
 		return "", 0, fmt.Errorf("singboxdl: %s exceeds %d bytes", u, c.cfg.MaxDownloadBytes)
 	}
+	report(n, total)
 	if err := f.Sync(); err != nil {
 		return "", 0, fmt.Errorf("singboxdl: sync %s: %w", dst, err)
 	}
