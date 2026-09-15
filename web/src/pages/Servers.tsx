@@ -2,11 +2,20 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
-import { useI18n } from '../i18n';
+import { useI18n, type TFn } from '../i18n';
 import type { NodeView } from '../types';
 import Modal from '../components/Modal';
 import Flag from '../components/Flag';
 import { PencilIcon, TrashIcon } from '../components/Icons';
+import { fmtDueDuration } from '../format';
+
+function dueText(node: NodeView, t: TFn): string {
+  if (!node.billing_configured || node.next_due_at == null) return '';
+  const due = fmtDueDuration(node.next_due_at);
+  if (!due) return '';
+  if (due.overdue) return t('due_overdue_for', { time: due.duration });
+  return t('due_in', { time: due.duration });
+}
 
 /**
  * Settings → 服务器: the wall of added servers as a table. Monitoring stays on
@@ -76,7 +85,8 @@ export default function Servers() {
             <tr>
               <th>{t('name')}</th>
               <th>{t('col_status')}</th>
-              <th>{t('ip_col')}</th>
+              <th>{t('primary_ip_col')}</th>
+              <th>{t('expiry_col')}</th>
               <th>{t('col_version')}</th>
               <th>{t('actions')}</th>
             </tr>
@@ -92,8 +102,10 @@ export default function Servers() {
                 </td>
                 <td>
                   <span className={'dot ' + (n.online ? 'on' : 'off')} title={t(n.online ? 'online' : 'offline')} />
+                  <span className="status-label">{t(n.online ? 'online' : 'offline')}</span>
                 </td>
-                <td className="mono">{n.primary_ip || t('unknown')}</td>
+                <td className="mono">{n.primary_ip || '-'}</td>
+                <td>{dueText(n, t)}</td>
                 <td className="mono">
                   {n.agent_version || '-'}
                   {/* §5.5: the target is shown next to the reported version so a

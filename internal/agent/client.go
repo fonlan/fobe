@@ -179,22 +179,27 @@ type agentSession struct {
 	probeMetrics atomic.Bool   // §16: stream 5s samples while a detail page is open
 	cadence      chan struct{} // nudges reportLoop to re-arm its ticker (buffered 1)
 
-	targets []protocol.TargetSpec
-	execMu  chan struct{} // one command at a time; also serves as idempotency guard
+	latencyInterval atomic.Int64
+	latencyCadence  chan struct{} // nudges latencyLoop to re-arm its ticker (buffered 1)
+	latencyMu       sync.RWMutex
+	targets         []protocol.TargetSpec
+	execMu          chan struct{} // one command at a time; also serves as idempotency guard
 }
 
 func newSession(cfg *Config, coll *collect.Collector, ws *websocket.Conn, sbx *singboxManager, updater *selfUpdater, log *slog.Logger) *agentSession {
 	s := &agentSession{
-		cfg:        cfg,
-		coll:       coll,
-		ws:         ws,
-		log:        log,
-		send:       make(chan protocol.Envelope, 64),
-		urgentSend: make(chan protocol.Envelope, 8),
-		done:       make(chan struct{}),
-		execMu:     make(chan struct{}, 1),
-		cadence:    make(chan struct{}, 1),
+		cfg:            cfg,
+		coll:           coll,
+		ws:             ws,
+		log:            log,
+		send:           make(chan protocol.Envelope, 64),
+		urgentSend:     make(chan protocol.Envelope, 8),
+		done:           make(chan struct{}),
+		execMu:         make(chan struct{}, 1),
+		cadence:        make(chan struct{}, 1),
+		latencyCadence: make(chan struct{}, 1),
 	}
+	s.latencyInterval.Store(int64(defaultLatencyInterval / time.Second))
 	s.sbx = sbx
 	s.updater = updater
 	s.term = newTerminalManager(s)
@@ -385,7 +390,8 @@ func (s *agentSession) handleServerFrame(env protocol.Envelope) {
 		if json.Unmarshal(env.Payload, &ack) == nil {
 			s.log.Info("hello_ack", "node", ack.NodeID, "targets", len(ack.LatencyTargets),
 				"agent_target", ack.AgentTargetVersion)
-			s.targets = ack.LatencyTargets
+			s.setLatencyTargets(ack.LatencyTargets)
+			s.setLatencyInterval(ack.LatencyIntervalSec)
 			s.setProbeMetrics(ack.ProbeMetrics)
 			s.applyDesired(ack.Desired) // full desired state rides along (§7)
 		}
@@ -397,6 +403,11 @@ func (s *agentSession) handleServerFrame(env protocol.Envelope) {
 		var p protocol.ProbeMetrics
 		if json.Unmarshal(env.Payload, &p) == nil {
 			s.setProbeMetrics(p.Enabled)
+		}
+	case protocol.TypeLatencyCfg:
+		var cfg protocol.LatencyConfig
+		if json.Unmarshal(env.Payload, &cfg) == nil {
+			s.setLatencyInterval(cfg.IntervalSec)
 		}
 	case protocol.TypeTermOpen, protocol.TypeTermInput, protocol.TypeTermResize, protocol.TypeTermClose:
 		s.handleTerminalFrame(env)

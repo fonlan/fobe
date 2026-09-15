@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -18,9 +19,10 @@ import (
 )
 
 const (
-	offlineAfter  = 90 * time.Second // §7: 90s without heartbeat = offline
-	writeWait     = 10 * time.Second
-	maxFrameBytes = 8 << 20 // cert PEM + batched latency stay well under this
+	offlineAfter              = 90 * time.Second // §7: 90s without heartbeat = offline
+	writeWait                 = 10 * time.Second
+	maxFrameBytes             = 8 << 20 // cert PEM + batched latency stay well under this
+	defaultLatencyIntervalSec = 5
 )
 
 // Hub tracks live agent connections and routes frames.
@@ -148,10 +150,11 @@ func (h *Hub) HandleAgentWS(w http.ResponseWriter, r *http.Request, nodeID strin
 	}
 	desired := h.buildDesiredState(nodeID)
 	ack := protocol.HelloAck{
-		NodeID:         nodeID,
-		ProbeMetrics:   false,
-		Desired:        desired,
-		LatencyTargets: specs,
+		NodeID:             nodeID,
+		ProbeMetrics:       false,
+		Desired:            desired,
+		LatencyTargets:     specs,
+		LatencyIntervalSec: h.latencyInterval(),
 		// §5.5: the flat fields mirror Desired so both carriers can never
 		// disagree, and old agents that ignore the new fields are unaffected.
 		AgentTargetVersion: desired.AgentTargetVersion,
@@ -164,6 +167,18 @@ func (h *Hub) HandleAgentWS(w http.ResponseWriter, r *http.Request, nodeID strin
 
 	go h.writePump(c)
 	h.readPump(c)
+}
+
+func (h *Hub) latencyInterval() int {
+	value, err := h.store.GetSetting("latency.interval_seconds")
+	if err != nil {
+		return defaultLatencyIntervalSec
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds < 1 || seconds > 3600 {
+		return defaultLatencyIntervalSec
+	}
+	return seconds
 }
 
 // HandleAgentSelfCheck serves the §5.5 bypass handshake of a downloaded binary.
@@ -327,6 +342,23 @@ func (h *Hub) Send(nodeID string, env protocol.Envelope) bool {
 		return false
 	}
 	return h.sendEnvelope(c, env)
+}
+
+// PushLatencyConfig applies the current panel cadence to every online probe.
+// It uses a dedicated frame so a global measurement preference cannot alter a
+// node's per-node desired sing-box state.
+func (h *Hub) PushLatencyConfig() {
+	interval := h.latencyInterval()
+	env := protocol.NewEnvelope(protocol.TypeLatencyCfg, "", protocol.LatencyConfig{IntervalSec: interval})
+
+	// Keep the read lock while enqueueing: connection teardown removes the entry
+	// under the write lock before it closes c.send, so this avoids a send-on-
+	// closed-channel race without blocking on a slow websocket writer.
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, c := range h.conns {
+		h.sendEnvelope(c, env)
+	}
 }
 
 // PushDesired sends the *complete* current desired state (§7) to an online

@@ -40,14 +40,16 @@ func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 		rows := make([]store.IPRow, 0, len(hello.IPs))
 		primary := ""
 		for _, ip := range hello.IPs {
-			rows = append(rows, store.IPRow{IP: ip.IP, Family: ip.Family, Scope: ip.Scope})
+			rows = append(rows, store.IPRow{
+				IP: ip.IP, Family: ip.Family, Scope: ip.Scope, IsPrimary: ip.IsPrimary,
+			})
 			if ip.IsPrimary && primary == "" {
 				primary = ip.IP
 			}
 		}
 		_ = h.store.ReplaceNodeIPs(c.nodeID, rows)
 		if primary != "" {
-			if n, err := h.store.GetNode(c.nodeID); err == nil {
+			if n, err := h.store.GetNode(c.nodeID); err == nil && (n.PrimaryIP == "" || !ipInRows(hello.IPs, n.PrimaryIP)) {
 				_ = h.store.SetNodePrimaryIP(c.nodeID, primary, n.CountryCode)
 			}
 		}
@@ -194,7 +196,9 @@ func (h *Hub) onState(nodeID string, st *protocol.State) {
 		rows := make([]store.IPRow, 0, len(st.IPs))
 		primary := ""
 		for _, ip := range st.IPs {
-			rows = append(rows, store.IPRow{IP: ip.IP, Family: ip.Family, Scope: ip.Scope})
+			rows = append(rows, store.IPRow{
+				IP: ip.IP, Family: ip.Family, Scope: ip.Scope, IsPrimary: ip.IsPrimary,
+			})
 			if ip.IsPrimary && primary == "" {
 				primary = ip.IP
 			}

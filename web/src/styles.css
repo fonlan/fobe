@@ -381,6 +381,7 @@ section.card { margin-bottom: 0; }
 .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .dot.on { background: var(--green); box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.18); }
 .dot.off { background: var(--text-dim); opacity: 0.5; }
+.status-label { margin-left: 8px; vertical-align: middle; }
 
 /* --- progress bars ----------------------------------------------------------- */
 

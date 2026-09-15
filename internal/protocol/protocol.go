@@ -33,6 +33,7 @@ const (
 	TypeDesired    = "desired"
 	TypeCmd        = "cmd"
 	TypeProbeMetr  = "probe_metrics"
+	TypeLatencyCfg = "latency_config"
 	TypeTermOpen   = "terminal_open"
 	TypeTermInput  = "terminal_input"
 	TypeTermResize = "terminal_resize"
@@ -132,7 +133,7 @@ type Traffic struct {
 	Tx    uint64 `json:"tx"`
 }
 
-// LatencyBatch carries the 5s-local samples accumulated over the last 60s.
+// LatencyBatch carries local samples accumulated over the last 60s.
 type LatencyBatch struct {
 	Samples []LatencySample `json:"samples"`
 }
@@ -225,6 +226,9 @@ type HelloAck struct {
 	ProbeMetrics   bool         `json:"probe_metrics"` // stream 5s samples while a detail page is open
 	Desired        DesiredState `json:"desired"`
 	LatencyTargets []TargetSpec `json:"latency_targets"`
+	// LatencyIntervalSec controls local probes. Zero remains wire-compatible
+	// with agents released before this setting and means their default (5s).
+	LatencyIntervalSec int `json:"latency_interval_sec,omitempty"`
 	// AgentTargetVersion is the agent build this server wants the probe to run
 	// (§5.5). Empty means "self-update is disabled / not offered right now":
 	// non-release server version, missing artifact, panel switch off, or the
@@ -315,4 +319,10 @@ type TerminalClosed struct {
 // ProbeMetrics toggles the temporary 5s high-frequency stream (design §16).
 type ProbeMetrics struct {
 	Enabled bool `json:"enabled"`
+}
+
+// LatencyConfig updates the local probe cadence without reconnecting the
+// agent. The server sends it whenever the panel setting changes.
+type LatencyConfig struct {
+	IntervalSec int `json:"interval_sec"`
 }

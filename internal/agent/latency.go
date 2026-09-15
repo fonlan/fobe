@@ -12,22 +12,22 @@ import (
 // ICMP is possible (root / CAP_NET_RAW). Missing capability → ICMP disabled,
 // TCP-only latency (design §5.1).
 
-// latencyLoop implements design §13: probe each target every 5s locally and
-// report a 60s batch (12 samples). TCP handshake RTT plus raw-socket ICMP
-// echo on linux (agent is root; missing CAP_NET_RAW degrades to TCP-only).
-func (s *agentSession) latencyLoop() {
-	const (
-		localEvery   = 5 * time.Second
-		batchEvery   = 60 * time.Second
-		probeTimeout = 3 * time.Second
-	)
+const (
+	defaultLatencyInterval = 5 * time.Second
+	latencyBatchEvery      = 60 * time.Second
+	latencyProbeTimeout    = 3 * time.Second
+)
 
-	local := time.NewTicker(localEvery)
+// latencyLoop implements design §13: probe each target at the panel-selected
+// cadence and report a 60s batch. TCP handshake RTT plus raw-socket ICMP echo
+// on linux (agent is root; missing CAP_NET_RAW degrades to TCP-only).
+func (s *agentSession) latencyLoop() {
+	local := time.NewTicker(s.latencyEvery())
 	defer local.Stop()
-	batch := time.NewTicker(batchEvery)
+	batch := time.NewTicker(latencyBatchEvery)
 	defer batch.Stop()
 
-	// ring of the last 60s of samples
+	// The batch is bounded by the selected interval and enabled targets.
 	samples := make([]protocol.LatencySample, 0, 16)
 	flush := func() {
 		if len(samples) == 0 {
@@ -42,7 +42,7 @@ func (s *agentSession) latencyLoop() {
 		case <-s.done:
 			return
 		case <-local.C:
-			for _, t := range s.targets {
+			for _, t := range s.latencyTargets() {
 				sm := protocol.LatencySample{
 					TargetID: t.ID,
 					TS:       protocol.Now(),
@@ -50,13 +50,13 @@ func (s *agentSession) latencyLoop() {
 					TCPMs:    -1,
 				}
 				if t.Kind == "tcp" && t.Port > 0 {
-					if ms, err := tcpHandshakeMs(t.Host, t.Port, probeTimeout); err == nil {
+					if ms, err := tcpHandshakeMs(t.Host, t.Port, latencyProbeTimeout); err == nil {
 						sm.TCPMs = ms
 					} else {
 						sm.Loss = 1
 					}
 				} else if t.Kind == "icmp" && hasRawSocket() {
-					if ms, err := icmpEchoMs(t.Host, probeTimeout); err == nil {
+					if ms, err := icmpEchoMs(t.Host, latencyProbeTimeout); err == nil {
 						sm.ICMPMs = ms
 					} else {
 						sm.Loss = 1
@@ -68,7 +68,41 @@ func (s *agentSession) latencyLoop() {
 			}
 		case <-batch.C:
 			flush()
+		case <-s.latencyCadence:
+			local.Stop()
+			local = time.NewTicker(s.latencyEvery())
 		}
+	}
+}
+
+func (s *agentSession) latencyEvery() time.Duration {
+	seconds := s.latencyInterval.Load()
+	if seconds <= 0 {
+		return defaultLatencyInterval
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *agentSession) latencyTargets() []protocol.TargetSpec {
+	s.latencyMu.RLock()
+	defer s.latencyMu.RUnlock()
+	return append([]protocol.TargetSpec{}, s.targets...)
+}
+
+func (s *agentSession) setLatencyTargets(targets []protocol.TargetSpec) {
+	s.latencyMu.Lock()
+	s.targets = append([]protocol.TargetSpec{}, targets...)
+	s.latencyMu.Unlock()
+}
+
+func (s *agentSession) setLatencyInterval(seconds int) {
+	if seconds < 1 || seconds > 3600 {
+		seconds = int(defaultLatencyInterval / time.Second)
+	}
+	s.latencyInterval.Store(int64(seconds))
+	select {
+	case s.latencyCadence <- struct{}{}:
+	default:
 	}
 }
 

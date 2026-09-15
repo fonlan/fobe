@@ -37,15 +37,16 @@ type nodeView struct {
 	NetRxRate    float64 `json:"net_rx_rate"`
 	NetTxRate    float64 `json:"net_tx_rate"`
 	// traffic per selected mode
-	Iface       string  `json:"iface"`
-	Mode        string  `json:"mode"`
-	QuotaBytes  *int64  `json:"quota_bytes,omitempty"`
-	PeriodUsed  float64 `json:"period_used"`
-	PeriodStart *int64  `json:"period_start,omitempty"`
-	PeriodPct   float64 `json:"period_pct"` // -1 = no quota
-	TodayRx     int64   `json:"today_rx"`
-	TodayTx     int64   `json:"today_tx"`
-	NextDueAt   *int64  `json:"next_due_at,omitempty"`
+	Iface             string  `json:"iface"`
+	Mode              string  `json:"mode"`
+	QuotaBytes        *int64  `json:"quota_bytes,omitempty"`
+	PeriodUsed        float64 `json:"period_used"`
+	PeriodStart       *int64  `json:"period_start,omitempty"`
+	PeriodPct         float64 `json:"period_pct"` // -1 = no quota
+	TodayRx           int64   `json:"today_rx"`
+	TodayTx           int64   `json:"today_tx"`
+	BillingConfigured bool    `json:"billing_configured"`
+	NextDueAt         *int64  `json:"next_due_at,omitempty"`
 
 	// Agent self-update state (design §5.5): what the panel needs to answer
 	// "why did this probe not follow the server?".
@@ -144,6 +145,7 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 	}
 
 	if b, err := s.Store.GetNodeBilling(n.ID); err == nil {
+		v.BillingConfigured = b.CycleType != "" && b.CycleType != "none" && b.CycleDays != nil && *b.CycleDays > 0
 		v.NextDueAt = b.NextDueAt
 	}
 	return v

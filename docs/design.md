@@ -28,7 +28,7 @@
 | 14 | 重置锚点 | 循环锚点，填一次自动滚动；缺省继承缴费锚点 | 需处理月末边界与时区 |
 | 15 | 缴费周期 | 周期类型（无 / 按月 / 按天 / 按年，2026-09-15 增按年）+ 周期长度 + 下次到期日，手动改；**周期长度单位随类型（天/月/年），类型只作记账口径、不参与任何到期计算**；**无续费按钮、无历史** | 查不到"上期什么时候交的" |
 | 16 | 指标保留 | 明细只存 7 天；另存永久「按天流量」表 | 7 天以外的曲线不可得（月曲线靠日表） |
-| 17 | 延迟测量 | 探针**主动**测面板配置的目标；5s 本地测、60s 批量上报；ICMP + TCP 握手两种 | 拿不到"用户→探针"的真实延迟 |
+| 17 | 延迟测量 | 探针**主动**测面板配置的目标；本地测量频率由设置项 `latency.interval_seconds` 控制（默认 5s）、60s 批量上报；ICMP + TCP 握手两种 | 拿不到"用户→探针"的真实延迟 |
 | 18 | 登录加固 | 失败 3 次拉黑 IP（持久化）+ CLI 解封；**不做 2FA** | 黑名单依赖 XFF 信任链；无第二因子 |
 | 19 | 告警 | Telegram Bot + 通用 Webhook | 没装 Telegram 就收不到 |
 | 20 | 接入层 | **不在 fobe 内实现**：外部 nginx 提供 TLS 与反代，证书自备自管 | fobe 不碰证书；你必须让 nginx 传对 XFF 与 Upgrade 头（见 §3 与 README） |
@@ -240,7 +240,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `users` | id, password_hash | 单行 |
 | `sessions` | id, created_at, last_seen, ua, ip, revoked | 可批量吊销 |
 | `ip_blacklist` | ip, reason, fail_count, created_at, expires_at | 持久化 |
-| `settings` | key, value, encrypted | 全局 anytls 密码、AI 配置、Telegram、保留期等 |
+| `settings` | key, value, encrypted | 全局 anytls 密码、AI 配置、Telegram、保留期、延迟测量频率（`latency.interval_seconds`，默认 5）等 |
 | `reg_tokens` | token_hash, note, expires_at, used_at | 单次 |
 | `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, cpu_cores, primary_ip, country_code, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表 |
 | `node_ips` | node_id, ip, family, scope, is_primary | 多 IP 全量上报 |
@@ -282,7 +282,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | | `agent_update` | 自更新逐次上报：phase / class(terminal\|transient) / error / attempts（§5.5） |
 | | `metrics` | 60s 一次；面板打开详情页时服务端可请求 5s 实时流 |
 | | `traffic` | 60s 一次：选定网卡的累计计数 + 日增量 |
-| | `latency` | 60s 一次，批量（每目标 12 个 5s 采样点） |
+| | `latency` | 60s 一次批量；本地采样点数量按 `latency.interval_seconds`（默认 5s）变化 |
 | | `state` | 节点信息、IP 列表、sing-box 实际状态 |
 | | `cmd_result` | 指令执行结果（stdout/stderr/exit code，截断） |
 | | `terminal` | 终端输出/关闭 |
@@ -290,7 +290,8 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | | `desired` | 增量下发期望状态（sing-box 版本/配置/端口/密码/证书要求） |
 | | `cmd` | 一次性命令（AI 执行、面板操作） |
 | | `terminal_open/input/resize/close` | 终端会话 |
-| | `probe_metrics` | 请求临时高频采集 5s |
+| | `probe_metrics` | 请求临时高频指标采集 5s |
+| | `latency_config` | 立即更新本地延迟测量频率（全局设置变更时推送） |
 
 - 心跳：agent 每 15s 一次 `ping`（或空帧），服务端 90s 无心跳判定离线并告警。
 - 重连：指数退避 + 抖动（1s → 5min 上限）。
@@ -569,9 +570,9 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
   - `icmp`：ICMP echo RTT（需要 root 或 `CAP_NET_RAW`，缺失则跳过并标记）。
   - `tcp`：TCP 三次握手 RTT（连接目标 host:port 后立即关闭）。
 - 每台探针选择自己用哪些目标（多选）。
-- 采集：**探针本地每 5s 测一次**，本地保留 60s 窗口，**每 60s 批量上报 12 个采样点**（不是每 5s 上报——否则 10 探针会出现 2 次/秒的常驻写入，且网络抖动会污染测量本身）。
+- 采集：**探针本地按全局设置 `latency.interval_seconds` 测量，默认每 5s 一次**（允许 1–3600 秒），本地保留 60s 窗口并**每 60s 批量上报**。设置变更立即推送给在线探针，离线探针会在下一次 `hello_ack` 收到；不是逐点上报，否则 10 探针会出现 2 次/秒的常驻写入，且网络抖动会污染测量本身。
 - 存储：`latency_samples` 保留 7 天。
-- 数据量估算：5s × 7d = 120,960 点 / (探针×目标) 对；10 探针 × 5 目标 ≈ 600 万行，SQLite 可承受（每行 ~40B，约 250MB 量级）。**图表必须降采样**：1h 视图取原始点，24h/7d 视图按 5min/30min 桶取平均 + P95。
+- 数据量估算（默认 5s）：5s × 7d = 120,960 点 / (探针×目标) 对；10 探针 × 5 目标 ≈ 600 万行，SQLite 可承受（每行 ~40B，约 250MB 量级）。更短的频率会按比例增加数据量。**图表必须降采样**：1h 视图取原始点，24h/7d 视图按 5min/30min 桶取平均 + P95。
 - 前端：折线图 + 丢包率；每探针一张"多目标对比"图。
 
 ---
@@ -623,7 +624,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - **本地开发不走容器**：前端 `npm run dev`（Vite dev server，把 `/api`、`/ws`、`/sub`、`/install.sh`、`/dl` 代理到 `http://127.0.0.1:8080`，**WebSocket 代理必须开 `ws: true`**），后端 `go run ./cmd/server`。此时把 `FOBE_WEB_DIR` 留空 → server 进 **API-only 模式**：`/` 返回一句"请访问 Vite dev server"的提示（不 404、不白屏），其余接口行为与生产一致。
 - **`scripts/dev.sh` 与自更新（2026-09-15 修订）**：dev.sh 现在除 server 外还交叉编译 linux/amd64 的 agent 产物，并给两端注入同一个内容寻址版本号 `dev-<哈希>`（§5.5 实现修订），所以本机 dev 也能真跑"探针跟随服务端"；`go run ./cmd/server` 没有 `-ldflags`、版本仍是 `dev`，不会下发目标。降级演练用 `FOBE_VERSION=<旧号> scripts/dev.sh`；改后端必须重启 dev.sh 这条老规矩不变，但版本号只在 agent 源码真的变了才变——重启本身不再惊动探针。
 - 页面：登录 / 概览（卡片墙）/ 节点详情（**只读监控**：指标 + 图表 + 流量 + 延迟历史 + 命令）/ 订阅与模板 / 延迟目标 / 告警 / 终端（全屏）/ AI 助手（侧栏）/ 设置（AI、通知、GeoIP、保留期、主密钥状态、**服务器**）。（2026-09-15 修订）
-- **配置入口收敛（2026-09-15）**：设置里新增「服务器」页，表格列出已接入的服务器，行尾为编辑/删除图标按钮。「编辑服务器」页集中承载该服务器的全部配置：节点设置（名称/备注/网卡/配额/账单）、延迟测量端点选择、IP 列表（含手动主 IP）、sing-box 服务端配置（版本/启停/端口）。节点详情页不再承载配置表单与删除按钮——监控与配置分离，删除服务器统一走设置页（带确认）。
+- **配置入口收敛（2026-09-15；2026-09-16 列完善）**：设置里新增「服务器」页，表格列出已接入的服务器，明确显示文字状态、主 IP、过期时间、版本，行尾为编辑/删除图标按钮；未配置缴费周期时过期时间留空，已配置时显示距离 `next_due_at` 的剩余或逾期时间。「编辑服务器」页集中承载该服务器的全部配置：节点设置（名称/备注/网卡/配额/账单）、延迟测量端点选择、IP 列表（含手动主 IP）、sing-box 服务端配置（版本/启停/端口）。节点详情页不再承载配置表单与删除按钮——监控与配置分离，删除服务器统一走设置页（带确认）。
 - 实时（2026-09-15 修订）：`/ws/events` 只覆盖状态类变化（节点增删改、sing-box、订阅、设置、GeoIP）——**常规指标上报不产生任何事件**，所以数据新鲜度必须靠「轮询 + 高频上报」两条腿：
   - **概览**：挂载且标签页可见期间，对每个在线节点打开 §16 的 5s 探测流，并 5s 拉一次列表。打开探测流是必要的：不打开就只能等 60s 基线节奏，卡片墙看起来像「不自动更新」。
   - **详情**：5s 拉节点快照（与探测流对齐），30s 拉图表 / 流量 / 延迟曲线（重查询）。

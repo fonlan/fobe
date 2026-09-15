@@ -60,6 +60,13 @@ export function fmtDuration(seconds: number): string {
   return `${m}m`;
 }
 
+/** Format a due-time gap while preserving whether the date is already past. */
+export function fmtDueDuration(dueAt: number, now = Date.now() / 1000): { overdue: boolean; duration: string } | null {
+  if (!isFinite(dueAt) || dueAt <= 0) return null;
+  const delta = dueAt - now;
+  return { overdue: delta < 0, duration: fmtDuration(Math.abs(delta)) };
+}
+
 function pad(n: number): string {
   return String(n).padStart(2, '0');
 }

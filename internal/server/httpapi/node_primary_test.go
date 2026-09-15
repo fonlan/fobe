@@ -113,6 +113,16 @@ func TestManualPrimarySurvivesAgentStateReport(t *testing.T) {
 		protocol.IPInfo{IP: "198.51.100.5", Family: 4, Scope: "public", IsPrimary: true},
 		protocol.IPInfo{IP: "198.51.100.6", Family: 4, Scope: "public"},
 	)
+	detail := doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+nodeID, cookie, nil)
+	var reported struct {
+		Node struct {
+			PrimaryIP string `json:"primary_ip"`
+		} `json:"node"`
+	}
+	_ = json.Unmarshal(detail.Body, &reported)
+	if reported.Node.PrimaryIP != "198.51.100.5" {
+		t.Fatalf("agent-reported primary IP not persisted: %q", reported.Node.PrimaryIP)
+	}
 
 	// manual pin to the address the agent would not have picked
 	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+nodeID+"/primary-ip", cookie,
@@ -130,7 +140,7 @@ func TestManualPrimarySurvivesAgentStateReport(t *testing.T) {
 		protocol.IPInfo{IP: "198.51.100.6", Family: 4, Scope: "public"},
 		protocol.IPInfo{IP: "198.51.100.7", Family: 4, Scope: "public"},
 	)
-	detail := doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+nodeID, cookie, nil)
+	detail = doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+nodeID, cookie, nil)
 	m := detail.JSONMap(t)
 	var b struct {
 		Node struct {

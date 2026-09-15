@@ -42,6 +42,7 @@ const PROXY_KEYS = ['anytls_password'] as const;
 /** §14.1 database refresh policy; the database itself has its own endpoints. */
 const GEOIP_KEYS = ['geoip.auto_update', 'geoip.max_age_days', 'geoip.url'] as const;
 const AGENT_KEYS = ['agent.auto_update'] as const;
+const LATENCY_KEYS = ['latency.interval_seconds'] as const;
 
 function isHTTPURL(value: string): boolean {
   try {
@@ -99,6 +100,7 @@ export default function Settings() {
     for (const k of keys) {
       const v = draft[k];
       if (v !== undefined && v.trim() !== '') payload[k] = v.trim();
+      if (k === 'latency.interval_seconds' && v === undefined && !settings[k]?.value) payload[k] = '5';
     }
     // geoip.url is the one field where empty is meaningful: it means "go back
     // to the built-in mirror chain", so clearing it must reach the server even
@@ -128,10 +130,10 @@ export default function Settings() {
   const field = (
     key: string,
     label: string,
-    opts?: { password?: boolean; type?: string; select?: { value: string; label: string }[] },
+    opts?: { password?: boolean; type?: string; select?: { value: string; label: string }[]; defaultValue?: string },
   ) => {
     const sv = settings[key];
-    const value = draft[key] ?? (sv?.sensitive ? '' : sv?.value ?? '');
+    const value = draft[key] ?? (sv?.sensitive ? '' : sv?.value || opts?.defaultValue || '');
     return (
       <label key={key} className="field">
         <span>
@@ -143,7 +145,7 @@ export default function Settings() {
           )}
         </span>
         {opts?.select ? (
-          <select value={draft[key] ?? sv?.value ?? ''} onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}>
+          <select value={draft[key] ?? sv?.value ?? opts?.defaultValue ?? ''} onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}>
             {opts.select.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
@@ -154,7 +156,7 @@ export default function Settings() {
           <input
             type={opts?.type ?? (opts?.password ? 'password' : 'text')}
             value={value}
-            placeholder={sv?.sensitive ? (sv.set ? t('sensitive_set') : t('sensitive_unset')) : (sv?.value ?? '')}
+            placeholder={sv?.sensitive ? (sv.set ? t('sensitive_set') : t('sensitive_unset')) : (sv?.value || opts?.defaultValue || '')}
             onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}
           />
         )}
@@ -260,6 +262,15 @@ export default function Settings() {
         <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(PROXY_KEYS)} label={t('save')} />
       </section>
 
+      <section className="card">
+        <h3>{t('sec_latency')}</h3>
+        <p className="hint">{t('latency_interval_hint')}</p>
+        <div className="form-grid">
+          {field('latency.interval_seconds', t('latency_interval_seconds'), { type: 'number', defaultValue: '5' })}
+        </div>
+        <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(LATENCY_KEYS)} label={t('save')} />
+      </section>
+
       <SingboxCacheCard />
       <BackupCard />
       <GeoIPCard
@@ -313,7 +324,7 @@ function AgentUpdateCard({
   field: (
     key: string,
     label: string,
-    opts?: { password?: boolean; type?: string; select?: { value: string; label: string }[] },
+    opts?: { password?: boolean; type?: string; select?: { value: string; label: string }[]; defaultValue?: string },
   ) => ReactNode;
   busy: boolean;
   savedMsg: string | null;
@@ -1082,7 +1093,7 @@ function GeoIPCard({
   field: (
     key: string,
     label: string,
-    opts?: { password?: boolean; type?: string; select?: { value: string; label: string }[] },
+    opts?: { password?: boolean; type?: string; select?: { value: string; label: string }[]; defaultValue?: string },
   ) => ReactNode;
   busy: boolean;
   savedMsg: string | null;

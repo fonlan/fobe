@@ -34,6 +34,7 @@ export interface NodeView {
   period_pct: number; // -1 = no quota
   today_rx: number;
   today_tx: number;
+  billing_configured: boolean;
   next_due_at?: number | null;
   // Agent self-update state (design §5.5): what the panel needs to answer
   // "why did this probe not follow the server?".

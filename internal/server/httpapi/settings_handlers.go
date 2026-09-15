@@ -2,12 +2,13 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/fobe-panel/fobe/internal/server/agentupdate"
 )
 
-// Settings groups (design §4.4 / §12.1 / §14 / §15 / §16):
+// Settings groups (design §4.4 / §12.1 / §13 / §14 / §15 / §16):
 //   ai.base_url, ai.model, ai.api_key (encrypted), ai.default_policy
 //   anytls_password (encrypted; global shared proxy password, §10)
 //   notify.telegram_bot_token (encrypted), notify.telegram_chat_id,
@@ -46,6 +47,7 @@ var allowedKeys = func() map[string]bool {
 		"ai.base_url", "ai.model", "ai.default_policy",
 		"notify.telegram_chat_id", "notify.webhook_url",
 		"retention.metrics_days", "retention.latency_days",
+		"latency.interval_seconds",
 		"alert.traffic_warn_pct", "alert.traffic_crit_pct",
 		"ai.kill_switch",
 		"ui.theme", // light|dark|system; validated below (§16 dual-write)
@@ -90,6 +92,11 @@ func validBoolSetting(v string) bool {
 	}
 }
 
+func validLatencyInterval(value string) bool {
+	seconds, err := strconv.Atoi(strings.TrimSpace(value))
+	return err == nil && seconds >= 1 && seconds <= 3600
+}
+
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	var req putSettingsReq
 	if err := decodeJSON(r, &req); err != nil {
@@ -121,6 +128,10 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad_switch")
 			return
 		}
+		if key == "latency.interval_seconds" && !validLatencyInterval(value) {
+			writeErr(w, http.StatusBadRequest, "bad_latency_interval")
+			return
+		}
 		// §14.1 policy values; validated by the same helper the §17 import uses.
 		if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {
 			writeErr(w, http.StatusBadRequest, geoIPSettingErrCode(key))
@@ -144,6 +155,9 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit("settings_updated", joinKeys(req.Settings), s.Trust.RealIP(r))
 	s.publishEvent("settings_updated", "")
+	if _, changed := req.Settings["latency.interval_seconds"]; changed && s.Hub != nil {
+		s.Hub.PushLatencyConfig()
+	}
 	// A change to the §14.1 policy can make the database immediately outdated
 	// (a shorter threshold, or the switch turned back on): evaluate it now
 	// instead of waiting for the next daily tick. Check only downloads when the
