@@ -69,6 +69,13 @@ func (s *Store) migrate() error {
 // migrateAdditive adds columns introduced after the initial schema to
 // databases created by older builds. Idempotent: existing columns are skipped.
 func (s *Store) migrateAdditive() error {
+	// Web Terminal is agent-proxied and no longer uses SSH credentials. Remove
+	// legacy ciphertext rather than retaining secrets that the product no
+	// longer needs. This is idempotent for fresh and upgraded databases.
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS node_ssh`); err != nil {
+		return fmt.Errorf("remove legacy node ssh credentials: %w", err)
+	}
+
 	migrations := []struct{ table, column, ddl string }{
 		{"reg_tokens", "name", `ALTER TABLE reg_tokens ADD COLUMN name TEXT NOT NULL DEFAULT ''`},
 		{"commands", "actor", `ALTER TABLE commands ADD COLUMN actor TEXT NOT NULL DEFAULT 'panel'`},

@@ -173,6 +173,9 @@ export default function Settings() {
           <NavLink to="/settings/targets" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
             {t('nav_targets')}
           </NavLink>
+          <NavLink to="/settings/servers" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+            {t('nav_servers')}
+          </NavLink>
           <NavLink to="/settings/subscriptions" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
             {t('nav_subs')}
           </NavLink>
@@ -193,6 +196,9 @@ export default function Settings() {
         </NavLink>
         <NavLink to="/settings/targets" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
           {t('nav_targets')}
+        </NavLink>
+        <NavLink to="/settings/servers" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+          {t('nav_servers')}
         </NavLink>
         <NavLink to="/settings/subscriptions" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
           {t('nav_subs')}

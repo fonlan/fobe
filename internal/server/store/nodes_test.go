@@ -45,3 +45,35 @@ func TestRegTokenNameColumnMigratesLegacyDatabase(t *testing.T) {
 		t.Fatalf("got name=%q note=%q", name, note)
 	}
 }
+func TestLegacyNodeSSHCredentialsArePurged(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-ssh.db")
+	legacy, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.db.Exec(`CREATE TABLE node_ssh (
+		node_id TEXT PRIMARY KEY,
+		password_enc TEXT NOT NULL DEFAULT ''
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.db.Exec(`INSERT INTO node_ssh (node_id, password_enc) VALUES ('node', 'ciphertext')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen legacy db: %v", err)
+	}
+	defer migrated.Close()
+	var exists int
+	if err := migrated.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'node_ssh'`).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists != 0 {
+		t.Fatal("legacy node_ssh table remains after migration")
+	}
+}

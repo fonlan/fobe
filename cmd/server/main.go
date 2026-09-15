@@ -66,7 +66,7 @@ func mustStore() *store.Store {
 func mustMasterKey() []byte {
 	v := os.Getenv("FOBE_MASTER_KEY")
 	if v == "" {
-		fmt.Fprintln(os.Stderr, "fobe-server: FOBE_MASTER_KEY is required (AI keys, SSH credentials and bot tokens are encrypted with it).")
+		fmt.Fprintln(os.Stderr, "fobe-server: FOBE_MASTER_KEY is required (AI keys, bot tokens and other sensitive settings are encrypted with it).")
 		fmt.Fprintln(os.Stderr, "  generate one with:  openssl rand -base64 32")
 		os.Exit(1)
 	}

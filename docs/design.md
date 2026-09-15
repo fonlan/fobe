@@ -16,7 +16,7 @@
 | 2 | 网络通道 | 外部 nginx 单端口接入，全路径转单一上游；agent 走 WSS | 你必须自备 nginx + 真证书；探针必须能解析面板域名 |
 | 3 | 流量口径 | 整机网卡 `/proc/net/dev`，面板选定网卡（默认默认路由出口） | 配额含系统更新与其他服务流量；需计数器回绕/重启检测 |
 | 4 | 使用率语义 | 分母 = 周期配额；4 模式决定取哪个方向 | 每节点必须落库：配额值、锚点、时区 |
-| 5 | Web 终端 | SSH 到探针（凭据面板托管），可回退 agent 本地 PTY | 凭据托管在单密码面板里 |
+| 5 | Web 终端 | 浏览器 → server → agent 本地 PTY（不依赖 sshd、不存凭据）（2026-09-15 修订：原 SSH + 凭据托管方案废弃） | agent 需要 PTY 权限；协议保留 `mode` 字段仅为滚动升级兼容 |
 | 6 | 平台 | x86 Linux + x86 OpenWrt（v1 硬需求） | procd/init.d、musl 静态、flash 写最小化 |
 | 7 | 到期/超量 | 只提醒，不自动停服 | 需要告警通道，且没有自动止损 |
 | 8 | AI 模型 | OpenAI 兼容 API，自填 base_url + key，服务端加密存储 | key 在服务端；服务端需能出网 |
@@ -54,7 +54,7 @@
                                                  │
                                         ┌────────▼─────────┐
                                         │  server (Go)     │  SQLite(WAL) 挂载在 /data
-                                        │  ├ /api  /ws/*   │  AI key / SSH 凭据 AES-GCM 加密
+                                        │  ├ /api  /ws/*   │  AI key 等敏感设置 AES-GCM 加密
                                         │  ├ /sub /install │
                                         │  ├ /dl → /srv/dl │  agent 与 sing-box 产物直出
                                         │  ├ /   → /srv/web│  前端 dist（镜像内直出）
@@ -136,7 +136,7 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 
 ### 4.4 密钥托管
 
-- 主密钥 `FOBE_MASTER_KEY`（32 字节，环境变量 / Docker secret）。用它 AES-GCM 加密：AI API Key、探针 SSH 凭据、Telegram Bot Token、订阅模板中的敏感段。
+- 主密钥 `FOBE_MASTER_KEY`（32 字节，环境变量 / Docker secret）。用它 AES-GCM 加密：AI API Key、Telegram Bot Token、订阅模板中的敏感段。（2026-09-15：不再加密任何 SSH 凭据——Web 终端已改走 agent 本地 PTY，见 §11。）
 - 未设置主密钥时，服务端**拒绝启动**并打印生成命令（不静默降级为明文）。
 - 所有审计写 `audit_logs`：谁、何时、对哪个节点、什么动作、命令原文、来源 IP。
 
@@ -454,13 +454,12 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 ---
 
-## 11. Web 终端
+## 11. Web 终端（2026-09-15 修订：单一 Agent PTY，SSH 模式与凭据托管移除）
 
-- 前端 xterm.js ↔ `/ws/terminal?node=<id>` ↔ server 转发 ↔ agent。
-- **两种模式**（面板可切）：
-  1. **SSH 模式（默认）**：agent 内置 Go SSH 客户端连 `127.0.0.1:22`；凭据由面板托管（密码或私钥，加密存储），也支持"使用探针上已有的 root 密钥/免密"。
-  2. **本地 PTY 模式（回退）**：agent 直接用 `creack/pty` 起 shell。适用于禁密码登录的 VPS、dropbear 行为怪异的 OpenWrt、或 SSH 没起来时救急。
-- 会话初始化时记审计：操作者、节点、来源 IP、模式、开始/结束时间。
+- 前端 xterm.js ↔ `/ws/terminal?node=<id>` ↔ server 转发 ↔ agent；agent 收到 `terminal_open` 一律用 `creack/pty` 起本地 shell，**不再内置 SSH 客户端、不依赖探针 sshd、不在面板保存任何 SSH 凭据**。适用于禁密码登录的 VPS、dropbear 行为怪异的 OpenWrt。
+- 代价绑定：探针必须能起 PTY（容器内挂载 devpts）；无法再"借道"探针上已有的 sshd 配置。
+- 兼容：`TerminalOpen.Mode` 字段保留在 v1 wire 上（server 恒写 `pty`）；旧浏览器发来的 `ssh` 由 server 规范化为 `pty`，旧 agent 收到 `ssh` 也只起本地 PTY。旧 `node_ssh` 凭据表在服务端启动迁移时删除。
+- 会话初始化时记审计：操作者、节点、来源 IP、会话 ID、开始/结束时间。浏览器帧限 1 MiB，会话 ID 由 server 生成并覆写，浏览器不能伪造。
 - 终端与 AI 执行共用 agent 指令通道 → 审计口径统一。
 - v1 不做 PTY 全量录制（体积与隐私成本高），但保留 `session_id`，便于后续开启录制。
 
@@ -570,8 +569,12 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 - 技术：**React + TypeScript + Vite**；构建产物输出到 `web/dist`。**生产镜像在构建阶段把产物烤进镜像**（`/srv/web`），由 server 直出（`FOBE_WEB_DIR`）——不嵌入 Go 二进制（避免体积膨胀），也不再依赖宿主机挂载前端目录。若想让外部 nginx 直接吐静态文件，见 §3 末尾的替代做法。
 - **本地开发不走容器**：前端 `npm run dev`（Vite dev server，把 `/api`、`/ws`、`/sub`、`/install.sh`、`/dl` 代理到 `http://127.0.0.1:8080`，**WebSocket 代理必须开 `ws: true`**），后端 `go run ./cmd/server`。此时把 `FOBE_WEB_DIR` 留空 → server 进 **API-only 模式**：`/` 返回一句"请访问 Vite dev server"的提示（不 404、不白屏），其余接口行为与生产一致。
-- 页面：登录 / 概览（卡片墙）/ 节点详情（指标 + 流量 + 延迟 + sing-box）/ 订阅与模板 / 延迟目标 / 告警 / 终端（全屏）/ AI 助手（侧栏）/ 设置（AI、通知、GeoIP、保留期、主密钥状态）。
-- 实时：`/ws/events` 推送；详情页打开时向 agent 要 5s 高频数据，关闭即恢复 60s。
+- 页面：登录 / 概览（卡片墙）/ 节点详情（**只读监控**：指标 + 图表 + 流量 + 延迟历史 + 命令）/ 订阅与模板 / 延迟目标 / 告警 / 终端（全屏）/ AI 助手（侧栏）/ 设置（AI、通知、GeoIP、保留期、主密钥状态、**服务器**）。（2026-09-15 修订）
+- **配置入口收敛（2026-09-15）**：设置里新增「服务器」页，表格列出已接入的服务器，行尾为编辑/删除图标按钮。「编辑服务器」页集中承载该服务器的全部配置：节点设置（名称/备注/网卡/配额/账单）、延迟测量端点选择、IP 列表（含手动主 IP）、sing-box 服务端配置（版本/启停/端口）。节点详情页不再承载配置表单与删除按钮——监控与配置分离，删除服务器统一走设置页（带确认）。
+- 实时（2026-09-15 修订）：`/ws/events` 只覆盖状态类变化（节点增删改、sing-box、订阅、设置、GeoIP）——**常规指标上报不产生任何事件**，所以数据新鲜度必须靠「轮询 + 高频上报」两条腿：
+  - **概览**：挂载且标签页可见期间，对每个在线节点打开 §16 的 5s 探测流，并 5s 拉一次列表。打开探测流是必要的：不打开就只能等 60s 基线节奏，卡片墙看起来像「不自动更新」。
+  - **详情**：5s 拉节点快照（与探测流对齐），30s 拉图表 / 流量 / 延迟曲线（重查询）。
+  - **标签页隐藏时全部交还 60s 基线并停轮询**（`visibilitychange`），避免一个忘记关闭的标签页把每个 agent 永久钉在 5s。离线节点 409 直接忽略；节点重新上线后会重新打开探测流。
 - 节点卡片展示：名称、国旗、IP、在线状态、CPU%、内存%、磁盘%、CPU 核数、流量使用率（按所选模式）、今日上下行、到期倒计时、延迟摘要。
 - **i18n**：`zh-CN` + `en-US`，前端 i18n 框架；后端只返回错误码与结构化数据，**不出中文文案**（避免后端拼字符串导致双语文案漏翻）。
 - **主题**：CSS 变量 + `prefers-color-scheme` 默认跟随系统 + 手动切换持久化（localStorage 与服务端设置双写，跨设备一致）。
@@ -592,7 +595,7 @@ fobe/
 │  │  ├─ singboxdl/           # §9.5 产物下载/校验/落盘（GitHub release → <DLDir>/singbox/<ver>/）
 │  │  ├─ singboxcache/        # §9.5 启动自动下载策略 + 容器挂载校验 + 状态落库
 │  │  └─ singboxupdate/       # §9.5 一键批量更新 job + 15 分钟收敛告警
-│  └─ agent/{collect,singbox,latency,ssh,pty,cert,service,netinfo}
+│  └─ agent/{collect,singbox,latency,terminal,cert,service,netinfo}
 ├─ web/                       # React + TS + Vite（src/、vite.config.ts、产物 dist/）
 ├─ deploy/
 │  ├─ docker-compose.yml
@@ -655,7 +658,7 @@ services:
 | **M1 骨架** | 多阶段镜像（含 React 前端产物）+ compose + SQLite + 登录（含黑名单+CLI）+ agent 注册/心跳 + 节点列表 + **README 外部 nginx 接入文档** | 一条安装命令能在 Debian 上装出节点并出现在面板；按 README 配好外部 nginx 后可从公网访问；本地 `go run` + `npm run dev` 跑通同一套接口 |
 | **M2 监控** | 指标采集 + 实时面板 + 7 天明细 + 日流量表 + 四模式配额 + 重置锚点 + 缴费周期 | 面板 CPU/内存/磁盘/流量数字与 `top`、机房账单对得上 |
 | **M3 sing-box** | 安装/更新/回滚/启停 + anytls 自签 + 证书 pinning + 订阅与模板 | 从零到"手机能导入订阅并连通"；故意写坏配置能自动回滚 |
-| **M4 运维面** | Web 终端（SSH + 本地 PTY）+ IP/国旗 + 延迟测量 + 告警 | 浏览器里能上探针改配置；离线节点 90s 内告警到 Telegram |
+| **M4 运维面** | Web 终端（agent 本地 PTY）+ IP/国旗 + 延迟测量 + 告警 | 浏览器里能上探针改配置；离线节点 90s 内告警到 Telegram |
 | **M5 AI** | 工具集 + 确认弹窗 + 审计 + Kill Switch + 熔断 | 用自然语言完成"看这台为什么负载高"和"把 sing-box 升到 x.y.z" |
 | **M6 打磨** | i18n + 明暗主题 + OpenWrt 实机验证 + 备份恢复 + 文档 | x86 OpenWrt 软路由上完整跑通 M2–M4 |
 

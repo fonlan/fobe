@@ -24,7 +24,7 @@
 ## 快速开始
 
 ```bash
-# 1. 主密钥（加密 AI key、探针 SSH 凭据、Bot Token 用；丢了就得重填这些凭据）
+# 1. 主密钥（加密 AI key、Bot Token 等敏感设置用；丢了就得重填这些凭据）
 mkdir -p data/sqlite data/dl data/backup
 echo "FOBE_MASTER_KEY=$(openssl rand -base64 32)" > .env
 
@@ -178,7 +178,7 @@ environment:
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `FOBE_MASTER_KEY` | 无（**必填**） | 32 字节，AES-GCM 加密 AI key / SSH 凭据 / Bot Token。未设置时服务端拒绝启动 |
+| `FOBE_MASTER_KEY` | 无（**必填**） | 32 字节，AES-GCM 加密 AI key / Bot Token 等敏感设置。未设置时服务端拒绝启动 |
 | `FOBE_ADMIN_PASSWORD` | 无 | 管理员密码准绳：设置后每次启动同步为该值（变更会吊销全部旧会话）；未设置则不动现有密码 |
 | `FOBE_DB` | `/data/fobe.db` | SQLite 路径（放挂载卷，勿放容器层） |
 | `FOBE_WEB_DIR` | `/srv/web` | 前端 `dist` 目录 |
@@ -224,7 +224,7 @@ data/
 - **GeoIP 国别库从哪来**：`data/sqlite/geoip/GeoLite2-Country.mmdb`（容器内 `/data/geoip/`，跟 `fobe.db` 同一个挂载卷，随备份一起走）。服务端每天检查一次，文件超过「最长使用天数」（默认 7 天）就从免密钥镜像自动重新下载——**不需要 MaxMind 账号或 License Key**；设置页 GeoIP 区块能看状态与数据日期，也能点「立即更新」或直接「上传 MMDB」。下载与上传装的是同一个文件，**新库解析失败就拒绝替换**，旧库继续用；更新成功后立即生效，无需重启。
 - 恢复：停服 → 用快照替换 `data/sqlite/fobe.db` → 起服。
 - 探针节点无需重建：agent 用落盘的 machine-id 重连即复用原节点。
-- 换了 `FOBE_MASTER_KEY` = 已加密的 AI key / SSH 凭据 / Bot Token 全部失效，需要重填（节点与指标数据不受影响）。
+- 换了 `FOBE_MASTER_KEY` = 已加密的 AI key / Bot Token 等敏感设置全部失效，需要重填（节点与指标数据不受影响）。
 
 ## 构建与运行
 

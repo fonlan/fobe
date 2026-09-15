@@ -117,8 +117,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/nodes/{id}/latency", s.requireSession(s.handleNodeLatency))
 	mux.HandleFunc("GET /api/nodes/{id}/commands", s.requireSession(s.handleListCommands))
 	mux.HandleFunc("POST /api/nodes/{id}/commands", s.requireSession(s.handleEnqueueCommand))
-	mux.HandleFunc("GET /api/nodes/{id}/ssh", s.requireSession(s.handleGetNodeSSH))
-	mux.HandleFunc("PUT /api/nodes/{id}/ssh", s.requireSession(s.handlePutNodeSSH))
 
 	// registration tokens (add-node flow, §4.2)
 	mux.HandleFunc("GET /api/reg-tokens", s.requireSession(s.handleListRegTokens))
@@ -263,6 +261,10 @@ func writeErr(w http.ResponseWriter, status int, code string) {
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// Panel endpoints poll continuously; a cached 200 would freeze the UI on
+	// stale numbers without any visible error. Never let a browser or an
+	// intermediate proxy serve these from cache.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	enc := json.NewEncoder(w)
 	_ = enc.Encode(v)

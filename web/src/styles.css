@@ -249,6 +249,9 @@ section.card { margin-bottom: 0; }
 .icon-btn:disabled:hover { background: transparent; color: var(--text-dim); }
 .icon-btn.danger:hover:not(:disabled) { background: var(--red); color: #fff; }
 
+/* Settings → servers table: flag + name on one line */
+.server-name-cell { display: inline-flex; align-items: center; gap: 8px; }
+
 /* Row actions: keep the two per-row icons together and right-aligned, so a
    version row reads "version … [publish][delete]" at a glance. */
 .col-actions { text-align: right; white-space: nowrap; }

@@ -4,7 +4,7 @@ import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
 import Terminal, { type TerminalHandle } from '../components/Terminal';
-import type { AIToolCall, CommandRow, TerminalMode } from '../types';
+import type { AIToolCall, CommandRow } from '../types';
 
 interface ChatEntry {
   role: 'user' | 'assistant';
@@ -216,7 +216,6 @@ export default function TerminalPage() {
   const { id = '' } = useParams();
   const { t } = useI18n();
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [mode, setMode] = useState<TerminalMode>('ssh'); // design §11: SSH default
   const termRef = useRef<TerminalHandle | null>(null);
 
   if (!id) {
@@ -239,8 +238,6 @@ export default function TerminalPage() {
       <div className="terminal-workspace">
         <Terminal
           nodeId={id}
-          mode={mode}
-          onModeChange={setMode}
           onSessionChange={setSessionId}
           onReady={(handle) => { termRef.current = handle; }}
         />

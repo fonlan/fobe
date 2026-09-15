@@ -74,3 +74,12 @@ export function RetryIcon(props: IconProps) {
     </Base>
   );
 }
+
+/** Edit a server's settings. */
+export function PencilIcon(props: IconProps) {
+  return (
+    <Base {...props}>
+      <path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3zM14 7l3 3" />
+    </Base>
+  );
+}

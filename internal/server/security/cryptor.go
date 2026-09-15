@@ -9,7 +9,7 @@ import (
 )
 
 // Cryptor encrypts/decrypts settings values at rest with AES-256-GCM
-// (design §4.4: AI API keys, SSH credentials, bot tokens, template secrets).
+// (design §4.4: AI API keys, bot tokens, template secrets).
 type Cryptor struct {
 	aead cipher.AEAD
 }

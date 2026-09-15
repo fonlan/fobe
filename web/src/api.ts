@@ -15,8 +15,6 @@ import type {
   Me,
   MetricsSample,
   NodeDetailData,
-  NodeSSHUpdate,
-  NodeSSHView,
   NodeView,
   RegTokenInfo,
   RegTokenRow,
@@ -595,17 +593,7 @@ export function downloadSingboxVersion(version: string): Promise<SingboxDownload
   return request(`/api/singbox/versions/${encodeURIComponent(version)}/download`, { method: 'POST' });
 }
 
-// --- per-node SSH credentials (design §11; secrets are write-only) -----------
-
-export function getNodeSSH(id: string): Promise<NodeSSHView> {
-  return request(`/api/nodes/${encodeURIComponent(id)}/ssh`);
-}
-
-export function updateNodeSSH(id: string, body: NodeSSHUpdate): Promise<NodeSSHView> {
-  return request(`/api/nodes/${encodeURIComponent(id)}/ssh`, { method: 'PUT', body });
-}
-
-// --- terminal / AI placeholders ---------------------------------------------
+// --- terminal / AI -----------------------------------------------------------
 
 export function terminalWebSocketURL(nodeID: string): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';

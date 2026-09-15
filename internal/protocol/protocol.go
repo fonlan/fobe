@@ -209,18 +209,17 @@ type Cmd struct {
 }
 
 // Terminal frames (design §11). Server→agent open/input/resize/close;
-// agent→server output/closed. SessionID ties them to the browser socket.
+// agent→server output/closed. The agent opens its own local PTY, so no SSH
+// target or authentication data ever travels through this protocol.
+// SessionID ties frames to the browser socket.
 type TerminalOpen struct {
 	SessionID string `json:"session_id"`
-	Mode      string `json:"mode"` // ssh | pty
-	// SSH mode
-	Host     string `json:"host,omitempty"`
-	Port     int    `json:"port,omitempty"`
-	User     string `json:"user,omitempty"`
-	Password string `json:"password,omitempty"` // decrypted server-side just before send
-	PrivKey  string `json:"privkey,omitempty"`
-	Cols     int    `json:"cols"`
-	Rows     int    `json:"rows"`
+	// Mode remains on the v1 wire as "pty" for compatibility with agents
+	// released before Web Terminal replaced Web SSH. It is server-controlled;
+	// clients must not use it to select another terminal backend.
+	Mode string `json:"mode,omitempty"`
+	Cols int    `json:"cols"`
+	Rows int    `json:"rows"`
 }
 
 type TerminalInput struct {

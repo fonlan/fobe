@@ -434,9 +434,6 @@ export interface WsEvent {
 // session_id into payloads as frames pass through to the agent.
 export type TerminalEnvelopeType = 'terminal_open' | 'terminal_input' | 'terminal_resize' | 'terminal_close' | 'terminal_output' | 'terminal_closed';
 
-/** Terminal backend: SSH to the node's own sshd (default) or local PTY fallback. */
-export type TerminalMode = 'ssh' | 'pty';
-
 export interface TerminalEnvelope<TPayload = unknown> {
   v: number;
   type: TerminalEnvelopeType;
@@ -447,7 +444,6 @@ export interface TerminalEnvelope<TPayload = unknown> {
 
 export interface TerminalOpenPayload {
   session_id?: string;
-  mode: TerminalMode;
   cols: number;
   rows: number;
 }
@@ -475,27 +471,6 @@ export interface TerminalOutputPayload {
 export interface TerminalClosedPayload {
   session_id?: string;
   reason?: string;
-}
-
-// --- per-node SSH credentials (design §11; secrets are write-only) ---
-
-/** GET /api/nodes/{id}/ssh — never contains secret material. */
-export interface NodeSSHView {
-  user: string;
-  port: number;
-  password_set: boolean;
-  privkey_set: boolean;
-}
-
-/**
- * PUT /api/nodes/{id}/ssh — an omitted field or an empty string keeps the
- * stored value; the "!" prefix clears it; anything else replaces the secret.
- */
-export interface NodeSSHUpdate {
-  user?: string;
-  port?: number;
-  password?: string;
-  private_key?: string;
 }
 
 export interface AIChatRequest {

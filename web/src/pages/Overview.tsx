@@ -1,7 +1,12 @@
-// Overview: node card wall with live refresh via /ws/events (10s polling
-// fallback), plus the "add node" dialog (one-time reg token + install command).
+// Overview: the node card wall plus the "add node" dialog (one-time reg token
+// + install command). Live refresh has three cooperating pieces: /ws/events
+// for state changes, a 5s list poll for metric reports (they fire no event at
+// all), and the §16 5s agent probe stream — enabled here for every online node
+// so the wall ticks instead of waiting out the 60s base cadence. Probe mode and
+// polling both stop while the tab is hidden, so a forgotten tab cannot pin
+// every agent at 5s forever.
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
@@ -18,27 +23,68 @@ export default function Overview() {
   const [err, setErr] = useState<string | null>(null);
   const [addStep, setAddStep] = useState<AddStep>('closed');
 
+  /** Node ids currently switched to the 5s probe cadence. */
+  const probedRef = useRef<Set<string>>(new Set());
+
+  const syncProbe = useCallback((list: NodeView[]) => {
+    if (document.hidden) return;
+    const online = new Set(list.filter((n) => n.online).map((n) => n.id));
+    for (const id of online) {
+      if (probedRef.current.has(id)) continue;
+      probedRef.current.add(id);
+      api.probeMetrics(id, true).catch(() => {});
+    }
+    // Forget nodes that dropped offline: on reconnect they must be switched on
+    // again, otherwise they would silently sit on the 60s cadence.
+    for (const id of Array.from(probedRef.current)) {
+      if (online.has(id)) continue;
+      probedRef.current.delete(id);
+      api.probeMetrics(id, false).catch(() => {});
+    }
+  }, []);
+
   const load = useCallback(async () => {
     try {
       const r = await api.listNodes();
-      setNodes(r.nodes ?? []);
+      const list = r.nodes ?? [];
+      setNodes(list);
+      syncProbe(list);
       setErr(null);
     } catch (e) {
       setErr(apiErrorMessage(e, t));
     }
-  }, [t]);
+  }, [t, syncProbe]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  // live updates: push events when available, poll every 10s regardless
   useEffect(() => {
-    const close = api.openEvents(() => void load());
-    const timer = window.setInterval(() => void load(), 10000);
+    const tick = () => {
+      if (!document.hidden) void load();
+    };
+    const close = api.openEvents(tick);
+    const timer = window.setInterval(tick, 5000);
+    const onVisibility = () => {
+      if (document.hidden) {
+        // Hand every node back to its 60s cadence while nobody is looking.
+        for (const id of Array.from(probedRef.current)) {
+          probedRef.current.delete(id);
+          api.probeMetrics(id, false).catch(() => {});
+        }
+        return;
+      }
+      void load();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       close();
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      for (const id of Array.from(probedRef.current)) {
+        api.probeMetrics(id, false).catch(() => {});
+      }
+      probedRef.current.clear();
     };
   }, [load]);
 

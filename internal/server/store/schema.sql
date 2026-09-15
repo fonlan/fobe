@@ -203,18 +203,6 @@ CREATE TABLE IF NOT EXISTS node_singbox (
     updated_at       INTEGER NOT NULL DEFAULT 0
 );
 
--- Per-node SSH credentials for the SSH-mode web terminal (design §11).
--- password_enc / privkey_enc hold AES-GCM ciphertext produced by httpapi
--- (security.Cryptor); plaintext never reaches this table.
-CREATE TABLE IF NOT EXISTS node_ssh (
-    node_id      TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-    ssh_user     TEXT NOT NULL DEFAULT 'root',
-    ssh_port     INTEGER NOT NULL DEFAULT 22,
-    password_enc TEXT NOT NULL DEFAULT '',
-    privkey_enc  TEXT NOT NULL DEFAULT '',
-    updated_at   INTEGER NOT NULL DEFAULT 0
-);
-
 CREATE TABLE IF NOT EXISTS commands (
     id          TEXT PRIMARY KEY,
     node_id     TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,

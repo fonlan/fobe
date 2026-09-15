@@ -7,6 +7,8 @@ import ChangePassword from './pages/ChangePassword';
 import Overview from './pages/Overview';
 import NodeDetail from './pages/NodeDetail';
 import Targets from './pages/Targets';
+import Servers from './pages/Servers';
+import EditServer from './pages/EditServer';
 import Alerts from './pages/Alerts';
 import Settings from './pages/Settings';
 import Subscriptions from './pages/Subscriptions';
@@ -39,6 +41,8 @@ export default function App() {
           <Route path="/alerts" element={<Alerts />} />
           <Route path="/settings" element={<Settings />}>
             <Route path="targets" element={<Targets />} />
+            <Route path="servers" element={<Servers />} />
+            <Route path="servers/:id" element={<EditServer />} />
             <Route path="subscriptions" element={<Subscriptions />} />
           </Route>
           <Route path="/targets" element={<Navigate to="/settings/targets" replace />} />

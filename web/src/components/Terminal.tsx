@@ -7,15 +7,17 @@ import { useI18n } from '../i18n';
 import type {
   TerminalClosedPayload,
   TerminalEnvelope,
-  TerminalMode,
   TerminalOutputPayload,
 } from '../types';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'closed';
 
-/** Server-sent terminal_closed reasons that get a localized message. */
+/** Agent/server terminal close reasons that get a localized message. */
 const localizedReasons: Record<string, string> = {
-  ssh_credentials_missing: 'terminal_ssh_missing',
+  terminal_unsupported_mode: 'terminal_unsupported_mode',
+  terminal_invalid_size: 'terminal_invalid_size',
+  terminal_start_failed: 'terminal_start_failed',
+  terminal_exited: 'terminal_exited',
 };
 
 function isEnvelope(value: unknown): value is TerminalEnvelope {
@@ -35,16 +37,13 @@ function sizeFor(term: XTerm): { cols: number; rows: number } {
 export interface TerminalHandle {
   /** Write a raw string into the xterm buffer (used for AI command echo). */
   write: (text: string) => void;
-  /** Tear down the current session and open a fresh one with the chosen mode. */
+  /** Tear down the current session and open a fresh agent terminal. */
   reconnect: () => void;
 }
 
 export interface TerminalProps {
   nodeId: string;
   nodeLabel?: string;
-  /** Terminal backend; SSH (server-injected credentials) is the default. */
-  mode?: TerminalMode;
-  onModeChange?: (mode: TerminalMode) => void;
   onSessionChange?: (sessionId: string | null) => void;
   onReady?: (handle: TerminalHandle | null) => void;
 }
@@ -52,8 +51,6 @@ export interface TerminalProps {
 export default function Terminal({
   nodeId,
   nodeLabel,
-  mode = 'ssh',
-  onModeChange,
   onSessionChange,
   onReady,
 }: TerminalProps) {
@@ -140,7 +137,7 @@ export default function Terminal({
       setState('connected');
       setCloseReason(null);
       const { cols, rows } = sizeFor(terminal);
-      send(api.terminalEnvelope('terminal_open', { mode, cols, rows }));
+      send(api.terminalEnvelope('terminal_open', { cols, rows }));
       terminal.focus();
     };
     socket.onmessage = (event) => {
@@ -159,9 +156,8 @@ export default function Terminal({
         } else if (value.type === 'terminal_closed') {
           const payload = payloadRecord(value.payload) as TerminalClosedPayload;
           const rawReason = typeof payload.reason === 'string' ? payload.reason : null;
-          // Known reasons (e.g. missing SSH credentials) get a localized
-          // message; unknown ones are shown verbatim.
-          const reason = rawReason && localizedReasons[rawReason] ? t(localizedReasons[rawReason]) : rawReason;
+          // Never expose unexpected agent implementation errors in the UI.
+          const reason = rawReason && localizedReasons[rawReason] ? t(localizedReasons[rawReason]) : t('terminal_closed');
           setCloseReason(reason);
           setState('closed');
           if (payload.session_id) {
@@ -221,9 +217,8 @@ export default function Terminal({
       fitRef.current = null;
       terminal.dispose();
     };
-    // mode/epoch are intentional re-connect triggers (backend switch, manual
-    // reconnect); `t` only affects labels but is part of the closure above.
-  }, [nodeId, mode, epoch, t]);
+    // epoch is the explicit reconnect trigger; `t` supplies close messages.
+  }, [nodeId, epoch, t]);
 
   const stateLabel = state === 'connecting' ? t('terminal_connecting') : state === 'connected' ? t('terminal_connected') : state === 'closed' ? t('terminal_closed') : t('terminal_disconnected');
   const stateClass = state === 'connected' ? 'status-ok' : state === 'connecting' ? '' : 'status-failed';
@@ -237,19 +232,6 @@ export default function Terminal({
           <p className="hint">{nodeLabel || nodeId}</p>
         </div>
         <div className="terminal-head-controls">
-          {onModeChange && (
-            <label className="field inline terminal-mode-field">
-              <span>{t('terminal_mode')}</span>
-              <select
-                value={mode}
-                onChange={(e) => onModeChange(e.target.value as TerminalMode)}
-                aria-label={t('terminal_mode')}
-              >
-                <option value="ssh">{t('terminal_mode_ssh')}</option>
-                <option value="pty">{t('terminal_mode_pty')}</option>
-              </select>
-            </label>
-          )}
           <span className={`chip ${stateClass}`}>{stateLabel}</span>
         </div>
       </div>
