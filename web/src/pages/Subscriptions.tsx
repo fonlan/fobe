@@ -55,11 +55,6 @@ export default function Subscriptions() {
       <div className="page-head">
         <h2>{t('subs_title')}</h2>
       </div>
-      {/* §10.1 实现修订 2026-09-16: the global anytls password is generated and
-          owned by the server, so the panel has no field for it. This line is
-          here because the honest answer to "where do I set the password?" is
-          now "nowhere" — an operator who does not know that will hunt for it. */}
-      <p className="hint">{t('subs_anytls_password_hint')}</p>
       <RelayEntryCard onSaved={() => setRelayVersion((v) => v + 1)} />
       <SubscriptionsCard templates={templates} onToast={showToast} relayVersion={relayVersion} />
       <TemplatesCard templates={templates} loadError={tplErr} onReload={loadTemplates} />
@@ -275,7 +270,9 @@ function SubscriptionsCard({
               {subs.map((sub) => (
                 <tr key={sub.id} className={sub.enabled ? '' : 'row-muted'}>
                   <td>{sub.name}</td>
-                  <td>
+                  {/* nowrap: "Enabled"/"Disabled" is the tallest label in a
+                      narrow column; letting it wrap doubles the row height. */}
+                  <td className="nowrap">
                     <span className={'chip ' + (sub.enabled ? 'status-ok' : 'status-failed')}>
                       {sub.enabled ? t('sub_enabled') : t('sub_disabled')}
                     </span>
@@ -665,7 +662,6 @@ function RelayEntryCard({ onSaved }: { onSaved: () => void }) {
   return (
     <section className="card">
       <h3>{t('sub_relay_card')}</h3>
-      <p className="hint">{t('sub_relay_desc')}</p>
       {err && <div className="form-error">{err}</div>}
       <label className="check-chip" style={{ marginTop: 8 }}>
         <input
@@ -693,7 +689,6 @@ function RelayEntryCard({ onSaved }: { onSaved: () => void }) {
           }}
         />
         <small className="hint">{t('sub_relay_format_hint')}</small>
-        <small className="hint">{t('sub_relay_format_default', { format: DEFAULT_RELAY_FORMAT })}</small>
       </label>
       <div className="row-end">
         {saved && <span className="form-ok">{t('sub_relay_saved')}</span>}
