@@ -53,12 +53,20 @@ func addNode(t *testing.T, st *store.Store, id, name string) {
 type fakeNotifier struct {
 	name       string
 	configured bool
-	err        error
-	events     []notify.Event
+	// accepts is the §15 switch gate; nil means "accepts every event".
+	accepts func(notify.Event) bool
+	err     error
+	events  []notify.Event
 }
 
 func (f *fakeNotifier) Name() string     { return f.name }
 func (f *fakeNotifier) Configured() bool { return f.configured }
+func (f *fakeNotifier) Accepts(ev notify.Event) bool {
+	if f.accepts == nil {
+		return true
+	}
+	return f.accepts(ev)
+}
 func (f *fakeNotifier) Deliver(ev notify.Event) error {
 	if f.err != nil {
 		return f.err
@@ -306,6 +314,70 @@ func TestCheckBillingStageDedupeAndProgression(t *testing.T) {
 }
 
 // --- delivery (§15) ---
+
+// A channel that declines the event (channel switch or event-type switch off)
+// is not a retry candidate: the alert is retired so re-enabling the switch
+// cannot replay the silenced period.
+func TestDeliverAlertsSwitchedOffIsNotReplayed(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	offlineOnly := &fakeNotifier{
+		name:       "telegram",
+		configured: true,
+		accepts:    func(ev notify.Event) bool { return ev.Kind == "node_offline" },
+	}
+	s := New(st, testLogger(), "", 7, offlineOnly)
+
+	if _, _, err := st.CreateAlert("traffic_warn", "n1", `{"pct":85}`, 3600); err != nil {
+		t.Fatal(err)
+	}
+	s.deliverAlerts()
+
+	if len(offlineOnly.events) != 0 {
+		t.Fatalf("switched-off event was delivered: %+v", offlineOnly.events)
+	}
+	if undelivered, _ := st.UndeliveredAlerts(); len(undelivered) != 0 {
+		t.Fatalf("silenced alert left in the queue (would replay later): %+v", undelivered)
+	}
+}
+
+// One channel declining must not stop another from taking the same alert.
+func TestDeliverAlertsPartialAcceptance(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	declines := &fakeNotifier{name: "telegram", configured: true, accepts: func(notify.Event) bool { return false }}
+	takes := &fakeNotifier{name: "feishu", configured: true}
+	s := New(st, testLogger(), "", 7, declines, takes)
+
+	if _, _, err := st.CreateAlert("node_offline", "n1", "{}", 3600); err != nil {
+		t.Fatal(err)
+	}
+	s.deliverAlerts()
+
+	if len(declines.events) != 0 {
+		t.Fatalf("declining channel received the event")
+	}
+	if len(takes.events) != 1 {
+		t.Fatalf("accepting channel events = %d, want 1", len(takes.events))
+	}
+}
+
+// A delivery failure still keeps the alert queued for the next pass.
+func TestDeliverAlertsFailureStaysQueued(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	failing := &fakeNotifier{name: "telegram", configured: true, err: errors.New("boom")}
+	s := New(st, testLogger(), "", 7, failing)
+
+	if _, _, err := st.CreateAlert("node_offline", "n1", "{}", 3600); err != nil {
+		t.Fatal(err)
+	}
+	s.deliverAlerts()
+
+	if undelivered, _ := st.UndeliveredAlerts(); len(undelivered) != 1 {
+		t.Fatalf("failed alert should stay queued, got %+v", undelivered)
+	}
+}
 
 func TestDeliverAlertsMarksDelivered(t *testing.T) {
 	st := testStore(t)

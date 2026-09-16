@@ -9,7 +9,7 @@ import type {
   BlacklistRow,
   CommandRow,
   FeishuQRStatus,
-  FeishuTestResult,
+  NotifyTestResult,
   GeoIPStatus,
   GeoIPUpdateAccepted,
   ImportStats,
@@ -427,9 +427,9 @@ export function cancelFeishuQR(): Promise<FeishuQRStatus> {
   return request('/api/settings/feishu/qr', { method: 'DELETE' });
 }
 
-/** ok=false carries a code (+ upstream detail) the card renders inline. */
-export function testFeishu(): Promise<FeishuTestResult> {
-  return request('/api/settings/feishu/test', { method: 'POST' });
+/** ok=false carries a code (+ upstream detail) the channel card renders inline. */
+export function testChannel(channel: 'telegram' | 'feishu' | 'webhook'): Promise<NotifyTestResult> {
+  return request('/api/settings/notify/test', { method: 'POST', body: { channel } });
 }
 
 export function clearFeishuConfig(mode: 'app' | 'webhook'): Promise<{ ok: boolean }> {

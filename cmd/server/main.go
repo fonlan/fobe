@@ -177,6 +177,9 @@ func runServer() {
 		notify.NewWebhook(decryptSetting, notifyClient),
 		feishu,
 	}
+	// One notifier set, two consumers: the scheduler delivers with it and the
+	// notifications page's test button sends through the same instances.
+	api.Channels = channels
 	// §15 飞书扫码接入 (2026-09-16 修订): one shared Feishu channel + its
 	// registration manager. The Save closure persists the fresh app's
 	// credentials (secret encrypted at rest), pins the scanning user as the

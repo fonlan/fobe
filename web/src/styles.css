@@ -762,3 +762,18 @@ section.card { margin-bottom: 0; }
 .ai-text { margin: 0; white-space: pre-wrap; word-break: break-word; }
 .ai-tool { margin-top: 8px; display: grid; gap: 6px; justify-items: start; }
 .ai-tool .code-block { margin: 0; width: 100%; }
+
+/* §15 通知页 (2026-09-16): one row per event type, switch on the right. */
+.switch-list { display: flex; flex-direction: column; margin-top: 10px; }
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.switch-row:first-child { border-top: 0; }
+.switch-row-title { font-size: 14px; }
+.switch-row .hint { margin: 2px 0 0; }
+.switch-row .check-chip { flex: none; }

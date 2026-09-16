@@ -40,6 +40,13 @@ func (t *Telegram) Configured() bool {
 	return ok && strings.TrimSpace(chatID) != ""
 }
 
+// Accepts gates delivery on the channel switch plus the per-event-type switch.
+// The test button bypasses this (it calls Deliver directly): a channel can be
+// tried out before it is switched on.
+func (t *Telegram) Accepts(ev Event) bool {
+	return flagOn(t.Decrypt, KeyTelegramEnabled) && flagOn(t.Decrypt, EventSwitchKey(EventGroup(ev.Kind)))
+}
+
 func (t *Telegram) Deliver(ev Event) error {
 	if !t.Configured() {
 		return ErrNotConfigured

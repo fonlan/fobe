@@ -46,13 +46,31 @@ func (s *Server) handleFeishuQRCancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.FeishuReg.Cancel())
 }
 
-// handleFeishuTest fires one real message through the configured 飞书
-// sub-channel. The verdict (including the upstream's own message) comes back
-// as data so the operator sees *why* a send failed — a permissions problem on
-// a freshly scanned app looks very different from a wrong webhook signature.
-func (s *Server) handleFeishuTest(w http.ResponseWriter, r *http.Request) {
-	if s.Feishu == nil {
-		writeErr(w, http.StatusNotImplemented, "feishu_not_wired")
+// handleNotifyTest fires one real message through a named channel (§15).
+// The verdict (including the upstream's own message) comes back as data so the
+// operator sees *why* a send failed — a permissions problem on a freshly
+// scanned app looks very different from a wrong webhook signature.
+//
+// The channel switch is deliberately not consulted: trying a channel out
+// before switching it on is the point. Same for the event switches — the test
+// is its own event kind.
+func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Channel string `json:"channel"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	var target notify.Notifier
+	for _, n := range s.Channels {
+		if n.Name() == req.Channel {
+			target = n
+			break
+		}
+	}
+	if target == nil {
+		writeErr(w, http.StatusBadRequest, "unknown_channel")
 		return
 	}
 	ev := notify.Event{
@@ -60,17 +78,17 @@ func (s *Server) handleFeishuTest(w http.ResponseWriter, r *http.Request) {
 		Event:     notify.EventTest,
 		CreatedAt: time.Now().Unix(),
 	}
-	if err := s.Feishu.Deliver(ev); err != nil {
+	if err := target.Deliver(ev); err != nil {
 		if errors.Is(err, notify.ErrNotConfigured) {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "code": "feishu_not_configured"})
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "code": "notify_not_configured"})
 			return
 		}
 		detail := err.Error()
-		s.Log.Warn("feishu test send failed", "err", detail)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "code": "feishu_test_failed", "detail": detail})
+		s.Log.Warn("notification test send failed", "channel", req.Channel, "err", detail)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "code": "notify_test_failed", "detail": detail})
 		return
 	}
-	s.audit("feishu_test_sent", "", s.Trust.RealIP(r))
+	s.audit("notify_test_sent", req.Channel, s.Trust.RealIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

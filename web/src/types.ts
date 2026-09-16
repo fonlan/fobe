@@ -243,8 +243,8 @@ export interface FeishuQRStatus {
   error?: string;
 }
 
-/** POST /api/settings/feishu/test — ok=false carries the upstream reason. */
-export interface FeishuTestResult {
+/** POST /api/settings/notify/test — ok=false carries the upstream reason. */
+export interface NotifyTestResult {
   ok: boolean;
   code?: string;
   detail?: string;

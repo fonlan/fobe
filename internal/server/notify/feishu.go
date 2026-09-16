@@ -101,6 +101,11 @@ func (f *Feishu) SendText(text string) error {
 	return f.sendWebhook(strings.TrimSpace(url), text)
 }
 
+// Accepts gates delivery on the channel switch plus the per-event-type switch.
+func (f *Feishu) Accepts(ev Event) bool {
+	return flagOn(f.Decrypt, KeyFeishuEnabled) && flagOn(f.Decrypt, EventSwitchKey(EventGroup(ev.Kind)))
+}
+
 func (f *Feishu) Deliver(ev Event) error {
 	if !f.Configured() {
 		return ErrNotConfigured

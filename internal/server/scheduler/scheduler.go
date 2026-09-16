@@ -156,16 +156,21 @@ func (s *Scheduler) deliverAlerts() {
 	}
 }
 
-// deliverOne sends ev to every target; true only when at least one channel
-// got it and none of the configured ones failed (ErrNotConfigured channels
-// are skipped, not failed).
+// deliverOne sends ev to every target that accepts it. true means the alert
+// needs no further attempt: either at least one channel took it and none of
+// the accepting ones failed, or no channel wanted it at all (§15 event
+// switches). The second case matters: leaving a switched-off alert in the
+// queue would replay the whole silenced period the moment the switch goes back
+// on, which is never what "don't notify me about traffic" means.
 func (s *Scheduler) deliverOne(targets []notify.Notifier, ev notify.Event) bool {
-	sent, failed := 0, 0
+	failed := 0
 	for _, n := range targets {
+		if !n.Accepts(ev) {
+			continue // channel or event type switched off: intentional silence
+		}
 		err := n.Deliver(ev)
 		switch {
 		case err == nil:
-			sent++
 		case errors.Is(err, notify.ErrNotConfigured):
 			// channel lost its settings mid-pass; ignore
 		default:
@@ -174,7 +179,7 @@ func (s *Scheduler) deliverOne(targets []notify.Notifier, ev notify.Event) bool 
 				"node", ev.NodeID, "event", ev.Event, "err", err)
 		}
 	}
-	return sent > 0 && failed == 0
+	return failed == 0
 }
 
 func (s *Scheduler) nodeNames() map[string]string {

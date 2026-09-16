@@ -40,6 +40,11 @@ type webhookEvent struct {
 	Event     string          `json:"event"`
 }
 
+// Accepts gates delivery on the channel switch plus the per-event-type switch.
+func (w *Webhook) Accepts(ev Event) bool {
+	return flagOn(w.Decrypt, KeyWebhookEnabled) && flagOn(w.Decrypt, EventSwitchKey(EventGroup(ev.Kind)))
+}
+
 func (w *Webhook) Deliver(ev Event) error {
 	if !w.Configured() {
 		return ErrNotConfigured

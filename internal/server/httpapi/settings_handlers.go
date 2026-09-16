@@ -56,6 +56,11 @@ var allowedKeys = func() map[string]bool {
 		"notify.feishu_app_id", "notify.feishu_app_secret", "notify.feishu_receive_id",
 		"notify.feishu_bot_name", "notify.feishu_domain",
 		"notify.feishu_webhook_url", "notify.feishu_webhook_secret",
+		// §15 switches (2026-09-16, 通知独立成页): one per channel, one per
+		// event group. Unset = on, so only explicit choices are stored.
+		"notify.telegram_enabled", "notify.webhook_enabled", "notify.feishu_enabled",
+		"notify.event.node_status", "notify.event.traffic", "notify.event.billing",
+		"notify.event.singbox", "notify.event.updates", "notify.event.counter_reset",
 		"retention.metrics_days", "retention.latency_days",
 		"latency.interval_seconds",
 		"alert.traffic_warn_pct", "alert.traffic_crit_pct",
@@ -107,6 +112,15 @@ func validLatencyInterval(value string) bool {
 	return err == nil && seconds >= 1 && seconds <= 3600
 }
 
+// isNotifySwitch matches the per-channel and per-event-type switches of §15.
+func isNotifySwitch(key string) bool {
+	switch key {
+	case "notify.telegram_enabled", "notify.webhook_enabled", "notify.feishu_enabled":
+		return true
+	}
+	return strings.HasPrefix(key, "notify.event.")
+}
+
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	var req putSettingsReq
 	if err := decodeJSON(r, &req); err != nil {
@@ -141,6 +155,12 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		// §15 飞书 host selector; anything but the two known brands is refused.
 		if key == "notify.feishu_domain" && value != "feishu" && value != "lark" {
 			writeErr(w, http.StatusBadRequest, "bad_feishu_domain")
+			return
+		}
+		// §15 switches: like the §5.5 switch, an unparsable truthy value would
+		// silently mean "on", so refuse anything that is not a known spelling.
+		if isNotifySwitch(key) && !validBoolSetting(value) {
+			writeErr(w, http.StatusBadRequest, "bad_switch")
 			return
 		}
 		if key == "latency.interval_seconds" && !validLatencyInterval(value) {

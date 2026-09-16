@@ -204,3 +204,78 @@ func TestFeishuMessageTextTestEvent(t *testing.T) {
 		t.Fatalf("MessageText(test) = %q", got)
 	}
 }
+
+// --- §15 channel + event switches (2026-09-16 修订) ---
+
+func TestSwitchesDefaultOn(t *testing.T) {
+	// Unset switches must not silence a channel that was already delivering.
+	for _, key := range []string{KeyTelegramEnabled, KeyWebhookEnabled, KeyFeishuEnabled} {
+		if !flagOn(decoder(map[string]string{}), key) {
+			t.Fatalf("%s: unset switch should mean on", key)
+		}
+	}
+	for _, group := range EventGroups {
+		if !flagOn(decoder(map[string]string{}), EventSwitchKey(group)) {
+			t.Fatalf("event %s: unset switch should mean on", group)
+		}
+	}
+}
+
+func TestEventGroupMapping(t *testing.T) {
+	cases := map[string]string{
+		"node_offline":        GroupNodeStatus,
+		"traffic_warn":        GroupTraffic,
+		"traffic_crit":        GroupTraffic,
+		"billing_due":         GroupBilling,
+		"due_overdue":         GroupBilling,
+		"singbox_down":        GroupSingbox,
+		"singbox_rollback":    GroupSingbox,
+		"counter_reset":       GroupCounterReset,
+		"agent_update_failed": GroupUpdates, // unknown kinds stay switchable
+	}
+	for kind, want := range cases {
+		if got := EventGroup(kind); got != want {
+			t.Fatalf("EventGroup(%s) = %s, want %s", kind, got, want)
+		}
+	}
+}
+
+func TestFeishuAcceptsHonoursBothSwitches(t *testing.T) {
+	base := map[string]string{
+		KeyFeishuAppID: "cli_a", KeyFeishuAppSecret: "sec", KeyFeishuReceiveID: "ou_x",
+	}
+	ev := Event{Kind: "node_offline", Event: EventAlert}
+
+	// channel switch off: no delivery, but the channel is still "configured"
+	// (the panel's test button must keep working while a channel is parked).
+	off := newFeishu(mergeSettings(base, map[string]string{KeyFeishuEnabled: "0"}), "")
+	if off.Accepts(ev) {
+		t.Fatal("channel switch off must not accept")
+	}
+	if !off.Configured() {
+		t.Fatal("Configured must stay true: switching off is not unconfiguring")
+	}
+	// event switch off: only that group is muted.
+	evOff := newFeishu(mergeSettings(base, map[string]string{EventSwitchKey(GroupNodeStatus): "off"}), "")
+	if evOff.Accepts(ev) {
+		t.Fatal("event switch off must not accept this kind")
+	}
+	if !evOff.Accepts(Event{Kind: "traffic_warn"}) {
+		t.Fatal("other event groups must stay accepted")
+	}
+	// defaults: both unset → accepted.
+	if !newFeishu(base, "").Accepts(ev) {
+		t.Fatal("unset switches must accept")
+	}
+}
+
+func mergeSettings(base, over map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range over {
+		out[k] = v
+	}
+	return out
+}

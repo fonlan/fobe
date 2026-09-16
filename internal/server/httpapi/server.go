@@ -79,6 +79,9 @@ type Server struct {
 	// registration session. Both optional: the section degrades gracefully.
 	Feishu    *notify.Feishu
 	FeishuReg *feishureg.Manager
+	// Channels is the same notifier set the scheduler delivers with, used by
+	// the panel's test button (POST /api/settings/notify/test).
+	Channels []notify.Notifier
 
 	// events broker for /ws/events (live panel updates)
 	evMu   sync.Mutex
@@ -157,7 +160,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/feishu/qr", s.requireSession(s.handleFeishuQRStart))
 	mux.HandleFunc("GET /api/settings/feishu/qr", s.requireSession(s.handleFeishuQRStatus))
 	mux.HandleFunc("DELETE /api/settings/feishu/qr", s.requireSession(s.handleFeishuQRCancel))
-	mux.HandleFunc("POST /api/settings/feishu/test", s.requireSession(s.handleFeishuTest))
+	// §15 one test button per channel (body: {channel}), see handleNotifyTest.
+	mux.HandleFunc("POST /api/settings/notify/test", s.requireSession(s.handleNotifyTest))
 	mux.HandleFunc("DELETE /api/settings/feishu/config", s.requireSession(s.handleFeishuClear))
 	mux.HandleFunc("POST /api/ai/chat", s.requireSession(s.handleAIChat))
 	mux.HandleFunc("POST /api/ai/actions/{id}/confirm", s.requireSession(s.handleConfirmAIAction))
