@@ -172,64 +172,66 @@ function SubscriptionsCard() {
       {subs !== null && subs.length === 0 && <div className="hint" style={{ marginTop: 12 }}>{t('subs_empty')}</div>}
 
       {subs !== null && subs.length > 0 && (
-        <table className="table" style={{ marginTop: 12 }}>
-          <thead>
-            <tr>
-              <th>{t('name')}</th>
-              <th>{t('sub_status_col')}</th>
-              <th>{t('sub_nodes_col')}</th>
-              <th>{t('session_created')}</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {subs.map((sub) => (
-              <tr key={sub.id} className={sub.enabled ? '' : 'row-muted'}>
-                <td>{sub.name}</td>
-                <td>
-                  <span className={'chip ' + (sub.enabled ? 'status-ok' : 'status-failed')}>
-                    {sub.enabled ? t('sub_enabled') : t('sub_disabled')}
-                  </span>
-                </td>
-                <td className="mono">{sub.node_ids.length}</td>
-                <td className="mono nowrap">{fmtTime(sub.created_at)}</td>
-                <td className="nowrap">
-                  <button
-                    type="button"
-                    className="btn small"
-                    onClick={() => setExpanded(expanded === sub.id ? null : sub.id)}
-                  >
-                    {t('sub_nodes')}
-                  </button>{' '}
-                  <button
-                    type="button"
-                    className="btn small"
-                    onClick={() => setUaFor(uaFor === sub.id ? null : sub.id)}
-                    title={sub.ua_filter || undefined}
-                  >
-                    {t('sub_ua_filter')}
-                  </button>{' '}
-                  <button
-                    type="button"
-                    className="btn small"
-                    onClick={() => setAccessFor(accessFor === sub.id ? null : sub.id)}
-                  >
-                    {t('sub_access')}
-                  </button>{' '}
-                  <button type="button" className="btn small" onClick={() => void toggle(sub)}>
-                    {sub.enabled ? t('sub_disable') : t('sub_enable')}
-                  </button>{' '}
-                  <button type="button" className="btn small" onClick={() => setRotating(sub)}>
-                    {t('sub_rotate')}
-                  </button>{' '}
-                  <button type="button" className="btn danger small" onClick={() => setDeleting(sub)}>
-                    {t('delete')}
-                  </button>
-                </td>
+        <div className="table-wrap" style={{ marginTop: 12 }}>
+          <table className="table" style={{ marginTop: 12 }}>
+            <thead>
+              <tr>
+                <th>{t('name')}</th>
+                <th>{t('sub_status_col')}</th>
+                <th>{t('sub_nodes_col')}</th>
+                <th>{t('session_created')}</th>
+                <th />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {subs.map((sub) => (
+                <tr key={sub.id} className={sub.enabled ? '' : 'row-muted'}>
+                  <td>{sub.name}</td>
+                  <td>
+                    <span className={'chip ' + (sub.enabled ? 'status-ok' : 'status-failed')}>
+                      {sub.enabled ? t('sub_enabled') : t('sub_disabled')}
+                    </span>
+                  </td>
+                  <td className="mono">{sub.node_ids.length}</td>
+                  <td className="mono nowrap">{fmtTime(sub.created_at)}</td>
+                  <td className="nowrap">
+                    <button
+                      type="button"
+                      className="btn small"
+                      onClick={() => setExpanded(expanded === sub.id ? null : sub.id)}
+                    >
+                      {t('sub_nodes')}
+                    </button>{' '}
+                    <button
+                      type="button"
+                      className="btn small"
+                      onClick={() => setUaFor(uaFor === sub.id ? null : sub.id)}
+                      title={sub.ua_filter || undefined}
+                    >
+                      {t('sub_ua_filter')}
+                    </button>{' '}
+                    <button
+                      type="button"
+                      className="btn small"
+                      onClick={() => setAccessFor(accessFor === sub.id ? null : sub.id)}
+                    >
+                      {t('sub_access')}
+                    </button>{' '}
+                    <button type="button" className="btn small" onClick={() => void toggle(sub)}>
+                      {sub.enabled ? t('sub_disable') : t('sub_enable')}
+                    </button>{' '}
+                    <button type="button" className="btn small" onClick={() => setRotating(sub)}>
+                      {t('sub_rotate')}
+                    </button>{' '}
+                    <button type="button" className="btn danger small" onClick={() => setDeleting(sub)}>
+                      {t('delete')}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {subs?.map((sub) =>
@@ -366,26 +368,28 @@ function AccessLog({ subId }: { subId: string }) {
       {err && <div className="form-error">{err}</div>}
       {logs !== null && logs.length === 0 && <div className="hint">{t('sub_access_empty')}</div>}
       {logs !== null && logs.length > 0 && (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>{t('audit_time')}</th>
-              <th>{t('session_ip')}</th>
-              <th>{t('session_ua')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {logs.map((l, i) => (
-              <tr key={i}>
-                <td className="mono nowrap">{fmtTime(l.ts)}</td>
-                <td className="mono">{l.ip}</td>
-                <td className="ua-cell" title={l.ua}>
-                  {l.ua || '-'}
-                </td>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('audit_time')}</th>
+                <th>{t('session_ip')}</th>
+                <th>{t('session_ua')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {logs.map((l, i) => (
+                <tr key={i}>
+                  <td className="mono nowrap">{fmtTime(l.ts)}</td>
+                  <td className="mono">{l.ip}</td>
+                  <td className="ua-cell" title={l.ua}>
+                    {l.ua || '-'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
@@ -482,35 +486,37 @@ function TemplatesCard() {
 
       {templates !== null && templates.length === 0 && <div className="hint">{t('tpl_empty')}</div>}
       {templates !== null && templates.length > 0 && (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>{t('name')}</th>
-              <th>{t('tpl_format')}</th>
-              <th>{t('audit_time')}</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {templates.map((tpl) => (
-              <tr key={tpl.id}>
-                <td>{tpl.name}</td>
-                <td>
-                  <span className="chip">{tpl.format}</span>
-                </td>
-                <td className="mono nowrap">{fmtTime(tpl.updated_at || tpl.created_at)}</td>
-                <td className="nowrap">
-                  <button type="button" className="btn small" onClick={() => openEdit(tpl)}>
-                    {t('tpl_edit')}
-                  </button>{' '}
-                  <button type="button" className="btn danger small" onClick={() => setDeleting(tpl)}>
-                    {t('delete')}
-                  </button>
-                </td>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('name')}</th>
+                <th>{t('tpl_format')}</th>
+                <th>{t('audit_time')}</th>
+                <th />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {templates.map((tpl) => (
+                <tr key={tpl.id}>
+                  <td>{tpl.name}</td>
+                  <td>
+                    <span className="chip">{tpl.format}</span>
+                  </td>
+                  <td className="mono nowrap">{fmtTime(tpl.updated_at || tpl.created_at)}</td>
+                  <td className="nowrap">
+                    <button type="button" className="btn small" onClick={() => openEdit(tpl)}>
+                      {t('tpl_edit')}
+                    </button>{' '}
+                    <button type="button" className="btn danger small" onClick={() => setDeleting(tpl)}>
+                      {t('delete')}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {editing && (

@@ -20,6 +20,23 @@ function SettingsIcon() {
   );
 }
 
+function GlobeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="btn-icon" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M3 12h18 M12 3c2.7 2.4 4.2 5.5 4.2 9S14.7 18.6 12 21c-2.7-2.4-4.2-5.5-4.2-9S9.3 5.4 12 3z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function LogoutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="btn-icon" aria-hidden="true">
+      <path d="M9 21H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3 M16 17l5-5-5-5 M21 12H9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export default function Layout() {
   const { t, locale, setLocale } = useI18n();
   const { mode, setMode, resolved } = useTheme();
@@ -63,10 +80,11 @@ export default function Layout() {
               <SettingsIcon />
               <span className="btn-text">{t('nav_settings')}</span>
             </NavLink>
-            <button type="button" className="btn ghost small" onClick={toggleLang} title={t('language')}>
-              {locale === 'zh-CN' ? 'EN' : '中文'}
+            <button type="button" className="btn ghost small" onClick={toggleLang} title={t('language')} aria-label={t('language')}>
+              <GlobeIcon />
+              <span className="btn-text">{locale === 'zh-CN' ? 'EN' : '中文'}</span>
             </button>
-            <button type="button" className="btn ghost small theme-control" onClick={toggleTheme} title={t('theme')}>
+            <button type="button" className="btn ghost small theme-control" onClick={toggleTheme} title={t('theme')} aria-label={t('theme')}>
               {resolved === 'dark' ? (
                 <svg viewBox="0 0 24 24" className="btn-icon" aria-hidden="true">
                   <path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -79,8 +97,9 @@ export default function Layout() {
               )}
               <span className="btn-text">{themeLabel}</span>
             </button>
-            <button type="button" className="btn ghost small" onClick={() => void doLogout()}>
-              {t('logout')}
+            <button type="button" className="btn ghost small" onClick={() => void doLogout()} title={t('logout')} aria-label={t('logout')}>
+              <LogoutIcon />
+              <span className="btn-text">{t('logout')}</span>
             </button>
           </div>
         </header>

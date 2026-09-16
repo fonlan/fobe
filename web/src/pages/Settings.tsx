@@ -739,95 +739,97 @@ function SingboxCacheCard() {
         </div>
       )}
 
-      <table className="table" style={{ marginTop: 12 }}>
-        <thead>
-          <tr>
-            <th>{t('sb_cache_col_version')}</th>
-            <th>{t('sb_cache_col_size')}</th>
-            <th>{t('sb_cache_col_downloaded')}</th>
-            <th>{t('sb_cache_col_refs')}</th>
-            <th className="col-actions" />
-          </tr>
-        </thead>
-        <tbody>
-          {dlIsRow && download && (
-            <tr key={'dl-' + dlVersion} className="row-downloading">
-              <td className="mono nowrap">
-                {dlVersion}
-                <span className={'chip' + (download.phase === 'failed' ? ' status-failed' : ' primary-chip')}>
-                  {download.phase === 'failed' ? t('sb_cache_download_failed') : t('sb_cache_downloading')}
-                </span>
-              </td>
-              <td colSpan={3}>
-                {download.phase === 'failed' ? (
-                  <span className="form-error mono">{download.error || t('err_internal')}</span>
-                ) : (
-                  <ProgressBar
-                    tone="plain"
-                    label={label('sb_download_phase_', download.phase ?? '')}
-                    pct={dlPercent}
-                    text={dlText}
-                  />
-                )}
-              </td>
-              <td className="nowrap col-actions">
-                {download.phase === 'failed' && (
+      <div className="table-wrap" style={{ marginTop: 12 }}>
+        <table className="table" style={{ marginTop: 12 }}>
+          <thead>
+            <tr>
+              <th>{t('sb_cache_col_version')}</th>
+              <th>{t('sb_cache_col_size')}</th>
+              <th>{t('sb_cache_col_downloaded')}</th>
+              <th>{t('sb_cache_col_refs')}</th>
+              <th className="col-actions" />
+            </tr>
+          </thead>
+          <tbody>
+            {dlIsRow && download && (
+              <tr key={'dl-' + dlVersion} className="row-downloading">
+                <td className="mono nowrap">
+                  {dlVersion}
+                  <span className={'chip' + (download.phase === 'failed' ? ' status-failed' : ' primary-chip')}>
+                    {download.phase === 'failed' ? t('sb_cache_download_failed') : t('sb_cache_downloading')}
+                  </span>
+                </td>
+                <td colSpan={3}>
+                  {download.phase === 'failed' ? (
+                    <span className="form-error mono">{download.error || t('err_internal')}</span>
+                  ) : (
+                    <ProgressBar
+                      tone="plain"
+                      label={label('sb_download_phase_', download.phase ?? '')}
+                      pct={dlPercent}
+                      text={dlText}
+                    />
+                  )}
+                </td>
+                <td className="nowrap col-actions">
+                  {download.phase === 'failed' && (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title={t('sb_cache_download_retry')}
+                      aria-label={t('sb_cache_download_retry')}
+                      disabled={busy || downloadActive}
+                      onClick={() => void startDownload(dlVersion)}
+                    >
+                      <RetryIcon />
+                    </button>
+                  )}
+                </td>
+              </tr>
+            )}
+            {versions.map((v) => (
+              <tr key={v.version}>
+                <td className="mono nowrap">
+                  {v.version}
+                  {v.is_latest && <span className="chip primary-chip">{t('sb_cache_latest')}</span>}
+                </td>
+                <td className="mono nowrap">{fmtBytes(v.size)}</td>
+                <td className="mono nowrap">{fmtTime(v.downloaded_at)}</td>
+                <td className="mono">{v.refs}</td>
+                <td className="nowrap col-actions">
                   <button
                     type="button"
                     className="icon-btn"
-                    title={t('sb_cache_download_retry')}
-                    aria-label={t('sb_cache_download_retry')}
-                    disabled={busy || downloadActive}
-                    onClick={() => void startDownload(dlVersion)}
+                    title={t('sb_cache_publish_title', { version: v.version })}
+                    aria-label={t('sb_cache_publish_title', { version: v.version })}
+                    disabled={busy || impactBusy || downloadActive || jobRunning}
+                    onClick={() => void checkImpact(v.version)}
                   >
-                    <RetryIcon />
+                    <PublishIcon />
                   </button>
-                )}
-              </td>
-            </tr>
-          )}
-          {versions.map((v) => (
-            <tr key={v.version}>
-              <td className="mono nowrap">
-                {v.version}
-                {v.is_latest && <span className="chip primary-chip">{t('sb_cache_latest')}</span>}
-              </td>
-              <td className="mono nowrap">{fmtBytes(v.size)}</td>
-              <td className="mono nowrap">{fmtTime(v.downloaded_at)}</td>
-              <td className="mono">{v.refs}</td>
-              <td className="nowrap col-actions">
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title={t('sb_cache_publish_title', { version: v.version })}
-                  aria-label={t('sb_cache_publish_title', { version: v.version })}
-                  disabled={busy || impactBusy || downloadActive || jobRunning}
-                  onClick={() => void checkImpact(v.version)}
-                >
-                  <PublishIcon />
-                </button>
-                <button
-                  type="button"
-                  className="icon-btn danger"
-                  title={t('sb_cache_delete_title', { version: v.version })}
-                  aria-label={t('sb_cache_delete_title', { version: v.version })}
-                  disabled={busy}
-                  onClick={() => void delVersion(v)}
-                >
-                  <TrashIcon />
-                </button>
-              </td>
-            </tr>
-          ))}
-          {versions.length === 0 && !dlIsRow && (
-            <tr>
-              <td colSpan={5} className="hint">
-                {t('sb_cache_empty')}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+                  <button
+                    type="button"
+                    className="icon-btn danger"
+                    title={t('sb_cache_delete_title', { version: v.version })}
+                    aria-label={t('sb_cache_delete_title', { version: v.version })}
+                    disabled={busy}
+                    onClick={() => void delVersion(v)}
+                  >
+                    <TrashIcon />
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {versions.length === 0 && !dlIsRow && (
+              <tr>
+                <td colSpan={5} className="hint">
+                  {t('sb_cache_empty')}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       <div className="row-wrap" style={{ marginTop: 12 }}>
         <label className="field inline">
@@ -979,36 +981,38 @@ function SingboxJobView({
         <div className="form-error">{t('sb_update_stale', { nodes: job.stale.join(', ') })}</div>
       )}
       {job.nodes.length > 0 && (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>{t('name')}</th>
-              <th>{t('sb_current')}</th>
-              <th>{t('alert_status')}</th>
-              <th>{t('audit_detail')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {job.nodes.map((n) => (
-              <tr key={n.node_id}>
-                <td>
-                  {n.name || n.node_id}
-                  <span className="hint mono"> {n.node_id}</span>
-                </td>
-                <td className="mono">{n.version || '-'}</td>
-                <td className="nowrap">
-                  <span className={outcomeCls(n.outcome)}>{label('sb_update_outcome_', n.outcome)}</span>
-                  {job.convergence_checked && n.converged !== undefined && (
-                    <span className={'chip' + (n.converged ? ' status-ok' : ' status-failed')}>
-                      {n.converged ? t('sb_update_converged') : t('sb_update_not_converged')}
-                    </span>
-                  )}
-                </td>
-                <td>{n.reason || '-'}</td>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('name')}</th>
+                <th>{t('sb_current')}</th>
+                <th>{t('alert_status')}</th>
+                <th>{t('audit_detail')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {job.nodes.map((n) => (
+                <tr key={n.node_id}>
+                  <td>
+                    {n.name || n.node_id}
+                    <span className="hint mono"> {n.node_id}</span>
+                  </td>
+                  <td className="mono">{n.version || '-'}</td>
+                  <td className="nowrap">
+                    <span className={outcomeCls(n.outcome)}>{label('sb_update_outcome_', n.outcome)}</span>
+                    {job.convergence_checked && n.converged !== undefined && (
+                      <span className={'chip' + (n.converged ? ' status-ok' : ' status-failed')}>
+                        {n.converged ? t('sb_update_converged') : t('sb_update_not_converged')}
+                      </span>
+                    )}
+                  </td>
+                  <td>{n.reason || '-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
       {job.state === 'done' && !job.convergence_checked && (
         <div className="hint">{t('sb_update_unchecked')}</div>
@@ -1325,38 +1329,40 @@ function BlacklistCard() {
       {err && <div className="form-error">{err}</div>}
       {entries !== null && entries.length === 0 && <div className="hint">{t('blacklist_empty')}</div>}
       {entries !== null && entries.length > 0 && (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>{t('session_ip')}</th>
-              <th>{t('fail_count')}</th>
-              <th>{t('audit_detail')}</th>
-              <th>{t('audit_time')}</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {entries.map((e) => {
-              const active = e.expires_at > 0;
-              return (
-                <tr key={e.ip}>
-                  <td className="mono">{e.ip}</td>
-                  <td className="mono">{e.fail_count}</td>
-                  <td>
-                    {active ? t('blocked_until', { time: fmtTime(e.expires_at) }) : t('counter_only')}
-                    {e.reason ? ` · ${e.reason}` : ''}
-                  </td>
-                  <td className="mono nowrap">{fmtTime(e.created_at)}</td>
-                  <td className="nowrap">
-                    <button type="button" className="btn small" onClick={() => void unblock(e.ip)}>
-                      {t('unblock')}
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('session_ip')}</th>
+                <th>{t('fail_count')}</th>
+                <th>{t('audit_detail')}</th>
+                <th>{t('audit_time')}</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => {
+                const active = e.expires_at > 0;
+                return (
+                  <tr key={e.ip}>
+                    <td className="mono">{e.ip}</td>
+                    <td className="mono">{e.fail_count}</td>
+                    <td>
+                      {active ? t('blocked_until', { time: fmtTime(e.expires_at) }) : t('counter_only')}
+                      {e.reason ? ` · ${e.reason}` : ''}
+                    </td>
+                    <td className="mono nowrap">{fmtTime(e.created_at)}</td>
+                    <td className="nowrap">
+                      <button type="button" className="btn small" onClick={() => void unblock(e.ip)}>
+                        {t('unblock')}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );
@@ -1404,30 +1410,32 @@ function SessionsCard() {
       {err && <div className="form-error">{err}</div>}
       {sessions !== null && sessions.length === 0 && <div className="hint">{t('sessions_empty')}</div>}
       {sessions !== null && sessions.length > 0 && (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>{t('session_ip')}</th>
-              <th>{t('session_created')}</th>
-              <th>{t('session_last_seen')}</th>
-              <th>{t('session_ua')}</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {sessions.map((s) => (
-              <tr key={s.id} className={s.revoked ? 'row-muted' : ''}>
-                <td className="mono">{s.ip}</td>
-                <td className="mono nowrap">{fmtTime(s.created_at)}</td>
-                <td className="mono nowrap">{fmtTime(s.last_seen)}</td>
-                <td className="ua-cell" title={s.ua}>
-                  {s.ua}
-                </td>
-                <td>{s.revoked && <span className="chip">{t('session_revoked')}</span>}</td>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('session_ip')}</th>
+                <th>{t('session_created')}</th>
+                <th>{t('session_last_seen')}</th>
+                <th>{t('session_ua')}</th>
+                <th />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {sessions.map((s) => (
+                <tr key={s.id} className={s.revoked ? 'row-muted' : ''}>
+                  <td className="mono">{s.ip}</td>
+                  <td className="mono nowrap">{fmtTime(s.created_at)}</td>
+                  <td className="mono nowrap">{fmtTime(s.last_seen)}</td>
+                  <td className="ua-cell" title={s.ua}>
+                    {s.ua}
+                  </td>
+                  <td>{s.revoked && <span className="chip">{t('session_revoked')}</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );
@@ -1458,35 +1466,37 @@ function AuditCard() {
       {err && <div className="form-error">{err}</div>}
       {entries !== null && entries.length === 0 && <div className="hint">{t('audit_empty')}</div>}
       {entries !== null && entries.length > 0 && (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>{t('audit_time')}</th>
-              <th>{t('audit_actor')}</th>
-              <th>{t('audit_action')}</th>
-              <th>{t('audit_node')}</th>
-              <th>{t('audit_detail')}</th>
-              <th>{t('audit_source')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {entries.map((e, i) => (
-              <tr key={i}>
-                <td className="mono nowrap">{fmtTime(e.ts)}</td>
-                <td>{e.actor}</td>
-                <td>
-                  <span className="chip">{e.action}</span>
-                  {e.risk === 'risky' && <span className="chip status-failed">risky</span>}
-                </td>
-                <td className="mono">{e.node_id || '-'}</td>
-                <td className="detail-cell" title={e.command}>
-                  {e.command || '-'}
-                </td>
-                <td className="mono">{e.source_ip || '-'}</td>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('audit_time')}</th>
+                <th>{t('audit_actor')}</th>
+                <th>{t('audit_action')}</th>
+                <th>{t('audit_node')}</th>
+                <th>{t('audit_detail')}</th>
+                <th>{t('audit_source')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {entries.map((e, i) => (
+                <tr key={i}>
+                  <td className="mono nowrap">{fmtTime(e.ts)}</td>
+                  <td>{e.actor}</td>
+                  <td>
+                    <span className="chip">{e.action}</span>
+                    {e.risk === 'risky' && <span className="chip status-failed">risky</span>}
+                  </td>
+                  <td className="mono">{e.node_id || '-'}</td>
+                  <td className="detail-cell" title={e.command}>
+                    {e.command || '-'}
+                  </td>
+                  <td className="mono">{e.source_ip || '-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

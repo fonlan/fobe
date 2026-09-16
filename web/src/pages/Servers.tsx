@@ -100,7 +100,7 @@ export default function Servers() {
                     {n.name || n.hostname || n.id}
                   </span>
                 </td>
-                <td>
+                <td className="nowrap">
                   <span className={'dot ' + (n.online ? 'on' : 'off')} title={t(n.online ? 'online' : 'offline')} />
                   <span className="status-label">{t(n.online ? 'online' : 'offline')}</span>
                 </td>

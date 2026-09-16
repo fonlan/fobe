@@ -70,6 +70,11 @@ a:hover { text-decoration: underline; }
 
 .mono { font-family: var(--mono); font-size: 0.95em; }
 .nowrap { white-space: nowrap; }
+/* Long unbreakable values (IPv6, paths) in table cells must wrap in place
+   instead of pushing the whole auto-layout table past the card edge. Use
+   "anywhere", not "break-word": only "anywhere" also shrinks the min-content
+   width, which is what auto table layout actually sizes columns from. */
+.break-anywhere { overflow-wrap: anywhere; }
 .hint { color: var(--text-dim); font-size: 13px; margin: 4px 0; }
 
 /* --- shell layout ---------------------------------------------------------- */
@@ -127,6 +132,15 @@ a:hover { text-decoration: underline; }
 @media (max-width: 880px) {
   .content { padding: 16px; }
   .topbar { padding: 8px 16px; }
+}
+
+/* 手机竖屏:顶栏按钮收成纯图标(文案仍在 title/aria-label 里),并禁止
+   actions 换行——sticky topbar 的高度由这一行决定,换行就会把整页内容往下顶。 */
+@media (max-width: 640px) and (orientation: portrait) {
+  .topbar { gap: 8px; }
+  .topbar-actions { flex-wrap: nowrap; gap: 4px; }
+  .topbar-actions .btn { flex: 0 0 auto; padding: 4px 8px; }
+  .topbar-actions .btn-text { display: none; }
 }
 
 /* --- cards, page head ------------------------------------------------------ */
@@ -439,6 +453,11 @@ section.card { margin-bottom: 0; }
 .table tbody tr:last-child td { border-bottom: none; }
 
 .table.card { padding: 6px 10px; overflow-x: auto; }
+
+/* A plain .table inside a section card has no scroll owner (the card neither
+   clips nor scrolls), so wide rows — audit log, UA strings, mono values —
+   paint past the card edge. The wrapper owns the horizontal scroll instead. */
+.table-wrap { overflow-x: auto; }
 
 .chip {
   display: inline-block;

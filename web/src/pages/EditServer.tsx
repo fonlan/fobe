@@ -552,7 +552,7 @@ function IPList({ data, onChanged }: { data: NodeDetailData; onChanged: () => vo
         <tbody>
           {data.ips.map((ip) => (
             <tr key={ip.ip}>
-              <td className="mono">{ip.ip}</td>
+              <td className="mono break-anywhere">{ip.ip}</td>
               <td>{ip.family}</td>
               <td>{ip.scope}</td>
               <td>
