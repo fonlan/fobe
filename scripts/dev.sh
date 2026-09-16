@@ -71,6 +71,21 @@ export FOBE_AGENT_UPDATE_STAGGER="${FOBE_AGENT_UPDATE_STAGGER:-1s}"
 # 留空 FOBE_WEB_DIR → API-only 模式:server 的 / 提示去访问 Vite(§16)
 unset FOBE_WEB_DIR || true
 
+# agent 为体积编译(design §17):strip + trimpath + 空 buildid,有 upx 再压一道(实测
+# 7.15MB → 2.26MB)。压缩必须发生在取哈希/写 .sha256 之前,否则"一个版本号"会对应两份
+# 字节,sha256 校验就会在探针上失败。GOAMD64 一律钉 v1:探针的 CPU 是什么我们不知道,
+# v2/v3 在老机器上是 SIGILL,也就是探针掉线。
+UPX=""
+if [ "${FOBE_AGENT_UPX:-1}" = "0" ]; then
+    echo "dev.sh: FOBE_AGENT_UPX=0,agent 产物不压缩"
+elif command -v upx >/dev/null 2>&1; then
+    UPX="upx -q --best --lzma"
+else
+    echo "dev.sh: 未找到 upx,agent 产物不压缩(发布镜像默认压;brew install upx 即与发布一致)"
+fi
+pack_agent() { [ -z "$UPX" ] || $UPX "$1"; }
+AGENT_LDFLAGS="-s -w -buildid="
+
 # agent 的内容寻址版本号(§5.5)。先用固定占位版本交叉编译一份 agent,再对这份产物取哈希——
 # 版本号因此反映"agent 真正编出来的东西",不需要维护一张"哪些源码算 agent"的清单(清单漏一个
 # 目录,症状是改了代码却不换号:探针永远停在旧二进制,而面板一路显示"已收敛",比时间戳方案更难
@@ -78,9 +93,11 @@ unset FOBE_WEB_DIR || true
 # 于是"没改 agent 就重启 dev.sh"不会产生新版本、不会让局域网探针白下一次 10MB。
 agent_version() {
     mkdir -p "$FOBE_DL_DIR/.agent-fp"
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-        -ldflags "-s -w -X github.com/fonlan/fobe/internal/agent.Version=$AGENT_PENDING_VERSION" \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 go build -trimpath \
+        -ldflags "$AGENT_LDFLAGS -X github.com/fonlan/fobe/internal/agent.Version=$AGENT_PENDING_VERSION" \
         -o "$FOBE_DL_DIR/.agent-fp/linux-amd64" ./cmd/agent
+    # 与真产物走同一套打包步骤,所以 upx 的版本/开关一变,版本号也跟着变。
+    pack_agent "$FOBE_DL_DIR/.agent-fp/linux-amd64"
     local fp
     fp="$(shasum -a 256 "$FOBE_DL_DIR/.agent-fp/linux-amd64" | cut -c1-12)"
     # IsReleaseVersion 要求版本号里含数字;十六进制哈希全字母的概率极低但存在,补一位更省心。
@@ -128,15 +145,20 @@ elif [ -s "$AGENT_DIR/linux-amd64" ] && [ -s "$AGENT_DIR/linux-amd64.sha256" ]; 
 else
     echo "dev.sh: 编译 agent $VERSION (linux/amd64) ..."
     mkdir -p "$AGENT_DIR"
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-        -ldflags "-s -w -X github.com/fonlan/fobe/internal/agent.Version=$VERSION" \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 go build -trimpath \
+        -ldflags "$AGENT_LDFLAGS -X github.com/fonlan/fobe/internal/agent.Version=$VERSION" \
         -o "$AGENT_DIR/linux-amd64" ./cmd/agent
+    pack_agent "$AGENT_DIR/linux-amd64"
     ( cd "$AGENT_DIR" && shasum -a 256 linux-amd64 > linux-amd64.sha256 )
 fi
 
-# 先编译再运行:kill 的是真正的 server 进程,go run 会留孤儿
-echo "dev.sh: 编译 server ..."
-go build -ldflags "-X main.version=$VERSION" -o "$FOBE_DL_DIR/.dev-server" ./cmd/server
+# 先编译再运行:kill 的是真正的 server 进程,go run 会留孤儿。
+# server 为速度编译(design §17):保留 DWARF(pprof 要靠符号,-s -w 对速度没有任何
+# 影响),并吃 cmd/server/default.pgo 这份 PGO 剖面(-pgo=auto 是 go 的默认行为,
+# 显式写出来是为了让"这份 profile 真的被用上"在脚本里可见)。热点漂移后用
+# scripts/pgo.sh 重采。
+echo "dev.sh: 编译 server (PGO) ..."
+go build -trimpath -pgo=auto -ldflags "-X main.version=$VERSION" -o "$FOBE_DL_DIR/.dev-server" ./cmd/server
 "$FOBE_DL_DIR/.dev-server" &
 BACKEND_PID=$!
 

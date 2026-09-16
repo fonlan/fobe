@@ -22,12 +22,27 @@ RUN npm run build
 
 FROM golang:1.25-alpine AS build
 WORKDIR /src
-RUN apk add --no-cache git
+# git: module fetches; upx: packs the agent artifact (see AGENT_UPX). Both are
+# build-time only — the runtime image gets neither.
+RUN apk add --no-cache git upx
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 ARG VERSION=dev
+# Build profile (design §17): the agent is built for SIZE — it is downloaded to
+# every probe on each §5.5 self-update and lives in router flash — while the
+# server is built for SPEED. The two flag sets therefore differ on purpose.
+#   AGENT_UPX=0     skip UPX packing (larger artifact, no packer in the chain)
+#   SERVER_GOAMD64  v1 runs on any x86-64; v2/v3 buy a few percent on newer
+#                   CPUs. NEVER raise it for the agent: the probes' CPUs are
+#                   unknown and SIGILL on a probe means an offline node.
+# The server keeps DWARF (-s -w is *not* applied): pprof needs the symbols and
+# stripping does nothing for runtime speed. It also consumes a PGO profile
+# automatically — `-pgo=auto` is the go default and cmd/server/default.pgo
+# ships in the context (scripts/pgo.sh produces it).
+ARG AGENT_UPX=1
+ARG SERVER_GOAMD64=v1
 # A placeholder VERSION ("", dev, compose — the shapes IsReleaseVersion rejects)
 # is replaced by a content-addressed build id, mirroring scripts/dev.sh (design
 # §5.5 / §227): fingerprint a placeholder agent build, take the first 12 hex
@@ -42,23 +57,34 @@ ARG VERSION=dev
 # names into the RUN text at parse time, so reassigning VERSION in the shell
 # cannot affect the already-substituted occurrences below.
 RUN set -eu; \
+    UPX=""; \
+    if [ "$AGENT_UPX" = "0" ] || ! command -v upx >/dev/null 2>&1; then \
+      UPX=""; \
+    else \
+      UPX="upx -q --best --lzma"; \
+    fi; \
+    pack() { [ -z "$UPX" ] || $UPX "$1"; }; \
+    AGENT_LD="-s -w -buildid="; \
     VER="$VERSION"; \
     case "$VER" in \
       ""|dev|compose) \
         base="$VER"; \
         if [ -z "$base" ]; then base="dev"; fi; \
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-          -ldflags "-s -w -X github.com/fonlan/fobe/internal/agent.Version=$base-pending" \
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 go build -trimpath \
+          -ldflags "$AGENT_LD -X github.com/fonlan/fobe/internal/agent.Version=$base-pending" \
           -o /tmp/agent-pending ./cmd/agent; \
+        pack /tmp/agent-pending; \
         fp="$(sha256sum /tmp/agent-pending | cut -c1-12)"; \
         case "$fp" in *[0-9]*) ;; *) fp="0$fp" ;; esac; \
         VER="$base-$fp"; \
       ;; \
     esac; \
-    CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o /out/fobe-server ./cmd/server \
- && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-      -ldflags "-s -w -X github.com/fonlan/fobe/internal/agent.Version=$VER" \
+    CGO_ENABLED=0 GOAMD64="$SERVER_GOAMD64" go build -trimpath -pgo=auto \
+      -ldflags "-X main.version=$VER" -o /out/fobe-server ./cmd/server \
+ && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 go build -trimpath \
+      -ldflags "$AGENT_LD -X github.com/fonlan/fobe/internal/agent.Version=$VER" \
       -o /out/agent-seed/agent/$VER/linux-amd64 ./cmd/agent \
+ && pack /out/agent-seed/agent/$VER/linux-amd64 \
  && sha256sum /out/agent-seed/agent/$VER/linux-amd64 | awk '{print $1}' > /out/agent-seed/agent/$VER/linux-amd64.sha256 \
  && printf '{"version":"%s","artifacts":[{"os":"linux","arch":"amd64","file":"linux-amd64"}]}\n' "$VER" \
       > /out/agent-seed/agent/$VER/manifest.json

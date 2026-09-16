@@ -310,6 +310,10 @@ func runServer() {
 		log.Info("auto-enrolled relay subscription entries", "count", n)
 	}
 
+	// §17: optional read-only profiling endpoint (off unless FOBE_PPROF is a
+	// loopback address). It also feeds scripts/pgo.sh.
+	startPprof(log)
+
 	addr := env("FOBE_LISTEN", "0.0.0.0:8080")
 	srv := &http.Server{
 		Addr:              addr,

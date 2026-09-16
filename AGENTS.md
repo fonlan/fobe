@@ -25,7 +25,7 @@ web/src/              pages/ · components/ · api.ts · i18n.tsx · styles.css
 docker-compose.yml    仓库根：默认拉 GHCR 预构建镜像，--build 落回本地构建；零必填环境变量
 deploy/               Dockerfile.server（三段构建）· docker-entrypoint.sh（主密钥兜底）
 .github/workflows/    release.yml：v* tag → 测试 → 构建镜像 → 推送 GHCR
-scripts/              dev.sh · build.sh · install.sh.tmpl
+scripts/              dev.sh · build.sh · pgo.sh · install.sh.tmpl
 ```
 
 前端产物**编译进镜像**（`/srv/web`）由 server 直出，不做宿主机挂载。`FOBE_WEB_DIR` 留空时 server 进 API-only 模式，`/` 只提示去访问 Vite。
@@ -47,6 +47,7 @@ go vet ./...
 
 cd web && npm run build           # tsc（类型检查）+ vite build
 scripts/build.sh [outdir]         # 本地/CI 三件套：server、linux/amd64 agent+manifest、web
+scripts/pgo.sh [--url http://127.0.0.1:6060 | --file cpu.pprof]   # 采 CPU 剖面 → cmd/server/default.pgo
 docker compose up -d              # 拉预构建镜像（ghcr.io/fonlan/fobe），零必填环境变量
 docker compose up -d --build      # 本机构建（VERSION 占位 compose 会在镜像内换成内容寻址 compose-<哈希>，§5.5 跟随真实生效）
 
@@ -83,6 +84,7 @@ docker compose exec server fobe-server admin unblock <ip|all> | reset-password |
 - 新设置项用 `域.键` 命名（如 `server.public_url`、`ai.kill_switch`），经 `SetSetting`/`GetSetting`（敏感的用加密版本）。
 - 日志用 `log/slog`。
 - 版本注入：agent 是 `-X github.com/fonlan/fobe/internal/agent.Version=$VERSION`，server 是 `-X main.version=$VERSION`——别弄混。
+- **两端编译口径不同且是有意的**（design §17）：agent 求体积（`-s -w -trimpath` + 空 `-buildid=`，构建链里有 upx 就再压一道），server 求速度（**保留 DWARF** + PGO + `FOBE_SERVER_GOAMD64`，默认 v1）。三处构建入口（`deploy/Dockerfile.server`、`scripts/dev.sh`、`scripts/build.sh`）的 flag 要一起改，其中两个硬约束：**打包必须发生在写 sha256 之前**（否则一个版本号对应两份字节，探针校验必失败）、**内容寻址的占位构建也要走同一步打包**（否则 upx 版本变了版本号不变）；**agent 的 `GOAMD64` 永远 v1**（探针 CPU 未知，SIGILL 就是掉线）。
 - **改模块名必须同步 5 处 ldflags**（`deploy/Dockerfile.server` ×2、`scripts/dev.sh` ×2、`scripts/build.sh` ×1）——它们把 module path 当字面量抄了一遍。`-X` 指向不存在的符号时 **`go build` 不报错、静默忽略**，`Version` 留在 `dev`，而 §5.5 的发布门槛 fail-closed ⇒ **探针自更新被静默停用**，编译/测试/CI 全绿。验证别用 `strings <binary> | grep <版本号>`：`-ldflags` 原文会被记进 buildinfo，必然命中，是假阳性；要真跑出来——临时 `main` 打印 `agent.Version`、带 `-X` 构建后运行，看到哨兵号才算绑上。
 
 **前端**
@@ -117,4 +119,6 @@ docker compose exec server fobe-server admin unblock <ip|all> | reset-password |
 - **改模板 ≠ 存量节点会跟上**：每台节点的 `config.json` 只生成一次、缓存在 `settings` 的 `singbox_config:<node_id>` 里，agent 只比 hash ⇒ **改了生成器，旧配置会一直下发**（唯一出路曾是操作员再点一次"安装"）。现在服务端启动会 `SyncSingboxConfigs()` 重建不匹配的（design §9.1）。同一类陷阱：`agent` 的"版本/配置都对、只是没在跑"那条路径**曾经跳过闸门①**，于是一份 sing-box 拒绝加载的配置能永远留在盘上、每轮只报闸门③的"process exited"——真原因一次都不出现（design §9.2）。两者都已修，改动 singbox 生命周期时别把它们改回去。
 - **sing-box 的单元名是 one-sing.sh 的 `one-sing.service`（2026-09-16 改）**：改名是为了让面板与那个脚本作用于同一个单元，而不是各自 disable 对方。**改回去就退化成两套 supervisor 抢一个进程**。带上迁移是硬要求：改名前的 `fobe-singbox.service` 仍 enable 且在跑，agent 启动时 `RetireLegacySingboxUnit()` 负责停+disable+删（procd 侧只删含 one-sing 路径的自己那份，发行版的 `/etc/init.d/sing-box` 不碰）；`AdoptForeignSingboxService` 已删——它会 disable 掉 fobe 自己刚建的单元。日志来源同步：`journalctl -u one-sing`。
 - **anytls 全局密码是"服务端生成、面板不回显"的凭据（2026-09-16）**：`settings.anytls_password` 缺省时由 `ensureAnytlsPassword`（`internal/server/httpapi/anytls_password.go`）在**使用时机**现生成 16 位 `[A-Za-z0-9]`——安装/改端口、渲染订阅、`SyncSingboxConfigs` 发现已有被管理节点；AES-GCM 落库 + 一条 `anytls_password_generated` 审计（值 `[redacted]`）。设置页的输入卡片已删，轮换入口是 AI 工具 `set_anytls_password` 与 `PUT /api/settings`，**空值 = 重新生成**且会立刻重推所有已启用 sing-box 的节点。三处别改回去：①**密文存在但解不开**（换过主密钥、恢复了旧库）**绝不能当"未配置"**去生成新密码——那是静默轮换，会把还在用旧密码的客户端全部打断；此时安装/同步直接报错、原值不动。②生成的读-改-写必须持 `Server.anytlsMu`，去掉锁后两个并发安装会烤出两份不同密码，节点配置与订阅立刻对不上。③字符集留在 `[A-Za-z0-9]`：同一个串要原样进 JSON 字段、第三方客户端的 URI auth 位与 Clash YAML 标量，只有字母数字在三种上下文里都不用转义。
+- **验证 PGO 别 grep 编译器输出**：`go build -gcflags=all=-m | grep -i pgo` 会命中 `prepGoExitFrame` 这类名字，全是假阳性（实测 11 条命中、0 条是真的）。要看 `go version -m <binary> | grep -- -pgo`——它会打印实际吃进去的剖面路径（`-pgo=default.pgo` / 绝对路径）。同理，**UPX 压过的 agent 读不出 buildinfo**：`go version -m` 直接报 `not a Go executable`，`strings | grep` 也不再命中——验证版本只能真跑（无参启动会打印 `fobe-agent <version>`）。
+- **`FOBE_PPROF` 只接受回环地址**（design §17）：非回环直接记 error 并**不监听**——heap profile 就是内存快照，而这个进程内存里有主密钥、AI key、bot token。容器里采集不需要发布端口：`docker compose exec server wget -qO- 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof`（`wget` 是镜像自带的 busybox 版）。空闲面板的 2 秒 CPU 剖面只有几百字节（gzip），别把它当成"接口坏了"。
 - `data/fobe.db` 是 WAL 单写者，别用多实例同时挂载。

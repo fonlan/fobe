@@ -130,7 +130,7 @@ cd web && npm run build     # 前端 tsc 类型检查 + 构建
 
 - `dev.sh` 会交叉编译一份 linux/amd64 agent 产物，并给 server/agent 注入**同一个内容寻址版本号** `dev-<哈希>`，本机就能真跑「探针跟随服务端」：`FOBE_VERSION=<旧号> scripts/dev.sh` 做降级演练，`FOBE_AGENT_UPDATE_STAGGER=1s scripts/dev.sh` 把 0–5 分钟错峰压成立即。**后端不热更新，改了后端必须重启 dev.sh。**
 - 不用 dev.sh 时手动各起一个进程：后端 `FOBE_MASTER_KEY=dev-key-not-for-prod FOBE_DB=./data/dev.db go run ./cmd/server`（不设 `FOBE_WEB_DIR` 即 API-only 模式，`/api`、`/ws`、`/sub`、`/install.sh`、`/dl` 行为与生产完全一致）；前端 `cd web && npm install && npm run dev`（Vite 已代理上述路径，其中 `/ws` 的 `ws: true` 不能漏）。
-- 本机出镜像：`docker compose up -d --build`；不出容器用 `scripts/build.sh [outdir]` 产三件套（server、linux/amd64 agent + manifest、web dist）。
+- 本机出镜像：`docker compose up -d --build`；不出容器用 `scripts/build.sh [outdir]` 产三件套（server、linux/amd64 agent + manifest、web dist）。**两端的编译口径不同**：agent 求体积（`-s -w -trimpath` + UPX，约 2.3MB，因为它要下到每台探针），server 求速度（保留符号 + PGO 剖面，`scripts/pgo.sh` 采/重采）。
 - 发版：推 `v*` tag，CI 跑完测试自动构建镜像推到 GHCR（[`.github/workflows/release.yml`](.github/workflows/release.yml)）。
 - 端口转发的真机验证（需要 root 与可抛弃环境，会清空 `table ip nat`）：`docker run --rm --privileged -v "$PWD":/src -w /src golang:1.25 sh -c 'apt-get update -qq && apt-get install -y -qq nftables >/dev/null && FOBE_NFT_TEST=1 go test ./internal/agent -run TestForwardsNftKernel -v'`。
 - 本地装探针时 `--server` 要填**探针能访问到的地址**（局域网 IP 或内网穿透域名），不是 `127.0.0.1`。
@@ -156,8 +156,27 @@ cd web && npm run build     # 前端 tsc 类型检查 + 构建
 | `FOBE_GEOIP_MMDB` | `/data/geoip/GeoLite2-Country.mmdb` | 国别库路径（本机直接跑二进制时指到可写目录） |
 | `FOBE_GEOIP_AUTO_UPDATE` | `1` | GeoIP 库每日检查、超期自动重下（免密钥镜像，不需要 MaxMind 账号）；`0` 关闭 |
 | `FOBE_GEOIP_ONLINE` | `0` | 本地库未命中时用 ip-api.com 在线兜底（会把节点 IP 发给第三方，默认关闭） |
+| `FOBE_PPROF` | 无（关闭） | 只读诊断端口，**只接受回环地址**（如 `127.0.0.1:6060`），暴露 `/debug/pprof/*`；非回环直接拒绝（heap profile 就是内存快照，里面有主密钥） |
 
 内网镜像/离线环境：`FOBE_SINGBOX_API_BASE`、`FOBE_SINGBOX_DOWNLOAD_BASE`（GitHub 兼容 API 与产物下载根地址）与 `FOBE_GEOIP_URL`（钉死 GeoIP 下载源）可改下载来源。
+
+**编译期变量**（只在本地 `scripts/build.sh` / `docker build` 时生效，不是运行期配置）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `FOBE_AGENT_UPX` / `--build-arg AGENT_UPX` | `1` | agent 产物用 UPX 压缩（实测 7.15MB → 2.26MB）；`0` 关闭。压过的二进制可能被部分 VPS 的安全扫描误判，介意就关 |
+| `FOBE_PGO` | `auto` | server 的 PGO 剖面：`auto` = 用仓库里的 `cmd/server/default.pgo`（`scripts/pgo.sh` 生成/重采），也可指到自己的 `cpu.pprof`，`off` 关闭 |
+| `FOBE_SERVER_GOAMD64` / `--build-arg SERVER_GOAMD64` | `v1` | server 的目标指令集；`v2`/`v3` 在支持的 CPU 上快几个百分点，但在老 CPU 上是非法指令。**只影响 server**，agent 永远 v1 |
+
+采集 server 的真实热点并更新 PGO 剖面（容器里采集不需要发布端口）：
+
+```bash
+# 1) 让面板带诊断口跑（只绑回环），或临时 docker run 时加 -e FOBE_PPROF=127.0.0.1:6060
+# 2) 采 30 秒 CPU 剖面
+docker compose exec server wget -qO- 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof
+scripts/pgo.sh --file cpu.pprof     # 写成 cmd/server/default.pgo
+scripts/build.sh                    # 重新构建即自动吃进新剖面
+```
 
 ## 许可
 
