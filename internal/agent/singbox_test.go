@@ -648,8 +648,8 @@ func TestCheckInstallSpaceForScalesWithArtifact(t *testing.T) {
 }
 
 // A periodic "nothing new" report must not erase the reason the panel shows
-// (§9.2): the agent keeps reporting the last failure while the node is off its
-// desired version, and drops it once the target is in place.
+// (§9.2): the agent keeps reporting the last failure until the node is actually
+// healthy, and drops it then.
 func TestReportOnlyKeepsFailureReasonOffTarget(t *testing.T) {
 	dir := t.TempDir()
 	service.SetWorkDir(dir)
@@ -667,15 +667,31 @@ func TestReportOnlyKeepsFailureReasonOffTarget(t *testing.T) {
 		t.Fatalf("reportOnly dropped the failure reason: %+v", st)
 	}
 
-	// The same binary now answers the desired version: the error is history.
+	// The binary is now on the target version but the node is not running — the
+	// state a rejected `check` gate leaves behind. The reason must survive: the
+	// version matching is not convergence.
 	fake := "#!/bin/sh\necho \"sing-box version 1.15.0-alpha.4\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "sing-box"), []byte(fake), 0o755); err != nil {
 		t.Fatalf("write fake binary: %v", err)
 	}
 	m.reportOnly()
+	if st := m.Snapshot(); st == nil || st.LastError != reason {
+		t.Fatalf("on-target-but-dead node lost its reason: %+v", st)
+	}
+
+	// Running on the target: healthy, the error is history (the fallback branch
+	// asks the process, so the test process stands in for sing-box).
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("find self: %v", err)
+	}
+	m.mu.Lock()
+	m.proc = self
+	m.mu.Unlock()
+	m.reportOnly()
 	st := m.Snapshot()
 	if st == nil || st.LastError != "" {
-		t.Fatalf("on-target report must clear the error: %+v", st)
+		t.Fatalf("healthy report must clear the error: %+v", st)
 	}
 
 	// A different target also invalidates the stored reason.

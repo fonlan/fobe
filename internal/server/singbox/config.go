@@ -71,10 +71,19 @@ type logSection struct {
 	Timestamp bool   `json:"timestamp"`
 }
 
+// dnsServer is one entry of the DNS server list. sing-box moved to a type-based
+// format in 1.12.0 and *removed* the address-based one in 1.14.0 — so the
+// legacy `{"tag":…,"address":"local"}` this package used to emit made every
+// install of a current release die at gate ① with "legacy DNS server formats …
+// removed in sing-box 1.14.0" (the size cap of the artifact was the bug before
+// it, §9.2 实现修订 2026-09-16). `local` is the only server fobe needs: the
+// inbound serves anytls and egress is `direct`, so resolution is the system
+// resolver's job. The type-based form works from 1.12 on — the floor this
+// config targets. `detour` is a dialer option for *remote* servers and has
+// nothing to do here.
 type dnsServer struct {
-	Tag     string `json:"tag"`
-	Address string `json:"address"`
-	Detour  string `json:"detour,omitempty"`
+	Type string `json:"type"`
+	Tag  string `json:"tag"`
 }
 
 type dnsSection struct {
@@ -128,7 +137,7 @@ func BuildNodeConfig(port int, password string) ([]byte, error) {
 	cfg := nodeConfig{
 		Log: logSection{Level: "warn", Timestamp: true},
 		DNS: dnsSection{Servers: []dnsServer{
-			{Tag: "local-dns", Address: "local", Detour: "direct"},
+			{Type: "local", Tag: "local-dns"},
 		}},
 		Inbounds: []anytlsInbound{{
 			Type:          "anytls",

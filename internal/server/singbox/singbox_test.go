@@ -47,6 +47,16 @@ func TestBuildNodeConfig(t *testing.T) {
 	if cfg.Log.Level == "" || len(cfg.DNS.Servers) == 0 {
 		t.Fatalf("log/dns sections missing: %s", raw)
 	}
+	// The DNS entry must use sing-box's type-based format: the address-based
+	// one was removed in 1.14.0, and re-emitting it makes `sing-box check` fail
+	// on every current release — the whole install then rolls back at gate ①
+	// (verified against the real 1.14.1 / 1.15.0-alpha.4 binaries).
+	if got := cfg.DNS.Servers[0]["type"]; got != "local" {
+		t.Fatalf("dns server type = %v, want \"local\": %s", got, raw)
+	}
+	if _, legacy := cfg.DNS.Servers[0]["address"]; legacy {
+		t.Fatalf("legacy address-based DNS server emitted (removed in sing-box 1.14.0): %s", raw)
+	}
 	if len(cfg.Inbounds) != 1 || cfg.Inbounds[0].Type != "anytls" || cfg.Inbounds[0].ListenPort != 23456 {
 		t.Fatalf("inbound wrong: %+v", cfg.Inbounds)
 	}

@@ -200,11 +200,12 @@ func (m *singboxManager) needWatch() bool {
 
 // reportOnly re-observes and refreshes the state frame without converging.
 //
-// The last error is sticky while the node is off its desired version: a
-// periodic "nothing new" report used to send last_error="" (overwriting the
-// reason the panel was showing while `status` stayed `degraded` — a node with
-// an unexplained failure). The error is cleared by the report of a successful
-// convergence, and a differing desired version resets it too.
+// The last error is sticky until the node is *healthy* — the same condition
+// under which the server clears it and calls the node running: a periodic
+// "nothing new" report used to send last_error="" while `status` stayed
+// `degraded`, leaving an unexplained failure on the panel. Matching the binary
+// version alone is not enough: the artifact can be in place and the node still
+// failing (a `check` gate rejection leaves exactly that state).
 func (m *singboxManager) reportOnly() {
 	m.mu.Lock()
 	d, lastErr := m.desired, m.lastErr
@@ -214,8 +215,8 @@ func (m *singboxManager) reportOnly() {
 	}
 	bin, _, certDir := service.SingboxPaths()
 	act := m.observe(bin, d)
-	if normalizeVersion(act.version) == normalizeVersion(d.Version) {
-		lastErr = "" // on target: whatever failed before is history
+	if act.running && normalizeVersion(act.version) == normalizeVersion(d.Version) {
+		lastErr = "" // healthy on the target: whatever failed before is history
 	}
 	pair, err := ensureSelfSignedCert(certDir)
 	if err != nil {
