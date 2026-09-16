@@ -63,6 +63,7 @@ type RegToken struct {
 	ID        int64
 	Name      string // node name applied at registration (required, panel-enforced)
 	Note      string
+	NodeID    string // bound node; "" = generic add-node token (§4.2 revision)
 	CreatedAt int64
 	ExpiresAt int64
 	UsedAt    sql.NullInt64
@@ -70,10 +71,13 @@ type RegToken struct {
 }
 
 // CreateRegToken stores the hash of a token; the plaintext never touches the DB.
-func (s *Store) CreateRegToken(tokenHash, name, note string, ttlSeconds int64) error {
+// nodeID != "" binds the token to an existing node: that node may re-register
+// (and receive fresh credentials) without presenting its old secret — the
+// recovery path for a probe whose config.json was lost or overwritten.
+func (s *Store) CreateRegToken(tokenHash, name, note, nodeID string, ttlSeconds int64) error {
 	_, err := s.db.Exec(
-		`INSERT INTO reg_tokens (token_hash, name, note, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		tokenHash, name, note, now(), now()+ttlSeconds,
+		`INSERT INTO reg_tokens (token_hash, name, note, node_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		tokenHash, name, note, nodeID, now(), now()+ttlSeconds,
 	)
 	if err != nil {
 		return fmt.Errorf("create reg token: %w", err)
@@ -81,34 +85,34 @@ func (s *Store) CreateRegToken(tokenHash, name, note string, ttlSeconds int64) e
 	return nil
 }
 
-// ConsumeRegToken atomically marks the token (by hash) used; returns the
-// node name and note bound to it. Caller passes the token hash, not the plaintext.
-func (s *Store) ConsumeRegToken(tokenHash string) (name, note string, err error) {
+// ConsumeRegToken atomically marks the token (by hash) used; returns the node
+// name, note and bound node id. Caller passes the token hash, not the plaintext.
+func (s *Store) ConsumeRegToken(tokenHash string) (name, note, nodeID string, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer tx.Rollback()
 
 	var id int64
 	var expires sql.NullInt64
-	err = tx.QueryRow(`SELECT id, name, note, expires_at FROM reg_tokens
+	err = tx.QueryRow(`SELECT id, name, note, node_id, expires_at FROM reg_tokens
 		WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`, tokenHash, now(),
-	).Scan(&id, &name, &note, &expires)
+	).Scan(&id, &name, &note, &nodeID, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", ErrNotFound
+		return "", "", "", ErrNotFound
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("look up reg token: %w", err)
+		return "", "", "", fmt.Errorf("look up reg token: %w", err)
 	}
 	if _, err := tx.Exec(`UPDATE reg_tokens SET used_at = ? WHERE id = ?`, now(), id); err != nil {
-		return "", "", fmt.Errorf("consume reg token: %w", err)
+		return "", "", "", fmt.Errorf("consume reg token: %w", err)
 	}
-	return name, note, tx.Commit()
+	return name, note, nodeID, tx.Commit()
 }
 
 func (s *Store) ListRegTokens(activeOnly bool) ([]RegToken, error) {
-	q := `SELECT id, name, note, created_at, expires_at, used_at, used_by FROM reg_tokens`
+	q := `SELECT id, name, note, node_id, created_at, expires_at, used_at, used_by FROM reg_tokens`
 	if activeOnly {
 		q += ` WHERE used_at IS NULL AND expires_at > ` + fmt.Sprint(now())
 	}
@@ -121,7 +125,7 @@ func (s *Store) ListRegTokens(activeOnly bool) ([]RegToken, error) {
 	out := []RegToken{}
 	for rows.Next() {
 		var t RegToken
-		if err := rows.Scan(&t.ID, &t.Name, &t.Note, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt, &t.UsedBy); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Note, &t.NodeID, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt, &t.UsedBy); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

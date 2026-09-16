@@ -123,6 +123,10 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 - 之后 agent 用 `node_id + node_secret` 建立 WSS，服务端按 `machine_id` 去重：
   - 已有同一 `machine_id` 且凭证校验通过 → **复用节点**，更新 IP/版本，不产生垃圾节点；
   - 已存在但凭证不符 → 拒绝注册，面板显示"疑似重复安装"，由你手动选择接管。
+- **实现修订 2026-09-17（凭据重发：节点绑定的注册 token）**：上面那条"凭证不符 → 拒绝注册"有个死角——探针的 `config.json` 一旦被覆盖、清空或随机器搬迁丢失，服务端只剩旧 secret 的哈希，**没有任何入口能把凭据发回去**（明文只存在探针盘上）。真机踩过：一次验证把生产探针的 config 覆盖成测试凭据，节点掉线，唯一出路"删掉节点再添加"还会连带丢掉挂在 `node_id` 上的 7 条端口转发与 1 条账单。现在：
+  - `reg_tokens` 增加 `node_id`（`SchemaVersion 12`，增量迁移）：`''` = 通用"添加节点"token（行为不变）；非空 = **绑定该节点**的 token，只由 `POST /api/nodes/{id}/agent/reinstall-command` 签发（面板上是「重装 / 重发凭据」按钮，二次确认），TTL 30 分钟、单次有效。
+  - 注册判定：绑定 token 且该节点 `machine_id` 相符 → **不需要旧 secret**，换发新凭据、复用同一节点（审计 `node_reissued`）。`machine_id` **未注册**（探针连 `machine-id` 一起丢了、或换到新主机）→ 同样换发凭据并**接管新 `machine_id`**（审计 `node_reissued`，命令里记 `machine=<new>`）：面板从不暴露 `machine_id`，若在这里拒绝，节点就彻底没有回来的路。`machine_id` 已属于**别的**节点 → `409 machine_mismatch`；被绑定的节点已被删除 → `404 node_not_found`（绑定 token **永不**新建节点）。通用 token 的两条老路径（旧 secret 有效 → `node_rebound`；无凭据 → `409 duplicate_machine`）原样保留。
+  - **代价（有意接受）**：绑定 token 就是"该节点的一次注册授权"（bearer）——拿到它的人可以顶掉该节点的凭据并接管其身份（通用 token 做不到，它只会撞 `duplicate_machine`；被占用的 `machine_id` 也仍然拦得住）。因此入口必须二次确认、签发（`agent_reinstall_token`）与使用（`node_reissued`）都写审计，并沿用 30 分钟 TTL + 单次有效；这是"凭据丢了还能救"的对价。
 - agent 侧默认落盘：`/etc/fobe-agent/{config.json,machine-id,update-state.json}`（0600，root）。OpenWrt 上 `/etc` 是 overlay，重启保留。**实现修订 2026-09-16（非特权模式）**：`machine-id` 与 `update-state.json` 一律从 `-config` 所在目录派生；因此 `--unprivileged` 的 `/opt/fobe-agent/config.json` 会把全部探针本地状态收进同一个用户可写目录。
 
 ### 4.3 登录失败黑名单

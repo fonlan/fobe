@@ -200,6 +200,8 @@ export interface RegTokenInfo {
 export interface RegTokenRow {
   id: number;
   note: string;
+  /** Set = token bound to that node (reinstall / credential reissue, §4.2). */
+  node_id?: string;
   created_at: number;
   expires_at: number;
   used_at?: number | null;

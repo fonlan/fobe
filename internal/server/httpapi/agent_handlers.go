@@ -52,7 +52,9 @@ func (s *Server) handleCreateRegToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash := tokenHash(token)
-	if err := s.Store.CreateRegToken(hash, name, strings.TrimSpace(req.Note), 1800); err != nil {
+	// "" = generic add-node token; bound tokens are minted per node by
+	// handleAgentReinstallCommand (§4.2 revision).
+	if err := s.Store.CreateRegToken(hash, name, strings.TrimSpace(req.Note), "", 1800); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
@@ -75,6 +77,7 @@ func (s *Server) handleListRegTokens(w http.ResponseWriter, r *http.Request) {
 		ID        int64   `json:"id"`
 		Name      string  `json:"name"`
 		Note      string  `json:"note"`
+		NodeID    string  `json:"node_id,omitempty"` // set = reissue/reinstall token
 		CreatedAt int64   `json:"created_at"`
 		ExpiresAt int64   `json:"expires_at"`
 		UsedAt    *int64  `json:"used_at,omitempty"`
@@ -82,7 +85,7 @@ func (s *Server) handleListRegTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]tokenView, 0, len(tokens))
 	for _, t := range tokens {
-		v := tokenView{ID: t.ID, Name: t.Name, Note: t.Note, CreatedAt: t.CreatedAt, ExpiresAt: t.ExpiresAt}
+		v := tokenView{ID: t.ID, Name: t.Name, Note: t.Note, NodeID: t.NodeID, CreatedAt: t.CreatedAt, ExpiresAt: t.ExpiresAt}
 		if t.UsedAt.Valid {
 			v.UsedAt = &t.UsedAt.Int64
 		}
@@ -127,8 +130,17 @@ type agentRegisterResp struct {
 }
 
 // handleAgentRegister exchanges a single-use reg token for node credentials.
-// machine_id dedupe: same machine + valid old credentials → reuse the node;
-// same machine without credentials → refuse as a suspected duplicate install.
+//
+// machine_id dedupe has these outcomes (design §4.2):
+//   - node-bound token whose node is this machine → reuse the node and issue a
+//     fresh secret **without** asking for the old one. This is the credential
+//     recovery path: a probe whose config.json was lost/overwritten can only be
+//     saved here, because the server keeps nothing but the old secret's hash.
+//   - node-bound token + unknown machine_id → same, and the node adopts the new
+//     machine id (the whole state directory was wiped, or the node moved host).
+//   - same machine + the node's own valid old credentials → reuse the node
+//     (the ordinary reinstall case, kept for tokens issued before this revision).
+//   - same machine without either → refuse as a suspected duplicate install.
 func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 	var req agentRegisterReq
 	if err := decodeJSON(r, &req); err != nil || req.Token == "" || req.MachineID == "" {
@@ -136,7 +148,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenName, note, err := s.Store.ConsumeRegToken(tokenHash(req.Token))
+	tokenName, note, boundNode, err := s.Store.ConsumeRegToken(tokenHash(req.Token))
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusUnauthorized, "invalid_token")
 		return
@@ -149,26 +161,49 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 	existing, err := s.Store.GetNodeByMachineID(req.MachineID)
 	switch {
 	case err == nil:
-		// machine already registered: only the holder of the old secret may rebind
-		if req.NodeID == existing.ID && req.NodeSecret != "" {
-			oldHash, err := s.Store.GetNodeSecretHash(existing.ID)
-			if err == nil && security.VerifyPassword(req.NodeSecret, oldHash) {
-				secret, hash, err := newNodeSecret()
-				if err != nil {
-					writeErr(w, http.StatusInternalServerError, "internal")
+		// A node-bound token is scoped to exactly one node. Here the machine is
+		// already registered, so the token is only usable when it was minted for
+		// *that* node: it cannot be replayed onto another host's node.
+		if boundNode != "" && boundNode != existing.ID {
+			s.Store.InsertAudit(&store.AuditEntry{
+				Actor: "agent", NodeID: existing.ID, Action: "register_machine_mismatch",
+				Command: "token for " + boundNode, SourceIP: s.Trust.RealIP(r),
+			})
+			writeErr(w, http.StatusConflict, "machine_mismatch")
+			return
+		}
+		if boundNode == existing.ID || (req.NodeID == existing.ID && req.NodeSecret != "") {
+			// Bound token: no old secret needed. Legacy path: verify it.
+			if boundNode == "" {
+				oldHash, err := s.Store.GetNodeSecretHash(existing.ID)
+				if err != nil || !security.VerifyPassword(req.NodeSecret, oldHash) {
+					s.Store.InsertAudit(&store.AuditEntry{
+						Actor: "agent", NodeID: existing.ID, Action: "register_duplicate",
+						SourceIP: s.Trust.RealIP(r),
+					})
+					writeErr(w, http.StatusConflict, "duplicate_machine")
 					return
 				}
-				if _, err := s.Store.Exec(`UPDATE nodes SET node_secret_hash = ? WHERE id = ?`, hash, existing.ID); err != nil {
-					writeErr(w, http.StatusInternalServerError, "internal")
-					return
-				}
-				s.Store.InsertAudit(&store.AuditEntry{
-					Actor: "agent", NodeID: existing.ID, Action: "node_rebound",
-					Command: note, SourceIP: s.Trust.RealIP(r),
-				})
-				writeJSON(w, http.StatusOK, agentRegisterResp{NodeID: existing.ID, NodeSecret: secret, Reused: true})
+			}
+			secret, hash, err := newNodeSecret()
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "internal")
 				return
 			}
+			if _, err := s.Store.Exec(`UPDATE nodes SET node_secret_hash = ? WHERE id = ?`, hash, existing.ID); err != nil {
+				writeErr(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			action := "node_rebound"
+			if boundNode != "" {
+				action = "node_reissued"
+			}
+			s.Store.InsertAudit(&store.AuditEntry{
+				Actor: "agent", NodeID: existing.ID, Action: action,
+				Command: note, SourceIP: s.Trust.RealIP(r),
+			})
+			writeJSON(w, http.StatusOK, agentRegisterResp{NodeID: existing.ID, NodeSecret: secret, Reused: true})
+			return
 		}
 		s.Store.InsertAudit(&store.AuditEntry{
 			Actor: "agent", NodeID: existing.ID, Action: "register_duplicate",
@@ -177,6 +212,45 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "duplicate_machine")
 		return
 	case errors.Is(err, store.ErrNotFound):
+		// A node-bound token authorises exactly one thing: re-establishing the
+		// node it was minted for. An unknown machine_id means the probe lost its
+		// whole state directory (machine-id included) or the node moved to new
+		// hardware — both are precisely what a reissue token is for, and the
+		// panel never exposes machine_id, so refusing here would leave no way
+		// back. Adopt the new identity instead (audited).
+		if boundNode != "" {
+			bound, berr := s.Store.GetNode(boundNode)
+			if errors.Is(berr, store.ErrNotFound) {
+				s.Store.InsertAudit(&store.AuditEntry{
+					Actor: "agent", NodeID: boundNode, Action: "register_node_missing",
+					SourceIP: s.Trust.RealIP(r),
+				})
+				writeErr(w, http.StatusNotFound, "node_not_found")
+				return
+			}
+			if berr != nil {
+				writeErr(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			secret, hash, err := newNodeSecret()
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			if _, err := s.Store.Exec(
+				`UPDATE nodes SET node_secret_hash = ?, machine_id = ? WHERE id = ?`,
+				hash, req.MachineID, bound.ID,
+			); err != nil {
+				writeErr(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			s.Store.InsertAudit(&store.AuditEntry{
+				Actor: "agent", NodeID: bound.ID, Action: "node_reissued",
+				Command: note + " machine=" + req.MachineID, SourceIP: s.Trust.RealIP(r),
+			})
+			writeJSON(w, http.StatusOK, agentRegisterResp{NodeID: bound.ID, NodeSecret: secret, Reused: true})
+			return
+		}
 		// fresh node, continue below
 	default:
 		writeErr(w, http.StatusInternalServerError, "internal")

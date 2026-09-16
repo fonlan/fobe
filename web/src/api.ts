@@ -263,11 +263,14 @@ export function retryAgentUpdate(id: string): Promise<{ ok: boolean; pushed: boo
 }
 
 /**
- * Reinstall command for a probe whose agent predates §5.5. Mints a fresh
- * single-use registration token; the machine re-registers onto the same node
- * because the probe keeps its machine-id and node credentials.
+ * Reinstall command, also the credential-reissue path (§4.2 revision). Mints a
+ * single-use token **bound to this node**: the probe may re-register onto the
+ * same node either by keeping its machine-id + old credentials (the pre-§5.5
+ * reinstall case) or with nothing but the token (config.json lost/overwritten).
  */
-export function agentReinstallCommand(id: string): Promise<{ install_command: string; ttl: number }> {
+export function agentReinstallCommand(
+  id: string,
+): Promise<{ install_command: string; ttl: number; keeps_node?: boolean; reissues?: boolean }> {
   return request(`/api/nodes/${encodeURIComponent(id)}/agent/reinstall-command`, { method: 'POST' });
 }
 

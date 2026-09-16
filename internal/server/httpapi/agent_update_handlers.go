@@ -59,13 +59,19 @@ func (s *Server) handleAgentUpdateRetry(w http.ResponseWriter, r *http.Request) 
 
 // handleAgentReinstallCommand answers POST /api/nodes/{id}/agent/reinstall-command.
 //
-// A probe whose agent binary predates §5.5 will never follow on its own: the
-// new fields are unknown to it (encoding/json drops them) and its Caps never
-// reports self_update. The honest fix is one manual reinstall. Reusing the
-// add-node flow keeps this free of a second installation path: a fresh
-// single-use registration token plus the same install command, which rebinds
-// to the same node because the machine-id and the node credentials survive
-// (§4.2).
+// Two situations need the same command, so they share one path (§4.2 revision
+// 2026-09-17):
+//
+//   - a probe whose agent binary predates §5.5 never follows on its own (the new
+//     fields are unknown to it and Caps reports no self_update);
+//   - a probe whose config.json was lost, overwritten or moved to another machine
+//     cannot authenticate any more, and the server holds nothing but the old
+//     secret's hash — so there is no way to hand the credentials back out.
+//
+// The token minted here is therefore **bound to this node**: register accepts it
+// for this node's machine_id without the old secret and issues fresh credentials
+// (action node_reissued). The node id, its forwards, billing and settings survive,
+// which a "delete node + add node" would not.
 func (s *Server) handleAgentReinstallCommand(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	n, err := s.Store.GetNode(id)
@@ -90,7 +96,7 @@ func (s *Server) handleAgentReinstallCommand(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	if err := s.Store.CreateRegToken(tokenHash(token), n.Name, "reinstall "+id, 1800); err != nil {
+	if err := s.Store.CreateRegToken(tokenHash(token), n.Name, "reinstall "+id, id, 1800); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
@@ -103,7 +109,9 @@ func (s *Server) handleAgentReinstallCommand(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]any{
 		"install_command": cmd,
 		"ttl":             1800,
-		// What the credential-keeping rebind depends on, spelled out for the UI.
+		// The token is node-bound: running this command always keeps the node
+		// (and reissues its credentials if the probe no longer has them).
 		"keeps_node": strings.TrimSpace(n.Name) != "",
+		"reissues":   true,
 	})
 }

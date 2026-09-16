@@ -156,6 +156,9 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
 
   const reinstall = async () => {
     if (busy) return;
+    // Minting this token is a credential operation: running the command on the
+    // probe rebinds it and invalidates whatever it had before.
+    if (!window.confirm(t('agent_reinstall_confirm'))) return;
     setBusy(true);
     setErr(null);
     try {
@@ -208,28 +211,34 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
         )
       )}
 
-      {/* Only an agent that has actually reported caps can be judged: a node
-          that never said hello is not evidence of an outdated binary. */}
-      {node.agent_caps_seen && !node.agent_self_update && (
-        <div className="stack">
-          <p className="hint">{t(unsupported ? 'agent_no_supervisor_hint' : 'agent_reinstall_hint')}</p>
-          <div className="row-gap">
-            <button type="button" className="btn" disabled={busy} onClick={() => void reinstall()}>
-              {t('agent_reinstall_title')}
-            </button>
-          </div>
-          {cmd && (
-            <div className="stack">
-              <pre className="code-block">{cmd}</pre>
-              <div className="row-gap">
-                <button type="button" className="btn small" onClick={() => void copy()}>
-                  {copied ? t('copied') : t('copy')}
-                </button>
-              </div>
-            </div>
-          )}
+      {/* Always offered, because this command has two jobs: it is the manual
+          reinstall for an agent that predates §5.5, and it is the only way back
+          in for a probe that lost its config.json (overwritten, wiped, moved) —
+          the server keeps nothing but the old secret's hash. In that second case
+          the node is offline and its caps are stale, so gating the button on
+          caps would hide the one path that still works (§4.2 revision). */}
+      <div className="stack">
+        <p className="hint">
+          {node.agent_caps_seen && !node.agent_self_update
+            ? t(unsupported ? 'agent_no_supervisor_hint' : 'agent_reinstall_hint')
+            : t('agent_reissue_hint')}
+        </p>
+        <div className="row-gap">
+          <button type="button" className="btn" disabled={busy} onClick={() => void reinstall()}>
+            {t('agent_reinstall_title')}
+          </button>
         </div>
-      )}
+        {cmd && (
+          <div className="stack">
+            <pre className="code-block">{cmd}</pre>
+            <div className="row-gap">
+              <button type="button" className="btn small" onClick={() => void copy()}>
+                {copied ? t('copied') : t('copy')}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
 
       {behind && node.agent_self_update && (
         <div className="row-gap">

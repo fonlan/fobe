@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS reg_tokens (
     token_hash TEXT NOT NULL UNIQUE,
     name       TEXT NOT NULL DEFAULT '',   -- node name applied at registration
     note       TEXT NOT NULL DEFAULT '',
+    -- §4.2 实现修订 2026-09-17：把 token 绑到某个已存在的节点。'' = 通用
+    -- token（注册时新建节点，即「添加节点」）；非空 = 「重装 / 重发凭据」
+    -- token —— 该节点在**不带旧 secret** 的情况下可以重新注册并换发新凭据。
+    -- 这是旧凭据丢失（config.json 被覆盖、误删、换机器）时唯一的补救入口：
+    -- 通用 token 撞上同 machine_id 只会 409 duplicate_machine。
+    node_id    TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     used_at    INTEGER,

@@ -24,7 +24,7 @@ var schemaFS embed.FS
 // and idempotent, so forgetting a bump only loses the backup-on-change
 // guarantee, never correctness. Upgrade and downgrade semantics: §6 "schema
 // 兼容策略" in design.md.
-const SchemaVersion = 11
+const SchemaVersion = 12
 
 // Store is the database handle. Safe for concurrent use.
 type Store struct {
@@ -226,6 +226,10 @@ func (s *Store) migrateAdditive() error {
 		{"node_singbox", "local_config", `ALTER TABLE node_singbox ADD COLUMN local_config TEXT NOT NULL DEFAULT ''`},
 		{"node_singbox", "local_config_hash", `ALTER TABLE node_singbox ADD COLUMN local_config_hash TEXT NOT NULL DEFAULT ''`},
 		{"node_singbox", "extra_inbounds", `ALTER TABLE node_singbox ADD COLUMN extra_inbounds TEXT NOT NULL DEFAULT ''`},
+		// §4.2 实现修订 2026-09-17: node-bound registration tokens. A token with
+		// node_id set lets that one node re-register (and get fresh credentials)
+		// without presenting its old secret; '' keeps the add-node behaviour.
+		{"reg_tokens", "node_id", `ALTER TABLE reg_tokens ADD COLUMN node_id TEXT NOT NULL DEFAULT ''`},
 		// §5.5 agent self-update bookkeeping (migrateAdditive is idempotent).
 		{"nodes", "agent_target_version", `ALTER TABLE nodes ADD COLUMN agent_target_version TEXT NOT NULL DEFAULT ''`},
 		{"nodes", "agent_update_state", `ALTER TABLE nodes ADD COLUMN agent_update_state TEXT NOT NULL DEFAULT ''`},
