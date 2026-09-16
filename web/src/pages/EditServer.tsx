@@ -89,7 +89,7 @@ export default function EditServer() {
 
       <section className="card">
         <h3>{t('sb_card')}</h3>
-        <SingboxCard nodeId={id} onChanged={() => void load()} />
+        <SingboxCard nodeId={id} onlineNow={data.online_now} onChanged={() => void load()} />
       </section>
 
       <section className="card">
@@ -574,7 +574,7 @@ function IPList({ data, onChanged }: { data: NodeDetailData; onChanged: () => vo
 
 // --- sing-box server config (design §9) ----------------------------------------
 
-function SingboxCard({ nodeId, onChanged }: { nodeId: string; onChanged: () => void }) {
+function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineNow: boolean; onChanged: () => void }) {
   const { t } = useI18n();
   const [sb, setSb] = useState<SingboxStatus | null>(null);
   const [versions, setVersions] = useState<SingboxVersion[]>([]);
@@ -604,6 +604,26 @@ function SingboxCard({ nodeId, onChanged }: { nodeId: string; onChanged: () => v
     void load();
   }, [load]);
 
+  const status = sb?.status || 'absent';
+  const statusKey = 'sb_status_' + status;
+  // Convergence is asynchronous (§9.2): the agent applies the desired state and
+  // reports back later, so the snapshot taken right after "install" says
+  // "installing" and stays that way in the DOM forever. Without this re-read
+  // the card kept showing 安装中 next to "desired state pushed" long after the
+  // probe had answered — including after a failed install had already landed
+  // as 异常 + 最近错误. Only an in-flight change on a reachable probe can move
+  // the tile, so nothing else is polled.
+  const installing = status === 'installing';
+  useEffect(() => {
+    if (!installing) {
+      setMsg(null); // the probe answered: the pending hint is stale
+      return;
+    }
+    if (!onlineNow) return; // offline: the state cannot change until reconnect
+    const h = window.setInterval(() => void load(), 5000);
+    return () => window.clearInterval(h);
+  }, [installing, onlineNow, load]);
+
   const run = async (fn: () => Promise<unknown>, okMsg: string) => {
     if (busy) return;
     setBusy(true);
@@ -620,9 +640,6 @@ function SingboxCard({ nodeId, onChanged }: { nodeId: string; onChanged: () => v
       setBusy(false);
     }
   };
-
-  const status = sb?.status || 'absent';
-  const statusKey = 'sb_status_' + status;
 
   return (
     <div className="stack">
@@ -642,6 +659,7 @@ function SingboxCard({ nodeId, onChanged }: { nodeId: string; onChanged: () => v
           {t('sb_last_error')}: <span className="mono">{sb.last_error}</span>
         </p>
       )}
+      {installing && !onlineNow && <span className="hint">{t('sb_installing_offline')}</span>}
       {sb?.cert_not_after ? (
         <span className="hint">{t('sb_cert_until', { time: fmtTime(sb.cert_not_after) })}</span>
       ) : null}

@@ -30,15 +30,26 @@ import (
 // ({version, config, port}); the agent converges to it through the three
 // gates (check → start → observe) and rolls back to .prev on any failure.
 const (
-	maxDownloadBytes = 64 << 20        // artifact size cap
-	downloadTimeout  = 5 * time.Minute // whole-artifact budget
-	checkTimeout     = 30 * time.Second
-	versionTimeout   = 10 * time.Second
-	observeWindow    = 30 * time.Second // gate ③
-	observeStep      = time.Second      // per-second TCP retry
-	tcpDialTimeout   = time.Second
-	convergeEvery    = 60 * time.Second // periodic convergence/report tick
-	retryBackoff     = 5 * time.Minute  // min spacing between watchdog retries
+	// maxDownloadBytes caps the artifact the agent is willing to write. /dl
+	// serves the *extracted* binary, and modern sing-box linux-amd64-musl
+	// builds are ~90 MiB (1.14.1 = 91,891,552 B, 1.15.0-alpha.4 = 92,895,232 B):
+	// the old 64 MiB cap rejected every current release — after transferring
+	// the whole file — and then rolled back, so no install ever succeeded.
+	// Kept in step with the server's own defaultMaxDownloadBytes (256 MiB).
+	maxDownloadBytes = 256 << 20
+	// downloadTimeout is the whole-artifact budget. 5 min was calibrated when
+	// artifacts were a third of today's size; a ~90 MiB download needs
+	// >2.5 Mbit/s sustained to fit, which a home uplink on a remote probe
+	// does not always deliver (and the failure looks exactly like a rejected
+	// artifact: download error → rollback).
+	downloadTimeout = 15 * time.Minute
+	checkTimeout    = 30 * time.Second
+	versionTimeout  = 10 * time.Second
+	observeWindow   = 30 * time.Second // gate ③
+	observeStep     = time.Second      // per-second TCP retry
+	tcpDialTimeout  = time.Second
+	convergeEvery   = 60 * time.Second // periodic convergence/report tick
+	retryBackoff    = 5 * time.Minute  // min spacing between watchdog retries
 
 	fwCmdTimeout         = 10 * time.Second // per firewall command budget (§9.2)
 	nftablesConfPath     = "/etc/nftables.conf"
@@ -56,6 +67,7 @@ type singboxManager struct {
 	state        *protocol.SingboxState
 	proc         *os.Process           // fallback-mode child
 	lastAttempt  time.Time             // last convergence that reached the change path
+	lastErr      string                // last reported error; sticky while off-target (see reportOnly)
 	lastFwPort   int                   // port the firewall pass already ran for (§9.2)
 	lastFwHint   string                // manual command when that pass failed (""=allowed)
 	rollbackSeen bool                  // one-shot: a rollback happened since last report (§15)
@@ -113,6 +125,11 @@ func (m *singboxManager) SetDesired(d *protocol.SingboxDesired) {
 	m.mu.Lock()
 	if d != nil && normalizeVersion(d.Version) == "" {
 		d = nil // empty version = not managed (§9 版本显式)
+	}
+	// A different target invalidates the stored error: it described the
+	// previous attempt, and repeating it would put the wrong cause on screen.
+	if d != nil && (m.desired == nil || normalizeVersion(m.desired.Version) != normalizeVersion(d.Version)) {
+		m.lastErr = ""
 	}
 	m.desired = d
 	m.mu.Unlock()
@@ -182,21 +199,30 @@ func (m *singboxManager) needWatch() bool {
 }
 
 // reportOnly re-observes and refreshes the state frame without converging.
+//
+// The last error is sticky while the node is off its desired version: a
+// periodic "nothing new" report used to send last_error="" (overwriting the
+// reason the panel was showing while `status` stayed `degraded` — a node with
+// an unexplained failure). The error is cleared by the report of a successful
+// convergence, and a differing desired version resets it too.
 func (m *singboxManager) reportOnly() {
 	m.mu.Lock()
-	d := m.desired
+	d, lastErr := m.desired, m.lastErr
 	m.mu.Unlock()
 	if d == nil {
 		return
 	}
 	bin, _, certDir := service.SingboxPaths()
 	act := m.observe(bin, d)
+	if normalizeVersion(act.version) == normalizeVersion(d.Version) {
+		lastErr = "" // on target: whatever failed before is history
+	}
 	pair, err := ensureSelfSignedCert(certDir)
 	if err != nil {
 		m.report(d, act.version, false, fmt.Sprintf("certificate: %v", err), certPair{})
 		return
 	}
-	m.report(d, act.version, act.running, "", pair)
+	m.report(d, act.version, act.running, lastErr, pair)
 }
 
 // converge brings local reality in line with the desired state (§9.2).
@@ -383,10 +409,13 @@ func singboxState(d *protocol.SingboxDesired, version string, running bool, last
 
 // report assembles the reportable state and publishes it, attaching the
 // sticky firewall hint (§9.2) and draining the one-shot rollback flag so
-// rollback is reported exactly once (§15 告警"回滚已执行").
+// rollback is reported exactly once (§15 告警"回滚已执行"). The error text is
+// remembered for reportOnly (see there): while the node is off its desired
+// version, "no news" must not be reported as "no problem".
 func (m *singboxManager) report(d *protocol.SingboxDesired, version string, running bool, lastErr string, pair certPair) {
 	st := singboxState(d, version, running, lastErr, pair)
 	m.mu.Lock()
+	m.lastErr = lastErr
 	st.FirewallHint = m.lastFwHint
 	st.RollbackHappened = m.rollbackSeen
 	m.rollbackSeen = false
@@ -556,20 +585,38 @@ func runFirewallCandidates(port int, probe fwProbes) string {
 // statfsFunc is swappable so tests can inject free-space results.
 var statfsFunc = statfsFree
 
-// checkInstallSpace refuses binary installs when the filesystem holding the
+// checkInstallSpace refuses a binary install when the filesystem holding the
 // sing-box binary is nearly full (§5.4 OpenWrt 专项: never write the router's
-// overlay full). Undeterminable space does not block (fail open).
+// overlay full). It is the *gross* floor: at converge time the artifact size is
+// still unknown, so it only refuses a filesystem that cannot hold anything at
+// all. installArtifact() repeats the check with the real size once the response
+// headers are in. Undeterminable space does not block (fail open).
 func checkInstallSpace(dir string) error {
+	return checkInstallSpaceFor(dir, 0, false)
+}
+
+// checkInstallSpaceFor is the size-aware gate. The artifact is written as a
+// temp file next to the binary it replaces, and installArtifact keeps the
+// binary it displaced as .prev (§9.2 rollback) — so replacing an existing copy
+// needs 2× the artifact while a fresh install needs one, both plus headroom for
+// config/certs/logs. Asking for a flat 64 MiB let a ~90 MiB artifact start on a
+// filesystem that could not hold the swap, which is the fill-the-overlay
+// outcome §5.4 exists to prevent (same 2× rule as §5.5).
+func checkInstallSpaceFor(dir string, artifactBytes uint64, replacing bool) error {
 	freeBytes, freeInodes, err := statfsFunc(dir)
 	if err != nil {
 		return nil
 	}
-	if freeBytes >= minInstallFreeBytes && freeInodes >= minInstallFreeInodes {
+	needBytes := uint64(minInstallFreeBytes) + artifactBytes
+	if replacing {
+		needBytes += artifactBytes
+	}
+	if freeBytes >= needBytes && freeInodes >= minInstallFreeInodes {
 		return nil
 	}
 	return fmt.Errorf(
 		"insufficient disk space on %s: %d MiB / %d inodes free, need ≥ %d MiB / %d inodes — install refused",
-		dir, freeBytes>>20, freeInodes, minInstallFreeBytes>>20, minInstallFreeInodes)
+		dir, freeBytes>>20, freeInodes, needBytes>>20, minInstallFreeInodes)
 }
 
 // --- observation ---
@@ -830,6 +877,19 @@ func installArtifact(hc *http.Client, artifactURL, dest string, maxSize int64) e
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("get artifact: %s", resp.Status)
+	}
+	// Refuse from the headers: a file the cap rejects must not be transferred
+	// (the probe pays for every byte), and the space gate below can only be
+	// honest once the size is known. Replacing an existing binary also parks a
+	// second copy as .prev (§9.2 rollback).
+	if resp.ContentLength > 0 {
+		if resp.ContentLength > maxSize {
+			return fmt.Errorf("artifact exceeds %d bytes: %d", maxSize, resp.ContentLength)
+		}
+		replacing := fileExists(dest)
+		if err := checkInstallSpaceFor(filepath.Dir(dest), uint64(resp.ContentLength), replacing); err != nil {
+			return err
+		}
 	}
 
 	tmp := dest + ".download"

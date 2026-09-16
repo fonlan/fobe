@@ -236,6 +236,18 @@ func TestInstallArtifactEnforcesSizeCap(t *testing.T) {
 	}
 }
 
+// The size cap is not a style choice: /dl serves the extracted binary, and
+// every shipping sing-box linux-amd64-musl build is far past the 64 MiB the
+// cap used to be — which rejected each release *after* downloading it and then
+// rolled back, so no install could ever succeed. Guard the floor.
+func TestMaxDownloadBytesCoversShippingBinaries(t *testing.T) {
+	const largestSeen = 93 << 20 // 1.15.0-alpha.4 = 92,895,232 B; 1.14.1 = 91,891,552 B
+	if maxDownloadBytes < largestSeen {
+		t.Fatalf("maxDownloadBytes = %d MiB, below a real artifact (%d MiB): every install would roll back",
+			maxDownloadBytes>>20, largestSeen>>20)
+	}
+}
+
 func TestFetchExpectedSHA256Formats(t *testing.T) {
 	sum := strings.Repeat("ab", 32)
 	cases := map[string]string{
@@ -589,5 +601,87 @@ func TestCheckInstallSpace(t *testing.T) {
 	statfsFunc = func(string) (uint64, uint64, error) { return 0, 0, errors.New("statfs failed") }
 	if err := checkInstallSpace("/usr/local/bin"); err != nil {
 		t.Fatalf("statfs failure must not block installs: %v", err)
+	}
+}
+
+// The gate has to scale with the artifact: the temp download lives next to the
+// binary, and an update additionally parks the displaced copy as .prev — so a
+// flat 64 MiB let a ~90 MiB artifact start on a volume that could not hold it.
+func TestCheckInstallSpaceForScalesWithArtifact(t *testing.T) {
+	orig := statfsFunc
+	defer func() { statfsFunc = orig }()
+
+	const artifact = 90 << 20
+	update := uint64(minInstallFreeBytes) + 2*artifact // replacing: .download + .prev
+	fresh := uint64(minInstallFreeBytes) + artifact
+
+	list := func(free uint64) {
+		statfsFunc = func(string) (uint64, uint64, error) { return free, 10_000, nil }
+	}
+
+	list(update - 1)
+	if err := checkInstallSpaceFor("/etc/one-sing", artifact, true); err == nil {
+		t.Fatalf("free space below 2×artifact + headroom must refuse an update")
+	}
+	list(update)
+	if err := checkInstallSpaceFor("/etc/one-sing", artifact, true); err != nil {
+		t.Fatalf("exactly enough space refused: %v", err)
+	}
+	// A fresh install keeps no .prev, so it must not be refused for a copy that
+	// does not exist.
+	list(fresh - 1)
+	if err := checkInstallSpaceFor("/etc/one-sing", artifact, false); err == nil {
+		t.Fatalf("free space below artifact + headroom must refuse a fresh install")
+	}
+	list(fresh)
+	if err := checkInstallSpaceFor("/etc/one-sing", artifact, false); err != nil {
+		t.Fatalf("fresh install refused at the honest threshold: %v", err)
+	}
+	if fresh >= update {
+		t.Fatalf("a fresh install must need less than an update (%d vs %d)", fresh, update)
+	}
+	// Without a known artifact size the old floor still applies.
+	list(uint64(minInstallFreeBytes))
+	if err := checkInstallSpaceFor("/etc/one-sing", 0, false); err != nil {
+		t.Fatalf("floor check refused at the floor: %v", err)
+	}
+}
+
+// A periodic "nothing new" report must not erase the reason the panel shows
+// (§9.2): the agent keeps reporting the last failure while the node is off its
+// desired version, and drops it once the target is in place.
+func TestReportOnlyKeepsFailureReasonOffTarget(t *testing.T) {
+	dir := t.TempDir()
+	service.SetWorkDir(dir)
+	defer service.SetWorkDir(service.SingboxWorkDir)
+
+	m := newSingboxManager(&Config{}, testLogger())
+	d := &protocol.SingboxDesired{Version: "1.15.0-alpha.4", Port: 22039}
+	m.SetDesired(d)
+
+	const reason = "download 1.15.0-alpha.4: artifact exceeds 67108864 bytes (rolled back)"
+	m.report(d, "", false, reason, certPair{})
+
+	m.reportOnly()
+	if st := m.Snapshot(); st == nil || st.LastError != reason {
+		t.Fatalf("reportOnly dropped the failure reason: %+v", st)
+	}
+
+	// The same binary now answers the desired version: the error is history.
+	fake := "#!/bin/sh\necho \"sing-box version 1.15.0-alpha.4\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "sing-box"), []byte(fake), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+	m.reportOnly()
+	st := m.Snapshot()
+	if st == nil || st.LastError != "" {
+		t.Fatalf("on-target report must clear the error: %+v", st)
+	}
+
+	// A different target also invalidates the stored reason.
+	m.report(d, "", false, reason, certPair{})
+	m.SetDesired(&protocol.SingboxDesired{Version: "1.14.1", Port: 22039})
+	if m.lastErr != "" {
+		t.Fatalf("a new desired version must drop the previous reason, got %q", m.lastErr)
 	}
 }
