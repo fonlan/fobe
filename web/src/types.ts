@@ -294,6 +294,12 @@ export interface SubAccessRow {
   ts: number;
   ip: string;
   ua: string;
+  /**
+   * §10 实现修订 2026-09-16: '' = this fetch was served, otherwise why it was
+   * refused (`ua_mismatch` / `disabled` / `render_error`). The client always saw
+   * the same 404, so this column is the only explanation there is.
+   */
+  reason: string;
 }
 
 export interface TemplateRow {

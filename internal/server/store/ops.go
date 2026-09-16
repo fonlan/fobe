@@ -515,9 +515,13 @@ func (s *Store) SubscriptionNodeIDs(subID string) ([]string, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) InsertSubAccess(subID, ip, ua string) {
-	s.db.Exec(`INSERT INTO sub_access_logs (subscription_id, ts, ip, ua) VALUES (?, ?, ?, ?)`,
-		subID, now(), ip, ua)
+// InsertSubAccess appends one /sub/<token> hit. reason is ” when the fetch was
+// served, otherwise a refusal code (see the subAccess* constants in httpapi) —
+// a 404 that the operator cannot see anywhere is a 404 they cannot debug
+// (§10 实现修订 2026-09-16).
+func (s *Store) InsertSubAccess(subID, ip, ua, reason string) {
+	s.db.Exec(`INSERT INTO sub_access_logs (subscription_id, ts, ip, ua, reason) VALUES (?, ?, ?, ?, ?)`,
+		subID, now(), ip, ua, reason)
 }
 
 // Subscription is one subscription row (design §10). The token hash is never
@@ -619,11 +623,13 @@ func (s *Store) DeleteSubscription(id string) error {
 	return err
 }
 
-// SubAccess is one /sub/<token> hit (time/IP/UA, design §10 访问日志).
+// SubAccess is one /sub/<token> hit (time/IP/UA + outcome, design §10 访问日志).
 type SubAccess struct {
 	TS int64  `json:"ts"`
 	IP string `json:"ip"`
 	UA string `json:"ua"`
+	// Reason is '' for a served fetch, else the refusal code.
+	Reason string `json:"reason"`
 }
 
 func (s *Store) ListSubAccess(subID string, limit int) ([]SubAccess, error) {
@@ -631,7 +637,7 @@ func (s *Store) ListSubAccess(subID string, limit int) ([]SubAccess, error) {
 		limit = 200
 	}
 	rows, err := s.db.Query(
-		`SELECT ts, ip, ua FROM sub_access_logs WHERE subscription_id = ? ORDER BY id DESC LIMIT ?`,
+		`SELECT ts, ip, ua, reason FROM sub_access_logs WHERE subscription_id = ? ORDER BY id DESC LIMIT ?`,
 		subID, limit)
 	if err != nil {
 		return nil, err
@@ -640,7 +646,7 @@ func (s *Store) ListSubAccess(subID string, limit int) ([]SubAccess, error) {
 	out := []SubAccess{}
 	for rows.Next() {
 		var a SubAccess
-		if err := rows.Scan(&a.TS, &a.IP, &a.UA); err != nil {
+		if err := rows.Scan(&a.TS, &a.IP, &a.UA, &a.Reason); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

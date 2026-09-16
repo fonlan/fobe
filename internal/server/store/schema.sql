@@ -205,7 +205,9 @@ CREATE TABLE IF NOT EXISTS sub_access_logs (
     subscription_id TEXT NOT NULL,
     ts              INTEGER NOT NULL,
     ip              TEXT NOT NULL DEFAULT '',
-    ua              TEXT NOT NULL DEFAULT ''
+    ua              TEXT NOT NULL DEFAULT '',
+    -- '' = served; else why the fetch was refused (§10 实现修订 2026-09-16).
+    reason          TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS templates (

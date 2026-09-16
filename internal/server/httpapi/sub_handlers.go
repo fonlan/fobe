@@ -693,10 +693,25 @@ func (s *Server) renderSubscription(sub *store.Subscription, format string, node
 // match the client 404s identically — before any format sniffing, so an
 // explicit ?format= cannot bypass it. Every allowed hit is logged for the
 // panel's access log.
+// Refusal codes stored in sub_access_logs.reason (§10 实现修订 2026-09-16).
+// ” means the fetch was served. Every refusal answers the client with the same
+// 404 as an unknown token, so this column is the *only* place the operator can
+// see why a client was turned away.
+const (
+	subAccessServed     = ""
+	subAccessDisabled   = "disabled"
+	subAccessUAMismatch = "ua_mismatch"
+	subAccessRenderErr  = "render_error"
+)
+
 func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	sub, err := s.Store.GetSubscriptionByToken(tokenHash(token))
-	if errors.Is(err, store.ErrNotFound) || (err == nil && !sub.Enabled) {
+	if errors.Is(err, store.ErrNotFound) {
+		// An unknown token belongs to no subscription, so there is nowhere in
+		// the panel to show it (the access log is per subscription). Logging it
+		// would also mean inventing a row for a subscription that may not
+		// exist; §10's "never reveal whether the URL exists" is unaffected.
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -704,7 +719,13 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	if !sub.Enabled {
+		s.logSubAccess(sub.ID, r, subAccessDisabled)
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
 	if !uaAllowed(sub.UAFilter, r.Header.Get("User-Agent")) {
+		s.logSubAccess(sub.ID, r, subAccessUAMismatch)
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -714,11 +735,12 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	body, err := s.renderSubscription(sub, format, nodes)
 	if err != nil {
 		s.Log.Error("render subscription", "sub", sub.ID, "err", err)
+		s.logSubAccess(sub.ID, r, subAccessRenderErr)
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
 
-	s.InsertSubAccessSafe(sub.ID, s.Trust.RealIP(r), r.Header.Get("User-Agent"))
+	s.logSubAccess(sub.ID, r, subAccessServed)
 
 	w.Header().Set("Cache-Control", "no-store")
 	if format == FormatClash {
@@ -730,8 +752,9 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
-// InsertSubAccessSafe wraps the fire-and-forget access log write so a logging
-// failure can never break a subscription fetch.
-func (s *Server) InsertSubAccessSafe(subID, ip, ua string) {
-	s.Store.InsertSubAccess(subID, ip, ua)
+// logSubAccess writes one access-log row (fire-and-forget: a logging failure
+// must never break a subscription fetch). reason is subAccessServed for a
+// served fetch, else the refusal code.
+func (s *Server) logSubAccess(subID string, r *http.Request, reason string) {
+	s.Store.InsertSubAccess(subID, s.Trust.RealIP(r), r.Header.Get("User-Agent"), reason)
 }

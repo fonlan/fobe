@@ -372,3 +372,88 @@ func TestSubscriptionFormatResolution(t *testing.T) {
 		t.Fatalf("bad format: %d %s", r.Status, r.Body)
 	}
 }
+
+// TestSubscriptionAccessLogRefusalReasons covers the §10 实现修订 2026-09-16
+// access log: a refused fetch answers the client with exactly the same 404 as
+// an unknown token, so the reason column is the only explanation the operator
+// ever gets.
+func TestSubscriptionAccessLogRefusalReasons(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+	client := &http.Client{}
+	setAnytlsPassword(t, srv, cookie)
+
+	nodeID, _ := seedNode(t, api, "probe-log", "m-log-1", "203.0.113.50")
+	seedSingbox(t, api, nodeID, 28000)
+
+	subID, token := createSubscription(t, srv, cookie, "logged")
+	if r := doReq(t, client, "PUT", srv.URL+"/api/subscriptions/"+subID+"/nodes", cookie,
+		map[string]any{"node_ids": []string{nodeID}}); r.Status != 200 {
+		t.Fatalf("bind nodes: %d %s", r.Status, r.Body)
+	}
+
+	// 1. served
+	if r := fetchSub(t, srv, token, "?format=singbox", "curl/8.4.0"); r.Status != http.StatusOK {
+		t.Fatalf("served fetch: %d %s", r.Status, r.Body)
+	}
+
+	// 2. UA filter refuses the same client
+	if r := doReq(t, client, "PUT", srv.URL+"/api/subscriptions/"+subID, cookie,
+		map[string]any{"ua_filter": "clash,mihomo"}); r.Status != 200 {
+		t.Fatalf("set ua filter: %d %s", r.Status, r.Body)
+	}
+	refusedUA := fetchSub(t, srv, token, "?format=singbox", "curl/8.4.0")
+	if refusedUA.Status != http.StatusNotFound {
+		t.Fatalf("ua mismatch must 404: %d %s", refusedUA.Status, refusedUA.Body)
+	}
+
+	// 3. disabled subscription
+	if r := doReq(t, client, "PUT", srv.URL+"/api/subscriptions/"+subID, cookie,
+		map[string]any{"enabled": false}); r.Status != 200 {
+		t.Fatalf("disable: %d %s", r.Status, r.Body)
+	}
+	refusedDisabled := fetchSub(t, srv, token, "?format=singbox", "clash-verge/2.0.0 mihomo")
+	if refusedDisabled.Status != http.StatusNotFound {
+		t.Fatalf("disabled must 404: %d %s", refusedDisabled.Status, refusedDisabled.Body)
+	}
+	// the two refusals must stay indistinguishable to the client
+	if string(refusedUA.Body) != string(refusedDisabled.Body) {
+		t.Fatalf("refusal bodies leak the reason: %s vs %s", refusedUA.Body, refusedDisabled.Body)
+	}
+
+	// an unknown token belongs to no subscription → nothing to attribute it to
+	if r := fetchSub(t, srv, "totally-unknown-token", "", ""); r.Status != http.StatusNotFound {
+		t.Fatalf("unknown token: %d", r.Status)
+	}
+
+	r := doReq(t, client, "GET", srv.URL+"/api/subscriptions/"+subID+"/access", cookie, nil)
+	var al struct {
+		Logs []struct {
+			TS     int64  `json:"ts"`
+			IP     string `json:"ip"`
+			UA     string `json:"ua"`
+			Reason string `json:"reason"`
+		} `json:"logs"`
+	}
+	if err := json.Unmarshal(r.Body, &al); err != nil {
+		t.Fatalf("access log: %v", err)
+	}
+	got := make([]string, 0, len(al.Logs))
+	for _, l := range al.Logs {
+		got = append(got, l.Reason)
+	}
+	// newest first: disabled, ua_mismatch, served — and nothing for the unknown
+	// token, which is the documented trade-off (no subscription to show it on)
+	want := []string{"disabled", "ua_mismatch", ""}
+	if len(got) != len(want) {
+		t.Fatalf("access rows = %v, want %v (%s)", got, want, r.Body)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("access reasons = %v, want %v", got, want)
+		}
+	}
+	if al.Logs[0].IP == "" || al.Logs[2].UA != "curl/8.4.0" {
+		t.Fatalf("access rows lost their ip/ua: %s", r.Body)
+	}
+}

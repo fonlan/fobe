@@ -610,6 +610,14 @@ function UAFilterEditor({ sub, onSave }: { sub: SubscriptionRow; onSave: (filter
   );
 }
 
+/** §10 修订: refusal codes stored in sub_access_logs.reason. */
+const ACCESS_REASON_KEYS: Record<string, string> = {
+  '': 'sub_access_served',
+  ua_mismatch: 'sub_access_ua_mismatch',
+  disabled: 'sub_access_disabled',
+  render_error: 'sub_access_render_error',
+};
+
 function AccessLog({ subId }: { subId: string }) {
   const { t } = useI18n();
   const [logs, setLogs] = useState<SubAccessRow[] | null>(null);
@@ -637,14 +645,20 @@ function AccessLog({ subId }: { subId: string }) {
             <thead>
               <tr>
                 <th>{t('audit_time')}</th>
+                <th>{t('sub_access_result')}</th>
                 <th>{t('session_ip')}</th>
                 <th>{t('session_ua')}</th>
               </tr>
             </thead>
             <tbody>
               {logs.map((l, i) => (
-                <tr key={i}>
+                <tr key={i} className={l.reason === '' ? '' : 'row-muted'}>
                   <td className="mono nowrap">{fmtTime(l.ts)}</td>
+                  <td className="nowrap">
+                    <span className={'chip ' + (l.reason === '' ? 'status-ok' : 'status-failed')}>
+                      {t(ACCESS_REASON_KEYS[l.reason] ?? 'sub_access_refused')}
+                    </span>
+                  </td>
                   <td className="mono">{l.ip}</td>
                   <td className="ua-cell" title={l.ua}>
                     {l.ua || '-'}
