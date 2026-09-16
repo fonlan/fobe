@@ -228,12 +228,12 @@ func (h *Hub) onState(nodeID string, st *protocol.State) {
 		// sync and flip the list column back and forth on every report.
 		if primary != "" {
 			if n, err := h.store.GetNode(nodeID); err == nil && (n.PrimaryIP == "" || !ipInRows(st.IPs, n.PrimaryIP)) {
-				_ = h.store.SetNodePrimaryIP(nodeID, primary, h.countryFor(primary, n.CountryCode))
+				_ = h.store.SetNodePrimaryIP(nodeID, primary, h.countryFor(n, primary))
 			}
 		} else if n, err := h.store.GetNode(nodeID); err == nil && (n.PrimaryIP == "" || !ipInRows(st.IPs, n.PrimaryIP)) {
 			for _, ip := range st.IPs {
 				if ip.Scope == "public" && ip.Family == 4 {
-					_ = h.store.SetNodePrimaryIP(nodeID, ip.IP, h.countryFor(ip.IP, n.CountryCode))
+					_ = h.store.SetNodePrimaryIP(nodeID, ip.IP, h.countryFor(n, ip.IP))
 					break
 				}
 			}
@@ -269,15 +269,17 @@ func ipInRows(ips []protocol.IPInfo, want string) bool {
 
 // countryFor resolves the country of the node's primary IP (design §14):
 // local MMDB first, online fallback when configured. A nil resolver or a
-// lookup miss returns prev so an existing country_code survives.
-func (h *Hub) countryFor(ip, prev string) string {
-	if h.geo == nil || ip == "" {
-		return prev
+// lookup miss returns prev so an existing country_code survives. A §14
+// manually pinned country short-circuits the lookup entirely — the operator's
+// pick survives primary-IP changes until it is cleared from the edit page.
+func (h *Hub) countryFor(n *store.Node, ip string) string {
+	if n.CountryManual || h.geo == nil || ip == "" {
+		return n.CountryCode
 	}
 	if code, ok := h.geo.Country(ip); ok {
 		return code
 	}
-	return prev
+	return n.CountryCode
 }
 
 func (h *Hub) recordSingboxState(nodeID string, s *protocol.SingboxState) {

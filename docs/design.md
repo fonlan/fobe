@@ -600,6 +600,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
   2. 未命中且可配置在线 API（ip-api / ipinfo，可选配 key）作为回退。
 - 国旗 = ISO 3166-1 alpha-2 → emoji/图标资源（前端内置，不依赖 CDN）。
 - 主 IP 选择：默认第一个公网 IPv4，否则第一个公网 IPv6；面板可手动指定（`node_ips.is_primary` + `manual_primary`），订阅渲染使用主 IP（或你填的域名）。**手动主 IP 的口径（修订 2026-09-15）**：`nodes.primary_ip` 是列表/卡片/订阅实际读取的字段，手动选择必须落在它上面——`ReplaceNodeIPs` 在每次全量上报时若手动选择仍在上报集内，就把 `nodes.primary_ip` 同步写回该地址（同事务）；hub 只在当前 primary 为空或不在上报集内时才重新指认（含 agent 未标 primary 的回退分支）。此前实现只在 `node_ips` 里保住标志、不同步 `nodes.primary_ip`，被旧版覆盖逻辑带偏的值（仍在上报集内）永远不会自愈，表现为列表一直显示 agent 自选地址。
+- **手动国旗（修订 2026-09-16）**：geoip 对 CDN/中转/隧道后的机器经常判错，且主 IP 一变（换网、手动换主 IP）旗子就跟着错，所以国旗要能手动改。编辑服务器页新增「国家 / 地区」字段，走 `PATCH /api/nodes/{id}` 的 `country_code`：填两位字母即钉住（`nodes.country_manual=1`，镜像 `manual_primary` 的先例），此后主 IP 变化/重新指认**不再**回退为 IP 库结果——`countryFor` 遇 manual 直接短路，且 `SetNodePrimaryIP` 在 SQL 里 `CASE WHEN country_manual=1` 保留原值，"手动优先"是行本身的性质，不依赖每个调用方记得判；清空提交即取消钉住并**当场**用当前主 IP 重查一次（`GeoIPResolver` 未命中则保留现值），"回到自动"不用等下次 IP 变化。校验只认 `[A-Z]{2}`，其余回 `invalid_country_code`。schema 加列 `nodes.country_manual`（SchemaVersion 2→3）。
 
 ### 14.1 数据库的自动下载与更新（实现修订 2026-09-15）
 

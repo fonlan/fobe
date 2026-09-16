@@ -140,6 +140,9 @@ type Node struct {
 	CPUCores      int
 	PrimaryIP     string
 	CountryCode   string
+	// CountryManual is the §14 operator pin: when set, hub never re-derives
+	// country_code from the primary IP, same contract as node_ips.manual_primary.
+	CountryManual bool
 	TZ            string
 	Caps          json.RawMessage
 	// Agent self-update bookkeeping (design §5.5).
@@ -155,7 +158,7 @@ type Node struct {
 // column in one place and forgetting the others used to be the easy mistake
 // (scanNode would then fail at runtime, not at compile time).
 const nodeColumns = `id, name, machine_id, status, note, created_at, last_seen, agent_version,
-		        os, arch, kernel, distro_id, distro_version, hostname, cpu_cores, primary_ip, country_code, tz, caps,
+		        os, arch, kernel, distro_id, distro_version, hostname, cpu_cores, primary_ip, country_code, country_manual, tz, caps,
 		        agent_target_version, agent_update_state, agent_update_attempts, agent_update_error,
 		        agent_update_planned_at, agent_update_done_at`
 
@@ -211,7 +214,7 @@ func (s *Store) scanNode(rs rowScanner) (*Node, error) {
 	var caps string
 	err := rs.Scan(&n.ID, &n.Name, &n.MachineID, &n.Status, &n.Note, &n.CreatedAt, &n.LastSeen,
 		&n.AgentVersion, &n.OS, &n.Arch, &n.Kernel, &n.DistroID, &n.DistroVersion, &n.Hostname, &n.CPUCores,
-		&n.PrimaryIP, &n.CountryCode, &n.TZ, &caps,
+		&n.PrimaryIP, &n.CountryCode, &n.CountryManual, &n.TZ, &caps,
 		&n.AgentTargetVersion, &n.AgentUpdateState, &n.AgentUpdateAttempts, &n.AgentUpdateError,
 		&n.AgentUpdatePlannedAt, &n.AgentUpdateDoneAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -346,8 +349,19 @@ func (s *Store) DeleteNode(id string) error {
 	return err
 }
 
+// SetNodePrimaryIP re-pins the primary address. country_manual=1 (§14 手动
+// 国旗) keeps the stored country_code no matter what the caller passes — the
+// pin is a property of the row, not of every caller remembering the guard.
 func (s *Store) SetNodePrimaryIP(id, ip, country string) error {
-	_, err := s.Exec(`UPDATE nodes SET primary_ip = ?, country_code = ? WHERE id = ?`, ip, country, id)
+	_, err := s.Exec(`UPDATE nodes SET primary_ip = ?,
+		country_code = CASE WHEN country_manual = 1 THEN country_code ELSE ? END WHERE id = ?`, ip, country, id)
+	return err
+}
+
+// SetNodeCountry writes the §14 display country; manual=true pins it against
+// geoip re-derivation (the flag survives primary-IP changes until cleared).
+func (s *Store) SetNodeCountry(id, code string, manual bool) error {
+	_, err := s.Exec(`UPDATE nodes SET country_code = ?, country_manual = ? WHERE id = ?`, code, manual, id)
 	return err
 }
 

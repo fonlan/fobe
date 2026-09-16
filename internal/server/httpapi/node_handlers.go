@@ -16,19 +16,22 @@ import (
 
 // nodeView is the list/card shape the frontend renders (design §16).
 type nodeView struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Status       string `json:"status"`
-	Online       bool   `json:"online"`
-	Note         string `json:"note"`
-	OS           string `json:"os"`
-	Arch         string `json:"arch"`
-	Hostname     string `json:"hostname"`
-	CPUCores     int    `json:"cpu_cores"`
-	PrimaryIP    string `json:"primary_ip"`
-	CountryCode  string `json:"country_code"`
-	AgentVersion string `json:"agent_version"`
-	TZ           string `json:"tz"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Online      bool   `json:"online"`
+	Note        string `json:"note"`
+	OS          string `json:"os"`
+	Arch        string `json:"arch"`
+	Hostname    string `json:"hostname"`
+	CPUCores    int    `json:"cpu_cores"`
+	PrimaryIP   string `json:"primary_ip"`
+	CountryCode string `json:"country_code"`
+	// CountryManual marks a §14 operator-pinned flag (edit-page field); the
+	// UI uses it to say "手动指定" instead of implying geoip said so.
+	CountryManual bool   `json:"country_manual"`
+	AgentVersion  string `json:"agent_version"`
+	TZ            string `json:"tz"`
 	// Linux distribution the agent detected from /etc/os-release (§16 基本信息).
 	DistroID      string  `json:"distro_id"`
 	DistroVersion string  `json:"distro_version"`
@@ -87,9 +90,10 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 		ID: n.ID, Name: n.Name, Status: n.Status, Online: n.Status == "online",
 		Note: n.Note, OS: n.OS, Arch: n.Arch, Hostname: n.Hostname,
 		CPUCores: n.CPUCores, PrimaryIP: n.PrimaryIP, CountryCode: n.CountryCode,
-		AgentVersion: n.AgentVersion,
-		TZ:           n.TZ,
-		DistroID:     n.DistroID, DistroVersion: n.DistroVersion,
+		CountryManual: n.CountryManual,
+		AgentVersion:  n.AgentVersion,
+		TZ:            n.TZ,
+		DistroID:      n.DistroID, DistroVersion: n.DistroVersion,
 		PeriodPct: -1,
 
 		AgentTargetVersion:  n.AgentTargetVersion,
@@ -221,8 +225,11 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateNodeReq struct {
-	Name             *string          `json:"name,omitempty"`
-	Note             *string          `json:"note,omitempty"`
+	Name *string `json:"name,omitempty"`
+	Note *string `json:"note,omitempty"`
+	// CountryCode (§14 手动国旗): "XX" pins the flag; "" clears the pin and
+	// re-derives from the current primary IP. Pointer = absent vs explicit.
+	CountryCode      *string          `json:"country_code,omitempty"`
 	Network          *networkReq      `json:"network,omitempty"`
 	TrafficCycle     *trafficCycleReq `json:"traffic_cycle,omitempty"`
 	Billing          *billingReq      `json:"billing,omitempty"`
@@ -279,6 +286,17 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Note != nil {
 		_ = s.Store.SetNodeNote(id, *req.Note)
+	}
+	if req.CountryCode != nil {
+		cc := strings.ToUpper(strings.TrimSpace(*req.CountryCode))
+		if cc != "" && !isValidCountryCode(cc) {
+			writeErr(w, http.StatusBadRequest, "invalid_country_code")
+			return
+		}
+		if err := s.setNodeCountry(id, cc); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
 	}
 	networkChanged := req.Network != nil || req.TrafficCycle != nil
 	if req.Network != nil || req.TrafficCycle != nil {
@@ -351,6 +369,33 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	s.Store.InsertAudit(&store.AuditEntry{Actor: "panel", NodeID: id, Action: "node_updated", SourceIP: s.Trust.RealIP(r)})
 	s.publishEvent("node_updated", id)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// --- §14 手动国旗: pin or reset the flag shown for a node ---
+
+func isValidCountryCode(cc string) bool {
+	if len(cc) != 2 {
+		return false
+	}
+	return cc[0] >= 'A' && cc[0] <= 'Z' && cc[1] >= 'A' && cc[1] <= 'Z'
+}
+
+// setNodeCountry applies one PATCH country_code value. Non-empty pins the
+// code (country_manual=1, hub stops re-deriving); empty clears the pin and
+// re-derives from the current primary IP best-effort so "回到自动" takes
+// effect immediately instead of waiting for the next IP change.
+func (s *Server) setNodeCountry(id, cc string) error {
+	code := cc
+	if cc == "" {
+		if n, err := s.Store.GetNode(id); err == nil && n.PrimaryIP != "" && s.GeoIPResolver != nil {
+			if derived, ok := s.GeoIPResolver.Country(n.PrimaryIP); ok {
+				code = derived
+			} else {
+				code = n.CountryCode
+			}
+		}
+	}
+	return s.Store.SetNodeCountry(id, code, cc != "")
 }
 
 func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {

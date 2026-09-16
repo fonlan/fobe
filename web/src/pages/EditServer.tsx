@@ -263,6 +263,7 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
 
   const [name, setName] = useState(node.name);
   const [note, setNote] = useState(node.note);
+  const [country, setCountry] = useState(node.country_code);
   const [iface, setIface] = useState(net?.iface ?? '');
   const [mode, setMode] = useState<string>(net?.mode ?? 'both');
   const [quotaGb, setQuotaGb] = useState(
@@ -291,6 +292,7 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
       await api.updateNode(node.id, {
         name,
         note,
+        country_code: country.trim().toUpperCase(),
         network: {
           iface: iface.trim(),
           mode,
@@ -322,6 +324,22 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
         <label className="field">
           <span>{t('edit_name')}</span>
           <input value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>{t('country_region')}</span>
+          <div className="row-gap">
+            <Flag cc={country} />
+            <input
+              className="mono"
+              value={country}
+              maxLength={2}
+              placeholder="HK"
+              onChange={(e) => setCountry(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))}
+            />
+          </div>
+          <small className="hint">
+            {t(node.country_manual ? 'country_manual_hint' : 'country_auto_hint')}
+          </small>
         </label>
         <label className="field">
           <span>{t('note')}</span>

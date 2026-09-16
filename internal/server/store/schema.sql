@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     cpu_cores       INTEGER NOT NULL DEFAULT 0,
     primary_ip      TEXT NOT NULL DEFAULT '',
     country_code    TEXT NOT NULL DEFAULT '',
+    country_manual  INTEGER NOT NULL DEFAULT 0, -- §14 手动指定的国旗,主 IP 变化后不回退
     tz              TEXT NOT NULL DEFAULT 'UTC',
     caps            TEXT NOT NULL DEFAULT '{}',
     -- agent self-update bookkeeping (design §5.5). target is the version this

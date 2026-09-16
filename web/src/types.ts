@@ -17,6 +17,8 @@ export interface NodeView {
   cpu_cores: number;
   primary_ip: string;
   country_code: string;
+  /** §14: true = flag pinned from the edit page, survives IP changes. */
+  country_manual: boolean;
   agent_version: string;
   tz: string;
   /** Linux distribution detected by the agent from /etc/os-release (§16). */

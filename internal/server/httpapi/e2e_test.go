@@ -509,3 +509,115 @@ func statusCode(r *http.Response) int {
 	}
 	return r.StatusCode
 }
+
+// stubResolver stands in for the §14 geoip chain; tests flip code/ok to
+// simulate a lookup hit or miss.
+type stubResolver struct {
+	code string
+	ok   bool
+}
+
+func (s stubResolver) Country(string) (string, bool) { return s.code, s.ok }
+
+func patchJSON(t *testing.T, url, cookie string, body any) (*http.Response, map[string]any) {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	req, _ := http.NewRequest("PATCH", url, bytes.NewReader(raw))
+	req.Header.Set("Cookie", cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp, out
+}
+
+// TestNodeCountryOverride covers §14 手动国旗 (revision 2026-09-16): pinning a
+// code, the pin surviving a primary-IP re-pin, rejection of malformed codes,
+// and clearing back to auto (re-derived immediately from the current IP).
+func TestNodeCountryOverride(t *testing.T) {
+	srv, api := newTestServer(t)
+
+	resp, _ := postJSON(t, &http.Client{}, srv.URL+"/api/login", map[string]string{"password": "test-password-123"})
+	cookie := ""
+	for _, c := range readCookies(resp) {
+		if c.Name == security.SessionCookieName {
+			cookie = c.Name + "=" + c.Value
+		}
+	}
+	if cookie == "" {
+		t.Fatal("no session cookie")
+	}
+
+	token := freshToken(t, srv, cookie, "flag-node")
+	_, reg := postJSON(t, &http.Client{}, srv.URL+"/api/agent/register", map[string]any{
+		"token": token, "machine_id": "m-flag-1", "hostname": "flaghost",
+		"os": "linux", "arch": "amd64", "version": "dev", "tz": "UTC", "cpu_cores": 1,
+	})
+	nodeID, _ := reg["node_id"].(string)
+	if nodeID == "" {
+		t.Fatalf("register failed: %v", reg)
+	}
+
+	getNode := func() (string, bool) {
+		req, _ := http.NewRequest("GET", srv.URL+"/api/nodes/"+nodeID, nil)
+		req.Header.Set("Cookie", cookie)
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		var body struct {
+			Node struct {
+				CountryCode   string `json:"country_code"`
+				CountryManual bool   `json:"country_manual"`
+			} `json:"node"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		return body.Node.CountryCode, body.Node.CountryManual
+	}
+
+	// pin: lowercase input is normalised, manual flag set
+	if r, out := patchJSON(t, srv.URL+"/api/nodes/"+nodeID, cookie, map[string]string{"country_code": "us"}); r.StatusCode != 200 {
+		t.Fatalf("pin country: %d %v", r.StatusCode, out)
+	}
+	if cc, manual := getNode(); cc != "US" || !manual {
+		t.Fatalf("after pin: cc=%q manual=%v, want US/true", cc, manual)
+	}
+
+	// the pin survives a primary-IP re-pin that would carry a geoip country
+	if err := api.Store.SetNodePrimaryIP(nodeID, "203.0.113.7", "JP"); err != nil {
+		t.Fatal(err)
+	}
+	if cc, manual := getNode(); cc != "US" || !manual {
+		t.Fatalf("after IP re-pin: cc=%q manual=%v, want US/true (pin must not regress)", cc, manual)
+	}
+
+	// malformed codes are rejected
+	r, out := patchJSON(t, srv.URL+"/api/nodes/"+nodeID, cookie, map[string]string{"country_code": "X1"})
+	if r.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid code: %d %v", r.StatusCode, out)
+	}
+	if code, _ := out["error"].(map[string]any)["code"].(string); code != "invalid_country_code" {
+		t.Fatalf("invalid code: got %q, want invalid_country_code", code)
+	}
+
+	// clear: manual off, immediately re-derived from the current primary IP
+	api.GeoIPResolver = stubResolver{code: "SG", ok: true}
+	if r, out := patchJSON(t, srv.URL+"/api/nodes/"+nodeID, cookie, map[string]string{"country_code": ""}); r.StatusCode != 200 {
+		t.Fatalf("clear country: %d %v", r.StatusCode, out)
+	}
+	if cc, manual := getNode(); cc != "SG" || manual {
+		t.Fatalf("after clear: cc=%q manual=%v, want SG/false (re-derived)", cc, manual)
+	}
+
+	// a lookup miss on the next clear keeps the last known value
+	api.GeoIPResolver = stubResolver{code: "", ok: false}
+	if r, out := patchJSON(t, srv.URL+"/api/nodes/"+nodeID, cookie, map[string]string{"country_code": ""}); r.StatusCode != 200 {
+		t.Fatalf("clear again: %d %v", r.StatusCode, out)
+	}
+	if cc, manual := getNode(); cc != "SG" || manual {
+		t.Fatalf("after clear+miss: cc=%q manual=%v, want SG/false", cc, manual)
+	}
+}

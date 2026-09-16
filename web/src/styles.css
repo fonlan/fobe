@@ -269,6 +269,9 @@ section.card { margin-bottom: 0; }
 .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
 .field > span { font-size: 13px; color: var(--text-dim); font-weight: 500; }
 .field.inline { flex-direction: row; align-items: center; gap: 8px; margin-bottom: 0; }
+/* flag preview + code input (§14 manual country on the edit-server page) */
+.field .row-gap { flex-wrap: nowrap; }
+.field .row-gap input { flex: 1; }
 
 .field input,
 .field select {

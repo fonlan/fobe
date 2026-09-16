@@ -178,6 +178,8 @@ export function getNode(id: string): Promise<NodeDetailData> {
 export interface UpdateNodeBody {
   name?: string;
   note?: string;
+  /** §14 手动国旗: "XX" pins the flag, "" clears the pin (back to auto). */
+  country_code?: string;
   network?: {
     iface: string;
     mode: string;
