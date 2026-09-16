@@ -101,13 +101,15 @@ export function datetimeLocalToUnix(s: string): number | null {
   return isFinite(t) ? Math.floor(t / 1000) : null;
 }
 
-/** Parse a seconds-precise datetime-local value as wall time in an IANA zone. */
+/** Parse a datetime-local value as wall time in an IANA zone. Seconds optional:
+ *  browsers serialize the input value canonically and drop ":00" seconds even
+ *  with step=1, so a picked "00:00" comes back as "T00:00". */
 export function datetimeLocalInZoneToUnix(s: string, timeZone: string): number | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(s);
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(s);
   if (!match) return null;
   const target = {
     year: Number(match[1]), month: Number(match[2]), day: Number(match[3]),
-    hour: Number(match[4]), minute: Number(match[5]), second: Number(match[6]),
+    hour: Number(match[4]), minute: Number(match[5]), second: Number(match[6] ?? 0),
   };
   const targetUTC = Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute, target.second);
   let unix = Math.floor(targetUTC / 1000);
