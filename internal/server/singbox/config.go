@@ -218,9 +218,216 @@ func EffectiveAnytlsPassword(globalPassword, override string) string {
 // BuildNodeConfigWithOverride is BuildNodeConfig with a per-node password
 // override (§19.9). The override travels to the agent inside ConfigJSON —
 // SingboxDesired carries no password field, so nothing changes on the wire.
-// v1 keeps this data-model/generation only: no UI or API sets it yet.
+// It is also how an adopted anytls inbound keeps its own password: the inbound
+// that one-sing.sh generated already has one, and rotating it on takeover would
+// break every client that was handed the script's URI.
 func BuildNodeConfigWithOverride(port int, globalPassword, override string) ([]byte, error) {
 	return BuildNodeConfig(port, EffectiveAnytlsPassword(globalPassword, override))
+}
+
+// --- adopted inbounds (§9.3 实现修订 2026-09-17) ---
+
+// ExtraInbound is one inbound lifted from a probe's own config.json and kept
+// as part of fobe's desired state. Without this, the first convergence after
+// adoption rewrites the whole file and the operator's VLESS/SS/Socks inbounds
+// disappear (that is the behaviour this feature exists to end).
+type ExtraInbound struct {
+	Type       string `json:"type"`
+	Tag        string `json:"tag"`
+	Listen     string `json:"listen,omitempty"`
+	ListenPort int    `json:"listen_port"`
+	Method     string `json:"method,omitempty"`
+	// Password is the *top-level* credential, i.e. classic shadowsocks. Every
+	// other protocol carries it per user: a top-level `password` on a vless or
+	// anytls inbound is rejected by sing-box outright.
+	Password string      `json:"password,omitempty"`
+	Users    []ExtraUser `json:"users,omitempty"`
+	TLS      *ExtraTLS   `json:"tls,omitempty"`
+	// Raw keeps the parts of the original inbound this struct does not model
+	// (multiplex, sniff, a padding_scheme, a detour…). It is never persisted —
+	// the stored form is the typed fields, which are the ones the panel and the
+	// subscription renderer understand — but a generated config puts them back,
+	// so adoption does not quietly drop inbound options the operator set.
+	Raw map[string]any `json:"-"`
+}
+
+// ExtraUser is one inbound user, modelled for the protocols fobe renders:
+// anytls and socks5 use Password, vless uses UUID (+ Flow).
+type ExtraUser struct {
+	Name     string `json:"name,omitempty"`
+	Password string `json:"password,omitempty"`
+	UUID     string `json:"uuid,omitempty"`
+	Flow     string `json:"flow,omitempty"`
+}
+
+// ExtraTLS mirrors the tls section closely enough to round-trip what
+// one-sing.sh writes plus the REALITY public key adoption derives.
+type ExtraTLS struct {
+	Enabled         bool          `json:"enabled"`
+	ServerName      string        `json:"server_name,omitempty"`
+	CertificatePath string        `json:"certificate_path,omitempty"`
+	KeyPath         string        `json:"key_path,omitempty"`
+	Reality         *ExtraReality `json:"reality,omitempty"`
+}
+
+// ExtraReality is the REALITY half of a VLESS inbound. PublicKey is filled by
+// adoption (derived from PrivateKey, see realityPublicKey) so a client can dial
+// the inbound without the operator running one-sing.sh's key derivation again.
+//
+// It must NOT reach the probe's config: sing-box's server-side reality object
+// has no `public_key` (it is the client half), and a config carrying it fails
+// gate ① outright — verified on a live probe (2026-09-17), which is why the
+// config builder rebuilds inbounds from a whitelist instead of marshalling
+// this struct.
+type ExtraReality struct {
+	Enabled    bool                `json:"enabled"`
+	PrivateKey string              `json:"private_key,omitempty"`
+	PublicKey  string              `json:"public_key,omitempty"`
+	ShortID    []string            `json:"short_id,omitempty"`
+	Handshake  *ExtraRealityHandsh `json:"handshake,omitempty"`
+}
+
+// ExtraRealityHandsh is the REALITY handshake target (the site whose TLS the
+// inbound borrows).
+type ExtraRealityHandsh struct {
+	Server     string `json:"server"`
+	ServerPort int    `json:"server_port"`
+}
+
+// ExtraInboundFrom converts a parsed local inbound into the storable form.
+// It keeps the credential (the inbound has to keep working) and the derived
+// REALITY public key.
+func ExtraInboundFrom(ib LocalInbound) ExtraInbound {
+	extra := ExtraInbound{
+		Type:       ib.Type,
+		Tag:        ib.Tag,
+		Listen:     "::",
+		ListenPort: ib.Port,
+	}
+	if listen, _ := ib.Inbound["listen"].(string); listen != "" {
+		extra.Listen = listen
+	}
+	if method, _ := ib.Inbound["method"].(string); method != "" {
+		extra.Method = method
+	}
+	// The TOP-LEVEL password only (classic shadowsocks). A per-user password
+	// belongs in Users below: sing-box rejects `password` on a vless/anytls
+	// inbound outright ("inbounds[1].password: unknown field"), and gate ①
+	// caught exactly that on a real probe. Reading the user's password here
+	// instead of the inbound's is what put it there.
+	if pw, _ := ib.Inbound["password"].(string); pw != "" {
+		extra.Password = pw
+	}
+	if users, ok := ib.Inbound["users"].([]any); ok {
+		for _, raw := range users {
+			u, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			eu := ExtraUser{}
+			eu.Name, _ = u["name"].(string)
+			eu.Password, _ = u["password"].(string)
+			eu.UUID, _ = u["uuid"].(string)
+			eu.Flow, _ = u["flow"].(string)
+			extra.Users = append(extra.Users, eu)
+		}
+	}
+	if tls := InboundTLS(ib.Inbound); tls != nil {
+		et := &ExtraTLS{}
+		et.Enabled, _ = tls["enabled"].(bool)
+		et.ServerName, _ = tls["server_name"].(string)
+		et.CertificatePath, _ = tls["certificate_path"].(string)
+		et.KeyPath, _ = tls["key_path"].(string)
+		if reality, _ := tls["reality"].(map[string]any); reality != nil {
+			er := &ExtraReality{}
+			er.Enabled, _ = reality["enabled"].(bool)
+			er.PrivateKey, _ = reality["private_key"].(string)
+			er.PublicKey = InboundRealityPublicKey(ib.Inbound)
+			if ids, ok := reality["short_id"].([]any); ok {
+				for _, raw := range ids {
+					if s, ok := raw.(string); ok {
+						er.ShortID = append(er.ShortID, s)
+					}
+				}
+			}
+			if hs, ok := reality["handshake"].(map[string]any); ok {
+				er.Handshake = &ExtraRealityHandsh{}
+				er.Handshake.Server, _ = hs["server"].(string)
+				er.Handshake.ServerPort = intField(hs["server_port"])
+			}
+			et.Reality = er
+		}
+		extra.TLS = et
+	}
+	// Keep the unmodelled keys (minus the ones this struct now owns, so the
+	// typed values always win when the config is rebuilt).
+	//
+	// `password` is deliberately dropped for every protocol except shadowsocks:
+	// the struct holds it as a top-level field there, and for anytls/vless/socks
+	// the credential belongs to the user. Re-merging it "because it was in the
+	// original file" is what produced `inbounds[1].password: unknown field` on a
+	// live probe (2026-09-17) — gate ① caught it, but only after fobe had
+	// stopped the operator's service to try.
+	raw := make(map[string]any, len(ib.Inbound))
+	for k, v := range ib.Inbound {
+		switch k {
+		case "type", "tag", "listen", "listen_port", "method", "password", "users", "tls":
+			continue
+		}
+		raw[k] = v
+	}
+	if ib.Type == ProtoShadowsocks {
+		if pw, ok := ib.Inbound["password"]; ok {
+			raw["password"] = pw
+		}
+	}
+	if len(raw) > 0 {
+		extra.Raw = raw
+	}
+	return extra
+}
+
+// BuildNodeConfigWithInbounds is BuildNodeConfig plus the adopted inbounds.
+//
+// The generated anytls inbound always wins a port collision: it is the one
+// the panel owns (its port, its certificate, its subscription entry), and
+// letting a stale adopted copy shadow it would make "install this node" look
+// like it did nothing. `extras` is passed already decoded so callers cannot
+// forget to parse it and silently drop the operator's inbounds.
+func BuildNodeConfigWithInbounds(port int, password string, extras []ExtraInbound) ([]byte, error) {
+	base, err := BuildNodeConfig(port, password)
+	if err != nil {
+		return nil, err
+	}
+	if len(extras) == 0 {
+		return base, nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(base, &doc); err != nil {
+		return nil, fmt.Errorf("re-read generated config: %w", err)
+	}
+	inbounds, _ := doc["inbounds"].([]any)
+	used := map[int]bool{port: true}
+	for _, e := range extras {
+		if e.ListenPort <= 0 || used[e.ListenPort] {
+			continue
+		}
+		if e.Type == ProtoAnytls && port == e.ListenPort {
+			continue
+		}
+		used[e.ListenPort] = true
+		m, err := e.configInbound()
+		if err != nil {
+			return nil, err
+		}
+		inbounds = append(inbounds, m)
+	}
+	doc["inbounds"] = inbounds
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal sing-box config: %w", err)
+	}
+	return out, nil
 }
 
 // ConfigHash is the fingerprint stored in node_singbox.config_hash (§9.1:
@@ -228,4 +435,179 @@ func BuildNodeConfigWithOverride(port int, globalPassword, override string) ([]b
 func ConfigHash(config []byte) string {
 	sum := sha256.Sum256(config)
 	return hex.EncodeToString(sum[:])
+}
+
+// allowedInboundKeys is the whitelist of inbound keys fobe will put back into a
+// probe's config. It is a whitelist rather than a blacklist for one reason: the
+// config is generated on the server and applied by the agent after a single
+// `sing-box check`, and a key sing-box does not know is a *hard* failure —
+// `json: unknown field` — which on a live node means "stop the operator's
+// service, fail the gate, roll back". That already happened twice while this
+// feature was being built (`password` on a vless inbound, `public_key` inside
+// reality), both caught on a real probe rather than in review.
+//
+// So: only keys sing-box documents are passed through, everything else is
+// dropped with the rest of the adopted inbound still intact. An option fobe
+// does not model yet is silently lost; a config sing-box refuses is a service
+// outage on someone's VPS. The trade is deliberate.
+var allowedInboundKeys = map[string]bool{
+	"type": true, "tag": true, "listen": true, "listen_port": true,
+	"method": true, "password": true, "users": true, "tls": true,
+	// the antyls traffic-shaping list the panel's own template also writes
+	"padding_scheme": true,
+	// options one-sing.sh and hand-written configs commonly carry
+	"multiplex": true, "sniff": true, "sniff_override_destination": true,
+	"domain_strategy": true, "udp_timeout": true, "detour": true,
+	"tcp_fast_open": true, "tcp_multi_path": true, "udp_fragment": true,
+	"network": true, "set_system_proxy": true,
+}
+
+// allowedTLSKeys is the same idea one level down (the tls section).
+var allowedTLSKeys = map[string]bool{
+	"enabled": true, "server_name": true, "certificate_path": true,
+	"key_path": true, "reality": true, "alpn": true, "min_version": true,
+	"max_version": true, "cipher_suites": true, "acme": true,
+}
+
+// allowedRealityKeys is the server-side REALITY object. `public_key` is
+// pointedly absent: it belongs to the client.
+var allowedRealityKeys = map[string]bool{
+	"enabled": true, "private_key": true, "short_id": true, "handshake": true,
+	"max_time_difference": true,
+}
+
+// configInbound renders one adopted inbound as a sing-box config object.
+//
+// It is built from the typed fields plus the whitelisted pass-throughs, never
+// by marshalling ExtraInbound wholesale: this struct also carries the REALITY
+// *public* key and the adoption bookkeeping, and those are not config.
+func (e ExtraInbound) configInbound() (map[string]any, error) {
+	m := map[string]any{
+		"type":        e.Type,
+		"tag":         e.Tag,
+		"listen":      e.Listen,
+		"listen_port": e.ListenPort,
+	}
+	if e.Listen == "" {
+		m["listen"] = "::"
+	}
+	if e.Method != "" {
+		m["method"] = e.Method
+	}
+	if e.Password != "" {
+		m["password"] = e.Password
+	}
+	if len(e.Users) > 0 {
+		users := make([]map[string]any, 0, len(e.Users))
+		for _, u := range e.Users {
+			one := map[string]any{}
+			if u.Name != "" {
+				one["name"] = u.Name
+			}
+			if u.Password != "" {
+				one["password"] = u.Password
+			}
+			if u.UUID != "" {
+				one["uuid"] = u.UUID
+			}
+			if u.Flow != "" {
+				one["flow"] = u.Flow
+			}
+			users = append(users, one)
+		}
+		m["users"] = users
+	}
+	if e.TLS != nil {
+		tls := map[string]any{"enabled": e.TLS.Enabled}
+		if e.TLS.ServerName != "" {
+			tls["server_name"] = e.TLS.ServerName
+		}
+		if e.TLS.CertificatePath != "" {
+			tls["certificate_path"] = e.TLS.CertificatePath
+		}
+		if e.TLS.KeyPath != "" {
+			tls["key_path"] = e.TLS.KeyPath
+		}
+		if r := e.TLS.Reality; r != nil {
+			reality := map[string]any{"enabled": true}
+			if r.PrivateKey != "" {
+				reality["private_key"] = r.PrivateKey
+			}
+			if len(r.ShortID) > 0 {
+				reality["short_id"] = r.ShortID
+			}
+			if r.Handshake != nil {
+				reality["handshake"] = map[string]any{
+					"server":      r.Handshake.Server,
+					"server_port": r.Handshake.ServerPort,
+				}
+			}
+			tls["reality"] = reality
+		}
+		m["tls"] = tls
+	}
+	for k, v := range e.Raw {
+		if !allowedInboundKeys[k] {
+			continue
+		}
+		if _, taken := m[k]; taken {
+			continue
+		}
+		m[k] = sanitizeConfigValue(k, v)
+	}
+	if tls, ok := m["tls"].(map[string]any); ok {
+		for k := range tls {
+			if !allowedTLSKeys[k] {
+				delete(tls, k)
+			}
+		}
+		if reality, ok := tls["reality"].(map[string]any); ok {
+			for k := range reality {
+				if !allowedRealityKeys[k] {
+					delete(reality, k)
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+// sanitizeConfigValue drops unknown keys from a nested pass-through section
+// (tls / reality / a user object) so a hand-written config cannot smuggle a
+// field into the generated one.
+func sanitizeConfigValue(key string, v any) any {
+	switch key {
+	case "tls":
+		if section, ok := v.(map[string]any); ok {
+			for k := range section {
+				if !allowedTLSKeys[k] {
+					delete(section, k)
+				}
+			}
+			if reality, ok := section["reality"].(map[string]any); ok {
+				for k := range reality {
+					if !allowedRealityKeys[k] {
+						delete(reality, k)
+					}
+				}
+			}
+			return section
+		}
+	case "users":
+		if users, ok := v.([]any); ok {
+			for _, raw := range users {
+				if u, ok := raw.(map[string]any); ok {
+					for k := range u {
+						switch k {
+						case "name", "password", "uuid", "flow":
+						default:
+							delete(u, k)
+						}
+					}
+				}
+			}
+			return users
+		}
+	}
+	return v
 }

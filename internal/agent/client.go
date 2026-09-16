@@ -209,6 +209,7 @@ func connectAndServe(cfg *Config, configPath string, coll *collect.Collector, sb
 	go session.latencyLoop()
 	go session.stateChangeLoop()
 	go session.forwardsLoop()
+	go session.localChangeLoop()
 
 	return session.readLoop()
 }
@@ -423,6 +424,21 @@ func (s *agentSession) stateChangeLoop() {
 	}
 }
 
+// localChangeLoop does the same for the discovery half (§9.3 实现修订
+// 2026-09-17): a separate channel because "the operator edited config.json by
+// hand" and "the managed instance changed state" are different events, and
+// only the second one drives the panel's sing-box alerts.
+func (s *agentSession) localChangeLoop() {
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-s.sbx.LocalChanged():
+			s.sendState()
+		}
+	}
+}
+
 func (s *agentSession) reportOnce() {
 	iface, _ := s.trafficIface.Load().(string)
 	snap := s.coll.Read(iface)
@@ -440,6 +456,11 @@ func (s *agentSession) sendState() {
 		Interfaces: collect.NetworkInterfaces(),
 		BootID:     collect.BootID(),
 		Singbox:    s.sbx.Snapshot(), // nil while sing-box is unmanaged (§9)
+		// The discovery half rides along in the same frame: it is what tells
+		// the panel about a sing-box fobe does not manage (§9.3 实现修订
+		// 2026-09-17), and a separate frame type would only mean two ways to
+		// say "here is this node's host".
+		SingboxLocal: s.sbx.Local(),
 		// nil until the first read; a nil field keeps an older server from
 		// wiping what it knows about this node (§21).
 		Forwards: s.forwardsCache(),

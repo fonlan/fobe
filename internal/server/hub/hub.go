@@ -32,6 +32,13 @@ type Hub struct {
 	log   *slog.Logger
 	geo   geoip.Resolver // country lookup for node IPs (§14); nil keeps old behaviour
 
+	// crypt encrypts the local-discovery snapshot the agent reports (§9.3 实现
+	// 修订 2026-09-17): the payload is an operator-authored config.json that may
+	// contain credentials, so it is stored as ciphertext like every other
+	// secret (§4.4). nil in dev builds and unit tests — the store then keeps
+	// the value readable instead of refusing to record anything.
+	crypt *security.Cryptor
+
 	// agentUp decides §5.5 agent self-update per node. Optional: without one no
 	// target is ever offered (dev builds, unit tests) and agents simply keep
 	// whatever they run.
@@ -69,6 +76,11 @@ type AgentUpdater interface {
 
 // SetAgentUpdater wires (or replaces) the §5.5 self-update manager.
 func (h *Hub) SetAgentUpdater(u AgentUpdater) { h.agentUp = u }
+
+// SetCryptor wires the master-key cipher used for local-discovery snapshots.
+// Optional: a hub without one still records the discovery fingerprint, just
+// without encrypting the payload.
+func (h *Hub) SetCryptor(c *security.Cryptor) { h.crypt = c }
 
 // SetForwardsObserver installs a callback run after a probe's nftables
 // forwards snapshot is replaced (design §10.2). The panel needs it because a

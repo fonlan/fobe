@@ -200,6 +200,11 @@ func (h *Hub) onState(nodeID string, st *protocol.State) {
 	if st.Singbox != nil {
 		h.recordSingboxState(nodeID, st.Singbox)
 	}
+	// nil (not empty) means the agent predates the field: keep what is stored
+	// rather than wiping a snapshot for a probe that simply cannot report one.
+	if st.SingboxLocal != nil {
+		h.recordSingboxLocal(nodeID, st.SingboxLocal)
+	}
 	// nil (not empty) means the agent predates §21: keep the last known
 	// inventory instead of wiping rows for rules that are still on the probe.
 	if st.Forwards != nil {
@@ -432,6 +437,43 @@ func (h *Hub) recordSingboxState(nodeID string, s *protocol.SingboxState) {
 		h.log.Warn("store firewall hint", "node", nodeID, "err", err)
 	}
 	h.alertSingboxState(nodeID, s, prevStatus, prevErr, cur)
+}
+
+// recordSingboxLocal stores what sing-box the probe runs outside fobe's
+// desired state (§9.3 实现修订 2026-09-17).
+//
+// It is deliberately inert: no alert, no status change, no desired-state
+// change. Discovery explains a node; it must never act on one — the operator
+// decides whether to adopt what fobe found. The only side effect is the stored
+// snapshot, and even that is written solely when something moved, so a probe
+// that reports the same file every minute costs one read.
+//
+// A malformed payload is kept rather than dropped: the panel's whole job here
+// is to show the operator what is on his machine, and "fobe received a
+// config.json it cannot parse" is information, not noise.
+func (h *Hub) recordSingboxLocal(nodeID string, s *protocol.SingboxLocal) {
+	snap := store.NodeSingboxLocal{
+		LocalHash:    s.ConfigSHA256,
+		ConfigPath:   s.ConfigPath,
+		LocalVersion: s.Version,
+		LocalRunning: s.Running,
+		LocalUnit:    s.UnitActive,
+		LocalUnitOK:  s.UnitKnown,
+		LocalPresent: s.Present,
+		ConfigJSON:   s.ConfigJSON,
+		Error:        s.Error,
+	}
+	// Skip the write when the whole snapshot is unchanged. Comparing the file
+	// hash alone would freeze every other field: the report gains fields over
+	// time (config_path, unit state), and a probe whose config nobody touches
+	// would keep a snapshot missing them forever — the panel would show a
+	// discovery with holes and no way to refresh it short of editing the file.
+	if cur, err := h.store.GetNodeSingboxLocal(nodeID, h.crypt); err == nil && cur == snap {
+		return
+	}
+	if err := h.store.SetNodeSingboxLocal(nodeID, snap, h.crypt); err != nil {
+		h.log.Warn("store local sing-box snapshot", "node", nodeID, "err", err)
+	}
 }
 
 // alertSingboxState raises/recovers the §15 sing-box alerts off the status

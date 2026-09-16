@@ -119,6 +119,9 @@ func runServer() {
 	// until its own stat check happened to fire.
 	mmdb := geoip.NewMMDB(geoPath)
 	h := hub.New(st, trust, log, geoip.NewWith(mmdb, geoOnline))
+	// §9.3 实现修订 2026-09-17: the local-discovery snapshot is an operator's own
+	// config.json and may carry credentials, so the hub stores it encrypted.
+	h.SetCryptor(crypt)
 	log.Info("geoip resolver", "mmdb", geoPath, "online_fallback", geoOnline)
 	api := httpapi.NewServer(st, h, trust, crypt, log)
 	api.Version = version

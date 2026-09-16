@@ -78,15 +78,24 @@ type singboxManager struct {
 
 	kick    chan struct{} // nudge: desired changed / watchdog fired (buffered 1)
 	changed chan struct{} // nudge: reported state changed (buffered 1)
+
+	// local / changedLocal carry the *discovery* half (§9.3 实现修订
+	// 2026-09-17): what sing-box already runs on this host, whether or not fobe
+	// manages it. Kept separate from state so a discovery change cannot be
+	// mistaken for a managed-state change (the panel's alerts key off the
+	// latter).
+	local        *protocol.SingboxLocal
+	changedLocal chan struct{}
 }
 
 func newSingboxManager(cfg *Config, log *slog.Logger) *singboxManager {
 	m := &singboxManager{
-		cfg:     cfg,
-		log:     log,
-		hc:      &http.Client{Timeout: downloadTimeout},
-		kick:    make(chan struct{}, 1),
-		changed: make(chan struct{}, 1),
+		cfg:          cfg,
+		log:          log,
+		hc:           &http.Client{Timeout: downloadTimeout},
+		kick:         make(chan struct{}, 1),
+		changed:      make(chan struct{}, 1),
+		changedLocal: make(chan struct{}, 1),
 	}
 	m.openFw = m.openFirewallPort
 	return m
@@ -184,9 +193,17 @@ func (m *singboxManager) Changed() <-chan struct{} { return m.changed }
 
 // Run drives convergence forever: kicks (desired updates, watchdog) and a
 // 60s periodic tick. A single goroutine ⇒ at most one convergence at a time.
+//
+// The local discovery scan (§9.3 实现修订 2026-09-17) hangs off the same tick
+// but is *not* conditional on the desired state: a probe managed by
+// one-sing.sh has no desired state at all, and that is exactly the probe the
+// panel used to be blind to. State, not search: the scan is read-only (no
+// systemctl writes, no file writes), so running it every minute on a node fobe
+// does not manage cannot disturb the operator's service.
 func (m *singboxManager) Run() {
 	tick := time.NewTicker(convergeEvery)
 	defer tick.Stop()
+	m.scanLocal() // first report without waiting a minute
 	for {
 		select {
 		case <-m.kick:
@@ -197,8 +214,126 @@ func (m *singboxManager) Run() {
 			} else {
 				m.reportOnly()
 			}
+			m.scanLocal()
 		}
 	}
+}
+
+// --- local discovery (§9.3 实现修订 2026-09-17) ---
+
+// scanLocal reads the on-disk sing-box and publishes it when it changed.
+// Cheap enough for the 60s tick: two stats, one `version` exec and one file
+// read (capped). Errors are reported in the payload rather than logged away —
+// "the file is there but unreadable" is operator-relevant on a host whose
+// config an operator wrote by hand.
+func (m *singboxManager) scanLocal() {
+	got := detectLocal()
+	m.mu.Lock()
+	same := localEqual(m.local, got)
+	m.local = got
+	m.mu.Unlock()
+	if !same {
+		m.nudge(m.changedLocal)
+	}
+}
+
+// Local returns the last discovery report, or nil before the first scan.
+func (m *singboxManager) Local() *protocol.SingboxLocal {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.local == nil {
+		return nil
+	}
+	cp := *m.local
+	return &cp
+}
+
+// LocalChanged is the discovery-side notification stream (buffered, never
+// closed — like Changed, the manager outlives sessions).
+func (m *singboxManager) LocalChanged() <-chan struct{} { return m.changedLocal }
+
+// localEqual compares two reports, ignoring nothing: the caller only wants a
+// frame when something an operator could see has changed, and the config hash
+// covers edits inside the file.
+func localEqual(a, b *protocol.SingboxLocal) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// maxLocalConfigBytes caps the config file the agent will read into a report.
+// one-sing.sh's own output is a few KiB; anything past this is either not a
+// sing-box config or an operator's hand-written monster, and shipping it in
+// every state frame would be pure wire cost.
+const maxLocalConfigBytes = 1 << 20
+
+// detectLocal is the read-only probe behind SingboxLocal.
+//
+// It answers from the *effective* layout (service.SingboxPaths), so an
+// unprivileged probe reports its own relocation and a root probe reports
+// /etc/one-sing — the same paths one-sing.sh uses, which is what makes the
+// takeover possible at all.
+func detectLocal() *protocol.SingboxLocal {
+	bin, configPath, _ := service.SingboxPaths()
+	out := &protocol.SingboxLocal{ConfigPath: configPath}
+	var problems []string
+
+	if _, err := os.Stat(bin); err != nil {
+		out.Present = false
+		if !os.IsNotExist(err) {
+			problems = append(problems, fmt.Sprintf("stat %s: %v", bin, err))
+		}
+		out.Error = strings.Join(problems, "; ")
+		// A binary that is not there cannot be running: skip the rest rather
+		// than reporting a unit state for someone else's install.
+		return out
+	}
+	out.Present = true
+
+	if raw, err := runCmd(bin, versionTimeout, "version"); err == nil {
+		out.Version = parseSingboxVersion(raw)
+	} else {
+		problems = append(problems, fmt.Sprintf("version: %v", err))
+	}
+
+	// The process scan needs no privileges and is exactly how the fallback
+	// branch already decides liveness, so it is the portable half of the
+	// answer; the unit state below is the accurate half when we may ask.
+	if findProcByExe(bin) > 0 {
+		out.Running = true
+	}
+	if privileged() {
+		switch service.Detect() {
+		case service.KindSystemd:
+			out.UnitKnown = true
+			out.UnitActive = service.SingboxActive()
+		case service.KindProcd:
+			out.UnitKnown = true
+			out.UnitActive = service.SingboxActive()
+		}
+	}
+	if out.UnitActive {
+		out.Running = true
+	}
+
+	switch raw, err := os.ReadFile(configPath); {
+	case err == nil:
+		if len(raw) > maxLocalConfigBytes {
+			problems = append(problems, fmt.Sprintf("config %s is %d bytes (cap %d), not reported",
+				configPath, len(raw), maxLocalConfigBytes))
+			break
+		}
+		out.ConfigJSON = string(raw)
+		out.ConfigSHA256 = sha256Hex(raw)
+	case os.IsNotExist(err):
+		problems = append(problems, "config file does not exist")
+	default:
+		problems = append(problems, fmt.Sprintf("read config: %v", err))
+	}
+
+	out.Error = strings.Join(problems, "; ")
+	return out
 }
 
 // needWatch reports whether the desired instance lost its process (fallback

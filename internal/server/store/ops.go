@@ -2,13 +2,54 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+
+	"github.com/fonlan/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/server/singbox"
 )
+
+// --- encrypted columns (design §9.3 实现修订 2026-09-17) ---
+//
+// Unlike settings rows, a node_singbox column has no `encrypted` flag beside
+// it, so the ciphertext carries its own marker. That keeps the reader honest:
+// a value written before this existed (or by a dev build with no master key)
+// is plaintext and stays readable, while anything this process writes is
+// explicitly tagged and must decrypt.
+const encPrefix = "enc:v1:"
+
+// EncryptSettingValue returns the storable form of a sensitive column value.
+// A nil cryptor (dev builds, unit tests) leaves the value readable rather than
+// refusing to store it: the product's fail-closed rule is about the *server*
+// starting without a master key, not about a store helper.
+func EncryptSettingValue(crypt *security.Cryptor, plain string) (string, error) {
+	if plain == "" || crypt == nil {
+		return plain, nil
+	}
+	ct, err := crypt.Encrypt(plain)
+	if err != nil {
+		return "", err
+	}
+	return encPrefix + ct, nil
+}
+
+// DecryptSettingValue reverses EncryptSettingValue; untagged values pass
+// through untouched (see encPrefix).
+func DecryptSettingValue(crypt *security.Cryptor, stored string) (string, error) {
+	if stored == "" || !strings.HasPrefix(stored, encPrefix) {
+		return stored, nil
+	}
+	if crypt == nil {
+		return "", errors.New("stored value is encrypted but no master key is available")
+	}
+	return crypt.Decrypt(strings.TrimPrefix(stored, encPrefix))
+}
 
 // --- commands (offline queue, TTL 10min, design §7/§19.1) ---
 
@@ -301,17 +342,29 @@ type NodeSingbox struct {
 	CertSHA256       string `json:"cert_sha256"`
 	CertNotAfter     int64  `json:"cert_not_after"`
 	Port             int    `json:"port"`
-	UpdatedAt        int64  `json:"updated_at"`
+	// Local discovery (§9.3 实现修订 2026-09-17): only the fingerprint lives in
+	// this struct, because it is what the hub compares to decide "the operator
+	// touched his own config.json". The report itself (version, running flag,
+	// inbound list, raw bytes) is read on demand via GetNodeSingboxLocal, so no
+	// hot path carries a blob that may be tens of kilobytes.
+	LocalHash string `json:"local_hash"`
+	// ExtrasPresent is "this node has adopted inbounds". Only the fact, never
+	// the ciphertext: the column itself is encrypted, and callers that need the
+	// contents go through GetNodeSingboxExtraInbounds. It is here because
+	// "would this node appear in a subscription" must not cost a decrypt.
+	ExtrasPresent bool  `json:"extras_present"`
+	UpdatedAt     int64 `json:"updated_at"`
 }
 
 func (s *Store) GetNodeSingbox(nodeID string) (*NodeSingbox, error) {
 	n := &NodeSingbox{}
 	err := s.db.QueryRow(
 		`SELECT node_id, version, desired_version, desired_uninstall, config_hash, status, last_error,
-		        cert_pem, cert_sha256, cert_not_after, port, updated_at
+		        cert_pem, cert_sha256, cert_not_after, port, updated_at, local_config_hash,
+		        extra_inbounds <> ''
 		 FROM node_singbox WHERE node_id = ?`, nodeID,
 	).Scan(&n.NodeID, &n.Version, &n.DesiredVersion, &n.DesiredUninstall, &n.ConfigHash, &n.Status, &n.LastError,
-		&n.CertPEM, &n.CertSHA256, &n.CertNotAfter, &n.Port, &n.UpdatedAt)
+		&n.CertPEM, &n.CertSHA256, &n.CertNotAfter, &n.Port, &n.UpdatedAt, &n.LocalHash, &n.ExtrasPresent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -451,6 +504,133 @@ func (s *Store) SetNodeSingboxPasswordOverride(nodeID, password string) error {
 		 ON CONFLICT(node_id) DO UPDATE SET
 		   password_override = excluded.password_override, updated_at = excluded.updated_at`,
 		nodeID, password, now(),
+	)
+	return err
+}
+
+// --- local sing-box discovery (design §9.3 实现修订 2026-09-17) ---
+
+// NodeSingboxLocal is one node's discovery snapshot.
+//
+// ConfigJSON is the probe's own config.json, byte for byte: it is stored so an
+// adoption can be applied later (the operator may click while neither the probe
+// nor its report is in flight), and so the panel can show what fobe found
+// without asking the probe again. It is a file an operator wrote by hand and
+// may contain credentials, so both halves of this table are Cryptor
+// ciphertext at rest (see SetNodeSingboxLocal).
+type NodeSingboxLocal struct {
+	LocalHash    string `json:"local_hash"`
+	ConfigPath   string `json:"config_path"`
+	LocalVersion string `json:"local_version"`
+	LocalRunning bool   `json:"local_running"`
+	LocalUnit    bool   `json:"local_unit_active"`
+	LocalUnitOK  bool   `json:"local_unit_known"`
+	LocalPresent bool   `json:"local_present"`
+	ConfigJSON   string `json:"config_json"`
+	Error        string `json:"error"`
+}
+
+// GetNodeSingboxLocal reads the discovery snapshot (metadata + config bytes),
+// or ErrNotFound when the row or the snapshot is absent.
+//
+// Both halves are stored inside one encrypted blob: the metadata names a
+// version and a running state, the payload is the operator's file. Keeping
+// them together means "there is a report" has exactly one representation —
+// no half-written row can claim a version without bytes.
+func (s *Store) GetNodeSingboxLocal(nodeID string, crypt *security.Cryptor) (NodeSingboxLocal, error) {
+	var out NodeSingboxLocal
+	var blob string
+	err := s.db.QueryRow(
+		`SELECT local_config FROM node_singbox WHERE node_id = ?`, nodeID,
+	).Scan(&blob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, ErrNotFound
+	}
+	if err != nil {
+		return out, err
+	}
+	plain, err := DecryptSettingValue(crypt, blob)
+	if err != nil {
+		return out, fmt.Errorf("decrypt local config: %w", err)
+	}
+	if strings.TrimSpace(plain) == "" {
+		return out, ErrNotFound
+	}
+	if err := json.Unmarshal([]byte(plain), &out); err != nil {
+		return out, fmt.Errorf("parse local config snapshot: %w", err)
+	}
+	return out, nil
+}
+
+// SetNodeSingboxLocal stores the discovery snapshot. local_config is encrypted
+// at rest: it is the operator's own file and it may carry credentials in
+// clear (one-sing.sh writes SS passwords and VLESS UUIDs into it).
+func (s *Store) SetNodeSingboxLocal(nodeID string, local NodeSingboxLocal, crypt *security.Cryptor) error {
+	raw, err := json.Marshal(local)
+	if err != nil {
+		return fmt.Errorf("marshal local config snapshot: %w", err)
+	}
+	blob, err := EncryptSettingValue(crypt, string(raw))
+	if err != nil {
+		return fmt.Errorf("encrypt local config: %w", err)
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO node_singbox (node_id, local_config_hash, local_config, updated_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(node_id) DO UPDATE SET
+		   local_config_hash = excluded.local_config_hash, local_config = excluded.local_config,
+		   updated_at = excluded.updated_at`,
+		nodeID, local.LocalHash, blob, now(),
+	)
+	return err
+}
+
+// GetNodeSingboxExtraInbounds returns the adopted inbounds, decrypted.
+func (s *Store) GetNodeSingboxExtraInbounds(nodeID string, crypt *security.Cryptor) ([]singbox.ExtraInbound, error) {
+	var blob string
+	err := s.db.QueryRow(
+		`SELECT extra_inbounds FROM node_singbox WHERE node_id = ?`, nodeID,
+	).Scan(&blob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	plain, err := DecryptSettingValue(crypt, blob)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt adopted inbounds: %w", err)
+	}
+	if strings.TrimSpace(plain) == "" {
+		return nil, nil
+	}
+	var out []singbox.ExtraInbound
+	if err := json.Unmarshal([]byte(plain), &out); err != nil {
+		return nil, fmt.Errorf("parse adopted inbounds: %w", err)
+	}
+	return out, nil
+}
+
+// SetNodeSingboxExtraInbounds stores the adopted inbounds (Cryptor ciphertext:
+// the set carries UUIDs, passwords and a REALITY private key).
+func (s *Store) SetNodeSingboxExtraInbounds(nodeID string, extras []singbox.ExtraInbound, crypt *security.Cryptor) error {
+	plain := ""
+	if len(extras) > 0 {
+		raw, err := json.Marshal(extras)
+		if err != nil {
+			return fmt.Errorf("marshal adopted inbounds: %w", err)
+		}
+		plain = string(raw)
+	}
+	blob, err := EncryptSettingValue(crypt, plain)
+	if err != nil {
+		return fmt.Errorf("encrypt adopted inbounds: %w", err)
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO node_singbox (node_id, extra_inbounds, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(node_id) DO UPDATE SET
+		   extra_inbounds = excluded.extra_inbounds, updated_at = excluded.updated_at`,
+		nodeID, blob, now(),
 	)
 	return err
 }

@@ -778,7 +778,17 @@ func (s *Server) resolveFormat(sub *store.Subscription, r *http.Request) string 
 func subRenderable(node *store.Node, sb *store.NodeSingbox) bool {
 	// nil sb is the common "never installed sing-box" case, not an error to
 	// handle at every call site (§10.2 asks this question for every node).
-	return node != nil && sb != nil && node.PrimaryIP != "" && sb.Port > 0 && sb.CertPEM != ""
+	if node == nil || sb == nil || node.PrimaryIP == "" {
+		return false
+	}
+	if sb.Port > 0 && sb.CertPEM != "" {
+		return true
+	}
+	// §9.3 实现修订 2026-09-17: a node can be renderable through its *adopted*
+	// inbounds alone — an operator who adopted only a VLESS inbound never
+	// installed fobe's own anytls, so there is no certificate, yet his clients
+	// must still get the node.
+	return sb.ExtrasPresent
 }
 
 // subscriptionNodes assembles the renderable proxies for a subscription
@@ -804,6 +814,10 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 		s.Log.Error("subscription: anytls password", "err", err)
 		return nil
 	}
+	// The global credential is still *resolved* here on purpose: a subscription
+	// report is a "use it" moment (§10.1 实现修订 2026-09-16), so a node that
+	// never adopted an anytls password must still find one. Which value each
+	// node renders is decided per entry below (per-node override > global).
 	format := s.relayNameFormat()
 	nodes := make([]singbox.ProxyNode, 0, len(entries))
 	for _, e := range entries {
@@ -818,10 +832,40 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 		if err != nil {
 			continue
 		}
+		// §19.9: a node-level anytls password override wins over the global one.
+		// Adoption deliberately does not write one (the panel's inbound keeps the
+		// global credential); a hand-set override from another flow still wins.
+		nodePassword := password
+		if override, err := s.Store.GetNodeSingboxPasswordOverride(e.NodeID); err == nil && override != "" {
+			nodePassword = override
+		}
+		// Adopted inbounds are dialled directly, so they belong to the direct
+		// branch only: a relay entry's src port lands on the node's anytls
+		// inbound (§10.2), never on an adopted one.
+		var adopted []singbox.ProxyNode
+		if e.RelayNodeID == "" && sb.ExtrasPresent {
+			extras := s.loadExtraInbounds(e.NodeID)
+			adopted = singbox.ProxyNodesFor(extras, e.NodeID, entryBaseName(target), target.PrimaryIP, sb.CertPEM)
+			for i := range adopted {
+				if e.Alias != "" {
+					// Several inbounds come from one entry: only the first
+					// takes the alias verbatim, the rest keep their suffix so
+					// the names stay unique.
+					adopted[i].Name = e.Alias
+					if i > 0 {
+						adopted[i].Name = e.Alias + " · " + adopted[i].NameSuffix
+					}
+				}
+			}
+		}
 		var server, name string
 		var port int
 		if e.RelayNodeID == "" {
-			if !subRenderable(target, sb) {
+			// A node with adopted inbounds but no anytls inbound of its own has
+			// no direct entry to render — the adopted list below is the whole
+			// payload, so this is not an error.
+			if sb.Port <= 0 || sb.CertPEM == "" {
+				nodes = append(nodes, adopted...)
 				continue
 			}
 			server, port, name = target.PrimaryIP, sb.Port, entryBaseName(target)
@@ -838,8 +882,9 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 		}
 		nodes = append(nodes, singbox.ProxyNode{
 			ID: e.NodeID, Name: name, Server: server, Port: port,
-			Password: password, CertPEM: sb.CertPEM,
+			Password: nodePassword, CertPEM: sb.CertPEM,
 		})
+		nodes = append(nodes, adopted...)
 	}
 	return nodes
 }

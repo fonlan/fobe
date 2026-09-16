@@ -125,6 +125,10 @@ func (s *Server) handleGetNodeSingbox(w http.ResponseWriter, r *http.Request) {
 		"config_hash":       sb.ConfigHash, "status": sb.Status, "last_error": sb.LastError,
 		"cert_sha256":    sb.CertSHA256,
 		"cert_not_after": sb.CertNotAfter, "port": sb.Port, "updated_at": sb.UpdatedAt,
+		// §9.3 实现修订 2026-09-17: what sing-box this probe already runs.
+		// nil = the probe never reported (old agent, or nothing to report is
+		// still reported — see the agent's detectLocal).
+		"local": s.singboxDiscovery(id),
 	}})
 }
 
@@ -339,7 +343,17 @@ func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, versi
 	if err != nil {
 		return err
 	}
-	config, err := singbox.BuildNodeConfig(port, password)
+	// Adopted inbounds ride along on every regeneration: the operator took them
+	// over from the probe's own config.json, and rewriting the file without
+	// them would silently delete his VLESS/SS/Socks services (§9.3 实现修订
+	// 2026-09-17).
+	extras := s.loadExtraInbounds(nodeID)
+	override, err := s.Store.GetNodeSingboxPasswordOverride(nodeID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	config, err := singbox.BuildNodeConfigWithInbounds(port,
+		singbox.EffectiveAnytlsPassword(password, override), extras)
 	if err != nil {
 		return err
 	}
@@ -412,7 +426,9 @@ func (s *Server) SyncSingboxConfigs() int {
 		if err != nil {
 			continue
 		}
-		config, err := singbox.BuildNodeConfig(sb.Port, password)
+		override, _ := s.Store.GetNodeSingboxPasswordOverride(t.NodeID)
+		config, err := singbox.BuildNodeConfigWithInbounds(sb.Port,
+			singbox.EffectiveAnytlsPassword(password, override), s.loadExtraInbounds(t.NodeID))
 		if err != nil {
 			// A port the template refuses (never assigned, or out of range) is
 			// not this pass's business; the next operator change fixes it.

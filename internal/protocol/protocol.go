@@ -169,6 +169,47 @@ type State struct {
 	// means "this agent predates the feature" — the server then keeps the last
 	// known rows instead of wiping them, exactly like Interfaces above.
 	Forwards *ForwardsState `json:"forwards,omitempty"`
+	// SingboxLocal is what sing-box this probe already runs *outside* fobe's
+	// desired state — the one-sing.sh case (§9.3 实现修订 2026-09-17).
+	//
+	// It rides in every state frame and is deliberately independent of
+	// Singbox: Singbox is nil until the panel declares a desired version, so
+	// before this field existed a probe managed by one-sing.sh reported
+	// nothing at all and the panel showed "not installed" for a host whose
+	// sing-box was up and serving. A nil pointer means "this agent predates
+	// the field" (the server then keeps what it has instead of wiping it).
+	SingboxLocal *SingboxLocal `json:"singbox_local,omitempty"`
+}
+
+// SingboxLocal is the read-only local discovery report (§9.3 实现修订
+// 2026-09-17): which sing-box is on disk, whether its unit is up, and the raw
+// config.json bytes. The agent ships the file verbatim — parsing it is the
+// server's job (it already owns sing-box config knowledge in §9.1/§9.4), so a
+// new inbound type is one server-side parser change instead of an agent
+// release on every probe.
+type SingboxLocal struct {
+	// Present is "a sing-box binary exists at the layout path". It stays true
+	// after fobe takes the node over — the operator still needs to know what
+	// is on disk.
+	Present bool   `json:"present"`
+	Version string `json:"version,omitempty"`
+	// Running is the unit/process state as the agent sees it. In unprivileged
+	// mode the agent cannot ask systemd for it, so it falls back to its own
+	// process scan (findProcByExe) — the same answer by a different route.
+	Running bool `json:"running,omitempty"`
+	// UnitActive / UnitKnown describe the platform service manager's view
+	// (one-sing.sh's one-sing.service). UnitKnown=false means "could not ask"
+	// (no systemd, no privileges), not "absent".
+	UnitActive bool   `json:"unit_active,omitempty"`
+	UnitKnown  bool   `json:"unit_known,omitempty"`
+	ConfigPath string `json:"config_path,omitempty"`
+	// ConfigJSON is the file's content, capped by the agent (see
+	// maxLocalConfigBytes). Empty when unreadable — Error then says why.
+	ConfigJSON string `json:"config_json,omitempty"`
+	// ConfigSHA256 is over the exact bytes above, so the server can tell an
+	// unchanged report from a real edit without diffing the whole document.
+	ConfigSHA256 string `json:"config_sha256,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 // SingboxState is what the agent actually observes locally. Optional fields

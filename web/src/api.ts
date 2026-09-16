@@ -678,6 +678,19 @@ export function singboxUninstall(id: string): Promise<{ ok: boolean }> {
   return request(`/api/nodes/${encodeURIComponent(id)}/singbox/uninstall`, { method: 'POST', body: {} });
 }
 
+/** Adopt inbounds the probe already runs into fobe's desired config
+ *  (§9.3 实现修订 2026-09-17). Each pick is a (type, port) pair — the identity
+ *  of an inbound inside config.json. */
+export function singboxAdopt(
+  id: string,
+  inbounds: { type: string; port: number }[],
+): Promise<{ ok: boolean; adopted: number; desired_version: string }> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/singbox/adopt`, {
+    method: 'POST',
+    body: { inbounds },
+  });
+}
+
 export function singboxSetPort(id: string, port: number): Promise<{ ok: boolean; port: number }> {
   return request(`/api/nodes/${encodeURIComponent(id)}/singbox/port`, {
     method: 'PUT',

@@ -413,6 +413,36 @@ export interface SingboxStatus {
   cert_not_after: number;
   port: number;
   updated_at: number;
+  /** What sing-box the probe already runs outside fobe (§9.3 实现修订). */
+  local: SingboxLocalDiscovery | null;
+}
+
+/** One inbound found in the probe's own config.json. Never carries the
+ *  credential — only whether one is there (the server keeps secrets
+ *  encrypted and hands them back solely inside a pushed config). */
+export interface SingboxLocalInbound {
+  type: string;
+  tag: string;
+  port: number;
+  label: string;
+  cred_set: boolean;
+  /** False = fobe found it but will not import this protocol. */
+  adoptable: boolean;
+}
+
+export interface SingboxLocalDiscovery {
+  present: boolean;
+  running: boolean;
+  unit_active: boolean;
+  /** False = the agent could not ask the service manager (no systemd / no privileges). */
+  unit_known: boolean;
+  version?: string;
+  config_path?: string;
+  hash?: string;
+  error?: string;
+  inbounds: SingboxLocalInbound[];
+  /** How many inbounds of the desired config came from adoption. */
+  adopted: number;
 }
 
 // --- nftables port forwarding (design §21) ---

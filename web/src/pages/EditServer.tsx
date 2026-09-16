@@ -17,6 +17,7 @@ import type {
   LatencyTarget,
   NodeDetailData,
   NodeInterface,
+  SingboxLocalInbound,
   SingboxStatus,
   SingboxVersion,
 } from '../types';
@@ -618,6 +619,8 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // §9.3 实现修订 2026-09-17: which discovered inbounds the operator ticked.
+  const [picked, setPicked] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     try {
@@ -652,6 +655,17 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
   // An uninstall is the same shape of wait: the desired half is already gone
   // (desired_uninstall) while the reported half (version/cert) is still there
   // until the probe removes the files and answers "absent".
+  const local = sb?.local ?? null;
+  // Discovery is a snapshot the probe refreshes on its own cadence (it reports
+  // when the file changed), so the panel re-reads while a local sing-box is
+  // present: an operator who edits config.json by hand sees it appear without
+  // reloading the page.
+  useEffect(() => {
+    if (!local?.present || !onlineNow) return;
+    const h = window.setInterval(() => void load(), 30000);
+    return () => window.clearInterval(h);
+  }, [local?.present, onlineNow, load]);
+
   const installing = status === 'installing';
   const uninstalling = !!sb?.desired_uninstall && !!(sb?.version || sb?.cert_sha256);
   useEffect(() => {
@@ -681,6 +695,11 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
     }
   };
 
+  const adoptable = (local?.inbounds ?? []).filter((i) => i.adoptable);
+  const pickedList = adoptable.filter((i) => picked[i.type + ':' + i.port]);
+  const inboundLabel = (i: SingboxLocalInbound) =>
+    (i.type === 'socks5' ? 'socks' : i.type) + ' · :' + i.port;
+
   return (
     <div className="stack">
       <div className="tile-grid">
@@ -700,6 +719,83 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
       {sb?.cert_not_after ? (
         <span className="hint">{t('sb_cert_until', { time: fmtTime(sb.cert_not_after) })}</span>
       ) : null}
+
+      {/* §9.3 实现修订 2026-09-17: the probe's own sing-box. Shown whenever the
+          agent reported one — with no desired state at all (the one-sing.sh
+          case) this section is the only sing-box information the panel has. */}
+      {local?.present && (
+        <div className="sb-local">
+          <div className="row-wrap">
+            <strong>{t('sb_local_title')}</strong>
+            <span className="hint">
+              {t('sb_local_state', {
+                version: local.version || '-',
+                state: local.running
+                  ? t('sb_local_running')
+                  : local.unit_known
+                    ? t('sb_local_stopped')
+                    : t('sb_local_unknown'),
+              })}
+            </span>
+          </div>
+          {local.config_path && <span className="hint mono">{local.config_path}</span>}
+          {local.error && <span className="hint">{t('sb_local_error')}: {local.error}</span>}
+          {local.inbounds.length === 0 ? (
+            <span className="hint">{t('sb_local_no_inbounds')}</span>
+          ) : (
+            <ul className="sb-local-list">
+              {local.inbounds.map((i) => (
+                <li key={i.type + ':' + i.port}>
+                  {i.adoptable ? (
+                    <label className="check-inline">
+                      <input
+                        type="checkbox"
+                        checked={!!picked[i.type + ':' + i.port]}
+                        onChange={(e) =>
+                          setPicked((cur) => ({ ...cur, [i.type + ':' + i.port]: e.target.checked }))
+                        }
+                      />
+                      <span className="mono">{inboundLabel(i)}</span>
+                      {i.tag && i.tag !== i.label ? <span className="hint"> {i.tag}</span> : null}
+                      {!i.cred_set && <span className="hint"> {t('sb_local_no_cred')}</span>}
+                    </label>
+                  ) : (
+                    <span className="hint mono">
+                      {inboundLabel(i)} · {t('sb_local_not_adoptable')}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {adoptable.length > 0 && (
+            <div className="row-wrap">
+              <button
+                type="button"
+                className="btn primary"
+                disabled={busy || pickedList.length === 0}
+                onClick={() =>
+                  void run(
+                    () =>
+                      api.singboxAdopt(
+                        nodeId,
+                        pickedList.map((i) => ({ type: i.type, port: i.port })),
+                      ),
+                    t('sb_adopt_queued'),
+                  )
+                }
+              >
+                {t('sb_adopt')}
+              </button>
+              <span className="hint">
+                {local.adopted > 0
+                  ? t('sb_adopt_done', { n: local.adopted })
+                  : t('sb_adopt_hint')}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="row-wrap">
         <label className="field inline">

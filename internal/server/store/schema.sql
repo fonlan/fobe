@@ -255,7 +255,16 @@ CREATE TABLE IF NOT EXISTS node_singbox (
     cert_not_after   INTEGER NOT NULL DEFAULT 0,
     port             INTEGER NOT NULL DEFAULT 0,
     firewall_hint     TEXT NOT NULL DEFAULT '', -- §9.2 自动放行失败时的手动命令原文
-    password_override TEXT NOT NULL DEFAULT '', -- §19.9 节点级 anytls 密码覆盖(''=全局密码,v1 无 UI)
+    password_override TEXT NOT NULL DEFAULT '', -- §19.9 节点级 anytls 密码覆盖(''=全局密码；接管脚本的 anytls 时写入)
+    -- §9.3 实现修订 2026-09-17：本机已有 sing-box 的发现快照。探针把盘上那份
+    -- config.json 原文报回来（解析在服务端），面板据此显示"未接管的本机
+    -- sing-box"。存的是操作员自己写的文件、可能含凭据，所以整块经 Cryptor 加密。
+    local_config      TEXT NOT NULL DEFAULT '',
+    local_config_hash TEXT NOT NULL DEFAULT '', -- 上面那份原文的 sha256（去重 + 面板事件）
+    -- 已接管的入站（one-sing.sh 加的 VLESS/SS/Socks/anytls 等）。整块 JSON、
+    -- Cryptor 加密：里面有 UUID、密码与 REALITY 私钥。面板自己那半个 anytls 入站
+    -- 不在这里，它每次都由模板重建。
+    extra_inbounds    TEXT NOT NULL DEFAULT '',
     updated_at       INTEGER NOT NULL DEFAULT 0
 );
 
