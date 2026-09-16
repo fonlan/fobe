@@ -41,6 +41,16 @@ if [ "$(id -u)" != "0" ]; then
     fi
 fi
 
+# put_file MODE SRC DST — the `install -m` equivalent. 部分OpenWrt构建的
+# busybox(实测Kwrt)没编install applet，首装会在第一条install处"install: not found"；
+# 且重装时目标可能是正在运行的agent二进制，cp原地写会被ETXTBSY拒绝——先unlink让
+# 活进程留在旧inode上，由随后的服务restart把新二进制换上来(与enable/restart陷阱同一语义)。
+put_file() {
+    $SUDO rm -f "$3"
+    $SUDO cp "$2" "$3"
+    $SUDO chmod "$1" "$3"
+}
+
 # 1. architecture gate: v1 ships x86_64 only, fail loudly otherwise (§5.2)
 ARCH="$(uname -m)"
 [ "$ARCH" = "x86_64" ] || { echo "fobe: unsupported architecture '$ARCH' (v1 is x86_64 only)" >&2; exit 1; }
@@ -84,7 +94,7 @@ else
     exit 1
 fi
 
-$SUDO install -m 0755 "$TMP/fobe-agent" "$BIN_DIR/fobe-agent"
+put_file 0755 "$TMP/fobe-agent" "$BIN_DIR/fobe-agent"
 
 # 4-5. register (reuses prior credentials on reinstall, §4.2)
 $SUDO mkdir -p /etc/fobe-agent
@@ -93,8 +103,8 @@ if ! $SUDO "$BIN_DIR/fobe-agent" -register -token "$TOKEN" -server "$SERVER"; th
     exit 1
 fi
 
-# 6. install + start the service (files are staged in $TMP and elevated
-#    with $SUDO install, so redirects never need a root shell)
+# 6. install + start the service (files are staged in $TMP and installed via
+#    put_file, so redirects never need a root shell)
 case "$INIT" in
     systemd)
         cat > "$TMP/fobe-agent.service" <<UNIT
@@ -112,7 +122,7 @@ User=root
 [Install]
 WantedBy=multi-user.target
 UNIT
-        $SUDO install -m 0644 "$TMP/fobe-agent.service" /etc/systemd/system/fobe-agent.service
+        put_file 0644 "$TMP/fobe-agent.service" /etc/systemd/system/fobe-agent.service
         $SUDO systemctl daemon-reload
         # restart, NOT `enable --now`: this script is also the panel's
         # "reinstall command" (§5.5), which runs on a node whose agent is
@@ -126,25 +136,36 @@ UNIT
         $SUDO systemctl restart fobe-agent.service
         ;;
     procd)
-        cat > "$TMP/fobe-agent.initd" <<'INITD'
+        # unquoted heredoc so the agent path follows the procd BIN_DIR probe;
+        # it used to hardcode /usr/bin and could silently drift from it.
+        cat > "$TMP/fobe-agent.initd" <<INITD
 #!/bin/sh /etc/rc.common
 USE_PROCD=1
 START=99
 
 start_service() {
 	procd_open_instance
-	procd_set_param command /usr/bin/fobe-agent -config /etc/fobe-agent/config.json -run
+	procd_set_param command $BIN_DIR/fobe-agent -config /etc/fobe-agent/config.json -run
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 0
 	procd_set_param stderr 0
 	procd_close_instance
 }
 INITD
-        $SUDO install -m 0755 "$TMP/fobe-agent" /etc/init.d/fobe-agent
+        # the initd script goes to /etc/init.d/, NOT the binary — this line
+        # once installed "$TMP/fobe-agent" here, clobbering the init script
+        # with an ELF binary on real OpenWrt and taking procd down with it.
+        put_file 0755 "$TMP/fobe-agent.initd" /etc/init.d/fobe-agent
         $SUDO /etc/init.d/fobe-agent enable
-        # same trap as the systemd branch: `start` on a running service is a
-        # no-op, `restart` is what actually puts the new binary in charge.
-        $SUDO /etc/init.d/fobe-agent restart
+        # stop-then-start instead of `restart`: rc.common's restart is literally
+        # stop+start, but on a fresh install procd has never seen the service and
+        # the stop step makes ubus print "Command failed: Not found" — exit status
+        # stays 0, purely cosmetic, yet it reads like a failure. Silencing only
+        # the stop keeps the fresh-install output clean; start's real errors still
+        # surface. On reinstall this still really stops the running agent (§5.5):
+        # a bare `start` would be a no-op and leave the old binary in charge.
+        $SUDO /etc/init.d/fobe-agent stop >/dev/null 2>&1 || true
+        $SUDO /etc/init.d/fobe-agent start
         ;;
     fallback)
         echo "fobe: no service manager found; start the agent manually:"

@@ -171,6 +171,8 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 6. 安装并启动系统服务；
 7. 立即上报一次完整信息（IP、系统、CPU 核数、版本）。
 
+> **实现修订 2026-09-16（OpenWrt 实机首装暴露，三处）**：① 落盘一律走 `put_file`（`rm -f` + `cp` + `chmod`）而不是 `install -m`——实测 Kwrt 的 busybox 没编 `install` applet，首装在第 3 步直接 `sh: install: not found`；先 unlink 还避开重装时的 `ETXTBSY`（`cp` 原地写正在运行的二进制会被内核拒绝；unlink 让活进程留在旧 inode，由随后的服务 restart 换入新二进制，与上文 enable/restart 陷阱同一语义）。② procd 分支曾把**二进制**误装到 `/etc/init.d/fobe-agent`（`$TMP/fobe-agent` 手误，写出来的 initd 脚本是死代码）——真机后果是拿 ELF 覆盖 init 脚本、`enable`/`restart` 变成带怪参数跑 agent、procd 服务管理整体失效。已改为安装 `$TMP/fobe-agent.initd`，heredoc 去引号让 initd 里的 agent 路径跟随 `$BIN_DIR` 探测结果，不再可能与它分叉。③ procd 分支收尾 `restart` 在**首装**时会打印 `Command failed: Not found`——rc.common 的 restart 就是 stop+start，而 procd 从没见过这个服务，stop 步骤的 `ubus call service delete` 回 `NOT_FOUND`（退出码仍是 0，纯化妆性噪音，agent 实际正常上线）。改为 `stop >/dev/null 2>&1 || true` + `start`：首装输出干净，start 的真实错误仍然可见，重装时依旧真的停掉旧进程。三分支已在 busybox 容器（stub procd/systemd/fallback）里做过首装+重装实跑验证。
+
 ### 5.3 服务管理抽象
 
 | 平台 | 检测 | 服务形态 |
