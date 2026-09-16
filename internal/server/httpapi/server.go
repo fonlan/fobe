@@ -188,6 +188,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/singbox/versions/{version}", s.requireSession(s.handleSingboxDeleteVersion))
 	mux.HandleFunc("GET /api/nodes/{id}/singbox", s.requireSession(s.handleGetNodeSingbox))
 	mux.HandleFunc("POST /api/nodes/{id}/singbox/install", s.requireSession(s.handleSingboxInstall))
+	// literal beats the {action} wildcard below (Go 1.22 precedence); the
+	// uninstall is not one of the start/stop/restart commands on purpose —
+	// it is a desired-state write (§9.2 实现修订 2026-09-16).
+	mux.HandleFunc("POST /api/nodes/{id}/singbox/uninstall", s.requireSession(s.handleSingboxUninstall))
 	mux.HandleFunc("POST /api/nodes/{id}/singbox/{action}", s.requireSession(s.handleSingboxAction))
 	mux.HandleFunc("PUT /api/nodes/{id}/singbox/port", s.requireSession(s.handleSingboxPort))
 	// §14 manual primary IP + §16 detail-page 5s probe stream

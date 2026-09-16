@@ -120,6 +120,7 @@ export default function NodeDetail() {
   }, [load]);
 
   const node = data?.node;
+  const sb = data?.singbox;
 
   const cpuSeries = useMemo<ChartSeries[]>(
     () => [{ name: t('cpu'), color: C_CPU, points: metrics.map((m) => ({ x: m.ts, y: m.cpu })) as ChartPoint[] }],
@@ -219,6 +220,13 @@ export default function NodeDetail() {
             }
           />
           <Tile label={t('uptime')} value={last ? fmtDuration(last.uptime) : '-'} sub={t('last_seen', { time: fmtTime(node.last_seen) })} />
+          {/* AnyTLS inbound port: only while the node is under sing-box
+              management (§9 — desired_version empty means the operator
+              uninstalled it or never enabled it, and the reported port then
+              belongs to nothing). */}
+          {sb?.desired_version ? (
+            <Tile label={t('sb_anytls_port')} value={sb.port ? ':' + sb.port : '-'} sub={sb.version || '-'} />
+          ) : null}
         </div>
         {node.quota_bytes != null && (
           <div className="quota-row">

@@ -288,23 +288,29 @@ type NodeSingbox struct {
 	NodeID         string `json:"node_id"`
 	Version        string `json:"version"`
 	DesiredVersion string `json:"desired_version"`
-	ConfigHash     string `json:"config_hash"`
-	Status         string `json:"status"`
-	LastError      string `json:"last_error"`
-	CertPEM        string `json:"cert_pem"`
-	CertSHA256     string `json:"cert_sha256"`
-	CertNotAfter   int64  `json:"cert_not_after"`
-	Port           int    `json:"port"`
-	UpdatedAt      int64  `json:"updated_at"`
+	// DesiredUninstall is the operator's persistent "remove sing-box from this
+	// probe" intent (design §9.2 实现修订 2026-09-16). It is the desired half,
+	// not a status: the agent clears it by reporting that nothing is installed.
+	// A node with it set has an empty DesiredVersion, which is what keeps it out
+	// of every batch-update target list — and it survives with the probe offline.
+	DesiredUninstall bool   `json:"desired_uninstall"`
+	ConfigHash       string `json:"config_hash"`
+	Status           string `json:"status"`
+	LastError        string `json:"last_error"`
+	CertPEM          string `json:"cert_pem"`
+	CertSHA256       string `json:"cert_sha256"`
+	CertNotAfter     int64  `json:"cert_not_after"`
+	Port             int    `json:"port"`
+	UpdatedAt        int64  `json:"updated_at"`
 }
 
 func (s *Store) GetNodeSingbox(nodeID string) (*NodeSingbox, error) {
 	n := &NodeSingbox{}
 	err := s.db.QueryRow(
-		`SELECT node_id, version, desired_version, config_hash, status, last_error,
+		`SELECT node_id, version, desired_version, desired_uninstall, config_hash, status, last_error,
 		        cert_pem, cert_sha256, cert_not_after, port, updated_at
 		 FROM node_singbox WHERE node_id = ?`, nodeID,
-	).Scan(&n.NodeID, &n.Version, &n.DesiredVersion, &n.ConfigHash, &n.Status, &n.LastError,
+	).Scan(&n.NodeID, &n.Version, &n.DesiredVersion, &n.DesiredUninstall, &n.ConfigHash, &n.Status, &n.LastError,
 		&n.CertPEM, &n.CertSHA256, &n.CertNotAfter, &n.Port, &n.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -315,17 +321,18 @@ func (s *Store) GetNodeSingbox(nodeID string) (*NodeSingbox, error) {
 func (s *Store) UpsertNodeSingbox(n *NodeSingbox) error {
 	_, err := s.db.Exec(
 		`INSERT INTO node_singbox
-		 (node_id, version, desired_version, config_hash, status, last_error,
+		 (node_id, version, desired_version, desired_uninstall, config_hash, status, last_error,
 		  cert_pem, cert_sha256, cert_not_after, port, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(node_id) DO UPDATE SET
 		   version = excluded.version, desired_version = excluded.desired_version,
+		   desired_uninstall = excluded.desired_uninstall,
 		   config_hash = excluded.config_hash, status = excluded.status,
 		   last_error = excluded.last_error,
 		   cert_pem = excluded.cert_pem, cert_sha256 = excluded.cert_sha256,
 		   cert_not_after = excluded.cert_not_after, port = excluded.port,
 		   updated_at = excluded.updated_at`,
-		n.NodeID, n.Version, n.DesiredVersion, n.ConfigHash, n.Status, n.LastError,
+		n.NodeID, n.Version, n.DesiredVersion, n.DesiredUninstall, n.ConfigHash, n.Status, n.LastError,
 		n.CertPEM, n.CertSHA256, n.CertNotAfter, n.Port, now(),
 	)
 	return err
@@ -371,11 +378,15 @@ type SingboxTarget struct {
 // ListSingboxTargets lists every node whose desired_version is non-empty,
 // joined with the node's name/status so a distribution batch can bucket its
 // per-node outcome without a second query per node.
+//
+// A node the operator uninstalled sing-box from (desired_uninstall) is *not* a
+// target: §9.5.4 rewrites desired_version on every target, which would silently
+// reinstall the binary the operator just removed (§9.2 实现修订 2026-09-16).
 func (s *Store) ListSingboxTargets() ([]SingboxTarget, error) {
 	rows, err := s.db.Query(
 		`SELECT n.id, n.name, n.status, sb.version, sb.desired_version, sb.port, sb.last_error
 		 FROM node_singbox sb JOIN nodes n ON n.id = sb.node_id
-		 WHERE sb.desired_version <> '' ORDER BY n.created_at, n.id`)
+		 WHERE sb.desired_version <> '' AND sb.desired_uninstall = 0 ORDER BY n.created_at, n.id`)
 	if err != nil {
 		return nil, err
 	}

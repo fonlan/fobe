@@ -613,16 +613,21 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
   // probe had answered — including after a failed install had already landed
   // as 异常 + 最近错误. Only an in-flight change on a reachable probe can move
   // the tile, so nothing else is polled.
+  //
+  // An uninstall is the same shape of wait: the desired half is already gone
+  // (desired_uninstall) while the reported half (version/cert) is still there
+  // until the probe removes the files and answers "absent".
   const installing = status === 'installing';
+  const uninstalling = !!sb?.desired_uninstall && !!(sb?.version || sb?.cert_sha256);
   useEffect(() => {
-    if (!installing) {
+    if (!installing && !uninstalling) {
       setMsg(null); // the probe answered: the pending hint is stale
       return;
     }
     if (!onlineNow) return; // offline: the state cannot change until reconnect
     const h = window.setInterval(() => void load(), 5000);
     return () => window.clearInterval(h);
-  }, [installing, onlineNow, load]);
+  }, [installing, uninstalling, onlineNow, load]);
 
   const run = async (fn: () => Promise<unknown>, okMsg: string) => {
     if (busy) return;
@@ -646,7 +651,7 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
       <div className="tile-grid">
         <Tile label={t('sb_current')} value={sb?.version || '-'} />
         <Tile label={t('sb_desired')} value={sb?.desired_version || '-'} />
-        <Tile label={t('sb_port')} value={sb?.port ? ':' + sb.port : '-'} />
+        <Tile label={t('sb_port')} value={sb?.desired_version && sb?.port ? ':' + sb.port : '-'} />
         <Tile label={t('alert_status')} value={t(statusKey) === statusKey ? status : t(statusKey)} />
       </div>
 
@@ -656,6 +661,7 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
         </p>
       )}
       {installing && !onlineNow && <span className="hint">{t('sb_installing_offline')}</span>}
+      {uninstalling && <span className="hint">{onlineNow ? t('sb_uninstalling') : t('sb_uninstalling_offline')}</span>}
       {sb?.cert_not_after ? (
         <span className="hint">{t('sb_cert_until', { time: fmtTime(sb.cert_not_after) })}</span>
       ) : null}
@@ -707,9 +713,25 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
         >
           {t('sb_restart')}
         </button>
+        {/* Only offered while there is something to remove: the flag survives
+            the wait, so a second click while a removal is pending is a no-op
+            re-push rather than an error. Confirmation is mandatory — the
+            action deletes the binary, the config, the certificate and the
+            service unit on the probe. */}
+        <button
+          type="button"
+          className="btn danger"
+          disabled={busy || !sb || (!sb.desired_version && !sb.version && !sb.cert_sha256)}
+          onClick={() => {
+            if (!window.confirm(t('sb_uninstall_confirm', { version: sb?.version || '-' }))) return;
+            void run(() => api.singboxUninstall(nodeId), t('sb_uninstall_queued'));
+          }}
+        >
+          {t('sb_uninstall')}
+        </button>
       </div>
 
-      {!sb && <div className="hint">{t('sb_not_installed')}</div>}
+      {(!sb || (!sb.desired_version && !sb.version)) && <div className="hint">{t('sb_not_installed')}</div>}
 
       <div className="cmd-input-row">
         <input
@@ -719,12 +741,19 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
           max={60000}
           value={port}
           placeholder={t('sb_port')}
+          disabled={!sb?.desired_version}
           onChange={(e) => setPort(e.target.value)}
         />
         <button
           type="button"
           className="btn"
-          disabled={busy || !/^\d{4,5}$/.test(port.trim()) || Number(port) < 10000 || Number(port) > 60000}
+          disabled={
+            busy ||
+            !sb?.desired_version ||
+            !/^\d{4,5}$/.test(port.trim()) ||
+            Number(port) < 10000 ||
+            Number(port) > 60000
+          }
           onClick={() => void run(() => api.singboxSetPort(nodeId, Number(port)), t('sb_desired_pushed'))}
         >
           {t('sb_change_port')}

@@ -263,7 +263,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `subscriptions` | id, name, token_hash, format, template_id, enabled, ua_filter | 多订阅 |
 | `subscription_nodes` | subscription_id, node_id | |
 | `templates` | id, name, format(singbox/clash), content | 完整配置模板 |
-| `node_singbox` | node_id, version, desired_version, config_hash, status, last_error, cert_pem, cert_sha256, port | sing-box 期望/实际状态 |
+| `node_singbox` | node_id, version, desired_version, desired_uninstall, config_hash, status, last_error, cert_pem, cert_sha256, port | sing-box 期望/实际状态；`desired_uninstall` 是面板的卸载意图（§9.2 实现修订 2026-09-16），探针回报 `absent` 后清零 |
 | `commands` | id, node_id, kind, payload, status, created_at, sent_at, finished_at, result | 指令队列 |
 | `audit_logs` | ts, actor, node_id, action, command, risk, source_ip, ai_session_id | |
 | `alerts` | id, kind, node_id, payload, created_at, delivered_at | |
@@ -303,7 +303,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | | `cmd_result` | 指令执行结果（stdout/stderr/exit code，截断） |
 | | `terminal` | 终端输出/关闭 |
 | server → agent | `hello_ack` | 期望状态全量下发（含流量网卡选择、`agent_target_version` / `agent_update_after`，§5.5） |
-| | `desired` | 增量下发期望状态（流量网卡、sing-box 版本/配置/端口/密码/证书要求） |
+| | `desired` | 增量下发期望状态（流量网卡、sing-box 版本/配置/端口/密码/证书要求、以及 `singbox.uninstall` 卸载声明，§9.2 实现修订 2026-09-16） |
 | | `cmd` | 一次性命令（AI 执行、面板操作） |
 | | `terminal_open/input/resize/close` | 终端会话 |
 | | `probe_metrics` | 请求临时高频指标采集 5s |
@@ -399,6 +399,15 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 > **实现修订 2026-09-16（闸门①在所有"要启动 sing-box"的路径上都跑）**：闸门①原本只在**变更路径**（`apply`）里执行；"版本与配置都已就位、只是没在跑"那条路径直接 `start` 就进闸门③。真机上这被证明是个诊断陷阱：一份 sing-box **拒绝加载**的配置（§9.4 的地址式 DNS）留在盘上，文件永远不变 ⇒ 变更路径永不进入 ⇒ `check` 永不执行 ⇒ 每一轮都报闸门③的 `sing-box process exited during observation window`，而真原因（`config check: …`）一次都没出现过。现在 `checkConfig()` 是两条路径共用的独立闸门；那条路径上没有任何东西被替换，所以失败**不需要回滚**，如实上报即可。
 >
 > 这一条与 §9.1 的启动同步是同一次故障的两半：同步负责把陈旧的配置**换掉**，闸门负责在配置**换不掉**时把真话说出来。
+
+> **实现修订 2026-09-16（卸载 sing-box：声明式卸载 + 批量更新跳过）**：面板的 sing-box 卡片新增「卸载 sing-box」按钮（二次确认）。它是**期望状态**而不是一次性命令：`node_singbox.desired_uninstall`（新增列，`SchemaVersion=5`）承载意图，帧里是 `SingboxDesired.Uninstall`。
+>
+> - **为什么不用命令**：操作员可能在探针离线时点击，而 `commands` 队列的 TTL 是 10 分钟——过期即丢，探针会带着还在跑的 sing-box 变成"未纳管"却再也收不到卸载。期望状态由 `hello_ack` 在每次重连时全量重发，天然幂等（§7 声明式），不需要任何重放。
+> - **谁清空什么**：服务端写下意图时只清 desired 半边（`desired_version=''`、`config_hash=''`），**上报半边（版本/证书/状态）原样保留**——面板不会在探针真删掉之前就宣称"已卸载"。探针删完上报 `{running:false, version:""}` 且无错误时，服务端才置 `status=absent`、清掉 version/证书/config_hash 与 `desired_uninstall`。订阅（§10）要求"端口 > 0 **且**证书非空"，所以节点恰好在这一刻从订阅里消失。
+> - **探针删什么**：停服务 → 删服务定义（含改名前的 `fobe-singbox.service`；`UninstallSingbox(kind)` 显式接收 kind，非特权探针**绝不**碰 systemctl，同 §5.3 的坑）→ 删二进制（连同 `.prev`/`.download`）、配置（连同 `.prev`）、自签证书目录 → 仅当工作目录已空时删掉它（`/etc/one-sing` 可能是 one-sing.sh 的）。整条路径**不做回滚**：操作员要的就是"东西没了"，没有值得恢复的上一态。**代价（说清楚）**：证书一并删除，重新启用会生成新证书，按 SHA256 pinning 的客户端必须重拉订阅；换来的是"卸载后探针上不留 fobe 放过的东西"。幂等：没有任何残留时整步短路（否则 `systemctl stop` 一个不存在的单元会被当成失败，意图就永远清不掉）。
+> - **端口保留**：卸载帧里带 `Port`，探针在 `absent` 上报里把它带回来；服务端对 `port=0` 的上报**不回写**。于是"卸载 → 重装"仍是原来那个入站端口（与它的防火墙规则），而不是重新随机一个。
+> - **批量更新跳过**：`ListSingboxTargets()` 增加 `desired_uninstall = 0` 过滤，§9.5.4 的发布、影响面与 15 分钟收敛复查都以它为准。`desired_version=''` 本来就已经让节点落选，多这一列是为了让"待卸载"与"从未纳管"可区分（前者要重发、要在面板显示"卸载中"，并且**在探针离线时也不丢**）。待卸载期间改端口会被拒（`uninstall_pending`）——那一下写盘会把卸载意图顺手取消。
+> - **旧 agent 的窗口**：不认识 `Uninstall` 的 agent 会把它当"空版本 = 不纳管"忽略掉，面板就一直显示"卸载中"。这正是期望行为：探针跟不上时如实展示未完成，而不是假装删掉了；agent 按 §5.5 自动跟随服务端，窗口是短暂的。
 
 > **实现修订 2026-09-15（服务端产物缓存 + 一键批量更新）**：本节原本假定"版本清单里总是有货"，但从没有一条链路负责**把货取回来**——服务端只直出 `/dl` 目录里已有的文件，agent 也只会从面板拉取。本次补齐这条链路，并且**不新增任何安装路径**：
 >
@@ -504,7 +513,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 ```
 
 - **目标版本**：请求可以是 `latest`，也可以是一个具体版本号（缓存里没有就先把它下载下来）。`latest` **在点击那一刻**经上游解析成具体版本号并固化——落库、审计、下发的都是具体版本号，因此 §9.2 的"版本必须显式指定、不追 latest"不变量**不被破坏**（追 latest 的只是"点击"这个动作，不是 agent 的常态行为）。目标版本不在缓存里时，job 先下载它（同样 fail-closed），下载失败则整个 job 失败且不写任何 `desired_version`。
-- **改写期望状态而非发命令**：对每个目标节点写 `desired_version`（**保持既有端口与配置不变**），然后对在线节点 `pushDesired`；离线节点什么都不发，等它重连时由 `hello_ack` 全量下发自然收敛（§7 声明式期望状态）。
+- **改写期望状态而非发命令**：对每个目标节点写 `desired_version`（**保持既有端口与配置不变**），然后对在线节点 `pushDesired`；离线节点什么都不发，等它重连时由 `hello_ack` 全量下发自然收敛（§7 声明式期望状态）。目标集合 = `desired_version` 非空**且未被卸载**（`desired_uninstall = 0`，见 §9.2 实现修订 2026-09-16）——否则"一键更新"会把操作员刚卸载掉的 sing-box 又装回去。
 - **结果分档**（每档逐节点带原因）：`already_current`（本来就已是该版本且期望一致）/ `pushed`（已写入并推送成功）/ `offline_pending`（已写入，agent 离线，待重连收敛）/ `failed`（写入或推送失败，附原因）。
 - **job 持久化**：状态写在 `settings.singbox.last_update`，页面刷新、甚至服务端重启后都能看到同一次更新的进度与结果；服务端重启时按持久化的 deadline **重新武装**收敛检查（未完成的 job 标记为失败）。
 - **审计**：每一次更新、重试、删除版本都写 `audit_logs`。
@@ -688,6 +697,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - **顶栏与表格的窄屏适配（2026-09-16）**：顶栏全部按钮带图标，退出/语言切换补上图标后与其他按钮一致；手机竖屏（≤640px 且 portrait）顶栏按钮只显示图标（文案保留在 `title`/`aria-label`），actions 禁止换行，sticky topbar 高度不被按钮文字撑高。设置→服务器列表的状态列（圆点+文字）`nowrap` 保证单行；编辑服务器页 IP 列表的超长 IPv6 在单元格内折行（`overflow-wrap: anywhere`，只有它会压缩 min-content 宽度），不再把 auto 布局的表格顶出卡片。基础设置页与订阅页里「卡片内裸表格」统一包进 `.table-wrap`（`overflow-x: auto`）——卡片既不裁剪也不滚动，宽行（审计日志、UA、mono 值）原本会画出卡片外，现在横向滚动由容器接管。
 - **详情页「命令」卡片移除（实现修订 2026-09-16）**：面板不再提供对探针的任意 shell 下发入口——前端命令卡片与 `POST /api/nodes/{id}/commands` 路由一并删除。指令队列本体（`commands` 表、`enqueueCommand`、离线排队与幂等）保留：AI 执行（§12）与面板动作（sing-box 启停/重启）仍走同一条队列与审计；`GET /api/nodes/{id}/commands` 保留，供 AI 面板轮询执行结果。取舍：普通面板用户少一个"顺手敲 shell"的危险面，命令执行的入口收敛到 AI 确认流（§12.3）。
 - **基本信息新增「发行版」（2026-09-16）**：agent 读 `/etc/os-release`（回退 `/usr/lib/os-release`，仍只做文件读取，遵守不调外部命令的约定）取 `ID` + `VERSION_ID`，随 `hello` 与注册请求上报，落 `nodes.distro_id / distro_version`（增量迁移，`SchemaVersion=2`）；详情页基本信息显示「Debian 13」式标签与自绘发行版徽标（内联 SVG、自托管，不引 CDN）。OpenWrt 衍生系统（iStoreOS、ImmortalWrt 等）改写 `ID` 但保留 `ID_LIKE="lede openwrt"`，按 `ID_LIKE` 归一化为 openwrt，并在 os-release 缺失时回退 `/etc/openwrt_release`。没有 `VERSION_ID` 的滚动发行版（如 Arch）只显示名称；未知 ID 回退首字母徽标，旧 agent 未上报时显示 `-`。
+- **详情页「AnyTLS 端口」卡片（2026-09-16）**：基本信息网格在 **sing-box 已启用**（`desired_version` 非空）时多一张 `AnyTLS 端口` 卡片，显示入站端口（副标题为当前版本），数据来自 `GET /api/nodes/{id}` 已在返回的 `singbox` 对象——不额外发请求。未启用、或已被卸载（`desired_version=''`）时不渲染：那时端口字段不再指向任何在跑的东西。编辑服务器页的 sing-box 卡片同步新增「卸载 sing-box」按钮（二次确认，见 §9.2 实现修订）：卸载下发后探针在线时每 5s 重读一次状态（与"安装中"同一条轮询），离线则如实提示"卸载已记录,重连后执行"。
 - **审计日志独立成页（2026-09-16）**：审计从基础设置页的卡片移出，成为设置的子页 `/settings/audit`（子导航入口「审计日志」），表格结构与 `GET /api/audit` 的其余字段不变。节点列显示节点名称而非 ID：`ListAudit` 读取时 `LEFT JOIN nodes` 带出 `node_name`（`COALESCE` 成空串，避免无节点记录的 NULL 扫描错误），改名后的历史记录显示当前名称，节点已删除时前端回退显示原始 ID；审计表本身不回写，无 schema 变更。
 - 实时（2026-09-15 修订）：`/ws/events` 只覆盖状态类变化（节点增删改、sing-box、订阅、设置、GeoIP）——**常规指标上报不产生任何事件**，所以数据新鲜度必须靠「轮询 + 高频上报」两条腿：
   - **概览**：挂载且标签页可见期间，对每个在线节点打开 §16 的 5s 探测流，并 5s 拉一次列表。打开探测流是必要的：不打开就只能等 60s 基线节奏，卡片墙看起来像「不自动更新」。

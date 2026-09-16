@@ -1138,6 +1138,12 @@ func (s *Server) confirmAISetSingboxPort(w http.ResponseWriter, r *http.Request,
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// Same guard as the panel's PUT /singbox/port (design §9.2 实现修订
+	// 2026-09-16): a pending removal must not be cancelled by a port write.
+	if sb.DesiredUninstall {
+		writeErr(w, http.StatusBadRequest, "uninstall_pending")
+		return
+	}
 	if err := s.applySingboxDesired(action.NodeID, sb, sb.DesiredVersion, payload.Port, sb.Status); err != nil {
 		singboxWriteErr(w, err)
 		return

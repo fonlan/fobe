@@ -121,10 +121,63 @@ func (s *Server) handleGetNodeSingbox(w http.ResponseWriter, r *http.Request) {
 	// cert_pem omitted: potentially large and not needed by the panel (§9.3).
 	writeJSON(w, http.StatusOK, map[string]any{"singbox": map[string]any{
 		"node_id": sb.NodeID, "version": sb.Version, "desired_version": sb.DesiredVersion,
-		"config_hash": sb.ConfigHash, "status": sb.Status, "last_error": sb.LastError,
+		"desired_uninstall": sb.DesiredUninstall,
+		"config_hash":       sb.ConfigHash, "status": sb.Status, "last_error": sb.LastError,
 		"cert_sha256":    sb.CertSHA256,
 		"cert_not_after": sb.CertNotAfter, "port": sb.Port, "updated_at": sb.UpdatedAt,
 	}})
+}
+
+// handleSingboxUninstall removes sing-box from a probe (design §9.2 实现修订
+// 2026-09-16).
+//
+// It writes *desired state* rather than queueing a one-shot command: the
+// operator may click while the probe is offline, and a queued command expires
+// after 10 minutes while hello_ack keeps re-delivering the declaration. It
+// deliberately does not delete the node_singbox row — the agent's next report
+// blanks the reported half (version, certificate, status → absent), which is
+// what drops the node out of subscriptions and lets an operator reinstall with
+// the same port.
+func (s *Server) handleSingboxUninstall(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	sb, err := s.Store.GetNodeSingbox(id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusBadRequest, "singbox_not_installed")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	// Nothing on the probe and no removal pending: there is nothing to remove.
+	// A second click while a removal is pending is allowed on purpose — it
+	// re-pushes the declaration to a probe that may have missed it.
+	if sb.Version == "" && sb.CertPEM == "" && !sb.DesiredUninstall {
+		writeErr(w, http.StatusBadRequest, "singbox_not_installed")
+		return
+	}
+	sb.DesiredVersion = ""
+	sb.DesiredUninstall = true
+	// The config is derived from the desired version: keep the bytes (a failed
+	// removal followed by a reinstall reuses them) but drop the fingerprint so
+	// a stale hash can never describe an uninstall.
+	sb.ConfigHash = ""
+	if err := s.Store.UpsertNodeSingbox(sb); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	s.Store.InsertAudit(&store.AuditEntry{
+		Actor: "panel", NodeID: id, Action: "singbox_uninstall", Command: sb.Version, SourceIP: s.Trust.RealIP(r),
+	})
+	s.Hub.PushDesired(id) // offline probes get it from hello_ack on reconnect
+	s.publishEvent("node_updated", id)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 type singboxInstallReq struct {
@@ -256,6 +309,14 @@ func (s *Server) handleSingboxPort(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// A removal is pending: writing here would cancel it (§9.2 实现修订
+	// 2026-09-16). A node that simply has no desired version is still allowed —
+	// preparing an inbound port before installing is a legitimate flow and the
+	// pre-existing behaviour.
+	if sb.DesiredUninstall {
+		writeErr(w, http.StatusBadRequest, "uninstall_pending")
+		return
+	}
 	if err := s.applySingboxDesired(id, sb, sb.DesiredVersion, req.Port, sb.Status); err != nil {
 		singboxWriteErr(w, err)
 		return
@@ -288,6 +349,12 @@ func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, versi
 	sb.DesiredVersion = version
 	sb.Port = port
 	sb.ConfigHash = singbox.ConfigHash(config)
+	// Installing is the operator re-managing the node: it cancels a pending
+	// removal (§9.2 实现修订 2026-09-16). The agent may still be converging to
+	// the uninstall it was told a moment ago; the install declaration that
+	// follows is authoritative, and the two cannot both be in flight — the
+	// manager keeps one desired state.
+	sb.DesiredUninstall = false
 	if status != "" {
 		sb.Status = status
 	}

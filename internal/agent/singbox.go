@@ -62,17 +62,19 @@ type singboxManager struct {
 	log *slog.Logger
 	hc  *http.Client // injectable for tests
 
-	mu           sync.Mutex
-	desired      *protocol.SingboxDesired
-	state        *protocol.SingboxState
-	proc         *os.Process           // fallback-mode child
-	lastAttempt  time.Time             // last convergence that reached the change path
-	lastErr      string                // last reported error; sticky while off-target (see reportOnly)
-	lastFwPort   int                   // port the firewall pass already ran for (§9.2)
-	lastFwHint   string                // manual command when that pass failed (""=allowed)
-	rollbackSeen bool                  // one-shot: a rollback happened since last report (§15)
-	retiredUnit  bool                  // one-shot: the pre-rename fobe-singbox unit was removed (§9.3)
-	openFw       func(port int) string // firewall pass, injectable for tests
+	mu               sync.Mutex
+	desired          *protocol.SingboxDesired
+	desiredUninstall bool // panel asked for removal (§9.2 实现修订 2026-09-16)
+	uninstallPort    int  // port carried through a removal into the absent report
+	state            *protocol.SingboxState
+	proc             *os.Process           // fallback-mode child
+	lastAttempt      time.Time             // last convergence that reached the change path
+	lastErr          string                // last reported error; sticky while off-target (see reportOnly)
+	lastFwPort       int                   // port the firewall pass already ran for (§9.2)
+	lastFwHint       string                // manual command when that pass failed (""=allowed)
+	rollbackSeen     bool                  // one-shot: a rollback happened since last report (§15)
+	retiredUnit      bool                  // one-shot: the pre-rename fobe-singbox unit was removed (§9.3)
+	openFw           func(port int) string // firewall pass, injectable for tests
 
 	kick    chan struct{} // nudge: desired changed / watchdog fired (buffered 1)
 	changed chan struct{} // nudge: reported state changed (buffered 1)
@@ -121,8 +123,27 @@ func relocateConfig(configJSON string) string {
 // SetDesired records the latest declaration and nudges convergence. A nil
 // (or empty-Version) desired means "not managed": the manager reports
 // nothing and never touches a running sing-box (§9 版本显式).
+//
+// A desired state carrying Uninstall is the operator's removal request
+// (§9.2 实现修订 2026-09-16). It is recorded rather than executed here: the
+// read loop must not block on systemctl and file removal, and the flag has to
+// survive a failed attempt so the 60s tick retries it.
 func (m *singboxManager) SetDesired(d *protocol.SingboxDesired) {
 	m.mu.Lock()
+	if d != nil && d.Uninstall {
+		// The declared port is remembered rather than acted on: the absent
+		// report carries it back, so an operator who uninstalls and reinstalls
+		// keeps the inbound port (and whatever firewall rule goes with it)
+		// instead of being handed a fresh random one.
+		m.desiredUninstall = true
+		if d.Port > 0 {
+			m.uninstallPort = d.Port
+		}
+		m.mu.Unlock()
+		m.nudge(m.kick)
+		return
+	}
+	m.desiredUninstall = false
 	if d != nil && normalizeVersion(d.Version) == "" {
 		d = nil // empty version = not managed (§9 版本显式)
 	}
@@ -185,9 +206,18 @@ func (m *singboxManager) Run() {
 // off so a broken download does not retry every 60s.
 func (m *singboxManager) needWatch() bool {
 	m.mu.Lock()
-	d, last := m.desired, m.lastAttempt
+	d, last, uninstall := m.desired, m.lastAttempt, m.desiredUninstall
 	m.mu.Unlock()
-	if d == nil || time.Since(last) < retryBackoff {
+	if time.Since(last) < retryBackoff {
+		return false
+	}
+	if uninstall {
+		// Removal is idempotent and cheap; retry it on the same backoff as a
+		// failed install so a half-removed probe converges without operator
+		// action (§9.2 实现修订 2026-09-16).
+		return true
+	}
+	if d == nil {
 		return false
 	}
 	bin, _, _ := service.SingboxPaths()
@@ -229,8 +259,13 @@ func (m *singboxManager) reportOnly() {
 // converge brings local reality in line with the desired state (§9.2).
 func (m *singboxManager) converge() {
 	m.mu.Lock()
+	uninstall := m.desiredUninstall
 	d := m.desired
 	m.mu.Unlock()
+	if uninstall {
+		m.uninstall()
+		return
+	}
 	if d == nil {
 		return // unmanaged: never touch a running sing-box
 	}
@@ -296,6 +331,93 @@ func (m *singboxManager) converge() {
 	}
 	m.maybeAllowFirewall(effectivePort(d))
 	m.report(d, d.Version, true, "", pair)
+}
+
+// uninstall removes sing-box from this probe on the panel's request (§9.2
+// 实现修订 2026-09-16).
+//
+// Nothing in this path is guarded by a rollback: the operator asked for the
+// binary to be gone, so there is no previous state worth restoring. It is
+// idempotent — the desired flag stays set until the removal succeeds, which is
+// what lets a failed attempt retry on the next tick and lets an offline probe
+// converge from hello_ack whenever it reconnects.
+//
+// port carries the last desired inbound port into the absent report so the
+// operator's port choice survives the round trip (see SetDesired).
+func (m *singboxManager) uninstall() {
+	m.mu.Lock()
+	m.lastAttempt = time.Now()
+	port := m.uninstallPort
+	m.mu.Unlock()
+
+	bin, config, certDir := service.SingboxPaths()
+	kind := singboxKind()
+	// A probe that already converged gets the declaration again on every
+	// reconnect: nothing on disk means nothing to do, and calling `systemctl
+	// stop` for a unit that no longer exists would report a failure for a
+	// perfectly clean state (which would keep the flag set forever).
+	if anyExists(bin, config, certDir, service.SingboxUnitPath, service.SingboxInitPath) {
+		var errs []error
+		// Stop before removing the definition: the fallback branch owns the
+		// child process, so only the manager can kill it, and stopping after
+		// the unit file is gone would leave an instance running from a deleted
+		// path. `SingboxActive` guards the systemd/procd call for the same
+		// reason — stop on an unloaded unit is an error, not a no-op.
+		if kind == service.KindFallback || service.SingboxActive() {
+			if err := m.stop(bin); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		// A sing-box started outside this manager's life (a reparented
+		// fallback child, or one-sing.sh's own unit) still holds the binary
+		// and the inbound port.
+		if kind == service.KindFallback {
+			if pid := findProcByExe(bin); pid > 0 {
+				killPID(pid)
+			}
+		} else {
+			m.dropOrphan(bin)
+		}
+		if err := service.UninstallSingbox(kind); err != nil {
+			errs = append(errs, err)
+		}
+		if err := errors.Join(errs...); err != nil {
+			m.log.Warn("sing-box uninstall failed", "err", err)
+			// Report what is actually left, with the cause: a removal that
+			// failed halfway must not look like a clean uninstall on the panel.
+			d := &protocol.SingboxDesired{Port: port}
+			act := m.observe(bin, d)
+			m.report(d, act.version, act.running, "uninstall: "+err.Error(), certPair{})
+			return
+		}
+	}
+
+	m.mu.Lock()
+	m.desiredUninstall = false
+	m.desired = nil
+	m.uninstallPort = 0
+	m.lastErr = ""
+	m.lastFwHint = ""
+	m.lastFwPort = 0
+	m.rollbackSeen = false
+	m.mu.Unlock()
+
+	// The confirmation the server needs to clear the reported half (version,
+	// certificate, status → absent): nothing installed, and nothing wrong.
+	m.log.Info("sing-box uninstalled", "port", port)
+	m.report(&protocol.SingboxDesired{Port: port}, "", false, "", certPair{})
+}
+
+// anyExists reports whether anything at all (file or directory) is at any of
+// the paths. The uninstall needs the directory-tolerant question: an empty-but-
+// present cert directory is still leftover state to remove.
+func anyExists(paths ...string) bool {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // apply runs the change path: download+verify → backup → write → the three

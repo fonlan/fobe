@@ -277,6 +277,16 @@ type SingboxDesired struct {
 	Version    string `json:"version,omitempty"`
 	ConfigJSON string `json:"config_json,omitempty"`
 	Port       int    `json:"port,omitempty"`
+	// Uninstall asks the probe to remove sing-box and everything fobe put next
+	// to it (§9.2 实现修订 2026-09-16). Version is empty whenever this is set.
+	//
+	// It is deliberately part of the *declared* state rather than a one-shot
+	// command: the operator may press 卸载 while the probe is offline, and a
+	// queued command expires (10 min TTL) while hello_ack re-delivers the
+	// desired state forever. An agent that predates this field ignores it
+	// (empty version = unmanaged), so the panel keeps showing 卸载中 until the
+	// probe catches up — no data is lost in either direction.
+	Uninstall bool `json:"uninstall,omitempty"`
 }
 
 // TargetSpec is a latency target pushed to the agent (design §13).

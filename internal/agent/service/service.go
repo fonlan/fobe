@@ -5,12 +5,14 @@ package service
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 )
 
 type Kind int
@@ -328,6 +330,71 @@ func SingboxActive() bool {
 	default:
 		return false
 	}
+}
+
+// UninstallSingbox removes everything fobe installed for sing-box: the service
+// definition, the binary (with its .prev/.download siblings), the config and
+// the self-signed certificate (§9.2 实现修订 2026-09-16).
+//
+// The kind is passed in rather than re-detected because an unprivileged agent
+// must never call systemctl: Detect() still answers systemd there, and every
+// invocation would come back as a polkit refusal that looks like a failed
+// uninstall while the service was never touched (same trap as
+// retireLegacyUnit). The caller passes what the sing-box lifecycle actually
+// drives (singboxKind).
+//
+// Steps are best-effort and joined: a missing unit file or an already-absent
+// binary is not a failure (the desired state may be re-delivered), but a real
+// permission error has to reach the panel instead of being swallowed.
+func UninstallSingbox(kind Kind) error {
+	var errs []error
+	removeFile := func(path string) {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove %s: %w", path, err))
+		}
+	}
+	switch kind {
+	case KindSystemd:
+		// --now also stops it; leaving the unit enabled would keep a unit
+		// pointing at a deleted binary, which systemd restarts forever.
+		_ = run("systemctl", "disable", "--now", SingboxUnitName)
+		removeFile(SingboxUnitPath)
+		_ = run("systemctl", "daemon-reload")
+	case KindProcd:
+		_ = run(SingboxInitPath, "stop")
+		_ = run(SingboxInitPath, "disable")
+		removeFile(SingboxInitPath)
+	}
+	// The pre-rename unit lives on machines installed before §9.3's revision;
+	// it supervises the same binary we are about to delete.
+	if kind != KindFallback {
+		if _, err := RetireLegacySingboxUnit(); err != nil {
+			errs = append(errs, fmt.Errorf("retire legacy unit: %w", err))
+		}
+	}
+
+	bin, config, certDir := SingboxPaths()
+	for _, p := range []string{bin, bin + ".prev", bin + ".download", config, config + ".prev"} {
+		removeFile(p)
+	}
+	// The certificate is fobe's own (self-signed, generated on the probe), so
+	// it goes with the rest: a reinstall mints a new pair and the subscription
+	// re-renders it. Doing so is what makes the node disappear from §10
+	// subscriptions — they list a node only while it has a pinned certificate.
+	if err := os.RemoveAll(certDir); err != nil {
+		errs = append(errs, fmt.Errorf("remove %s: %w", certDir, err))
+	}
+	// Only when empty: /etc/one-sing may hold an operator's other files.
+	if err := os.Remove(filepath.Dir(bin)); err != nil && !os.IsNotExist(err) && !isNotEmpty(err) {
+		errs = append(errs, fmt.Errorf("remove %s: %w", filepath.Dir(bin), err))
+	}
+	return errors.Join(errs...)
+}
+
+// isNotEmpty reports the ENOTEMPTY/EEXIST family, i.e. "there is still
+// something there and that is fine".
+func isNotEmpty(err error) bool {
+	return errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST)
 }
 
 // archIdent returns the artifact triple used in /dl paths.

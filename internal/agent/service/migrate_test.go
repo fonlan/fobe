@@ -180,3 +180,66 @@ func TestOwnsLegacyInitScript(t *testing.T) {
 		t.Fatalf("a missing init script is not ours")
 	}
 }
+
+// TestUninstallSingboxRemovesLayout covers the panel's uninstall (§9.2 实现修订
+// 2026-09-16): the binary (with its rollback/download siblings), the config, the
+// certificate directory and — only when it is empty — the work dir go away.
+// KindFallback is the unprivileged case: it must not touch a service manager.
+func TestUninstallSingboxRemovesLayout(t *testing.T) {
+	var calls [][]string
+	old := serviceRun
+	serviceRun = func(name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		return nil
+	}
+	t.Cleanup(func() { serviceRun = old })
+
+	root := t.TempDir()
+	SetWorkDir(filepath.Join(root, "one-sing"))
+	t.Cleanup(func() { SetWorkDir(SingboxWorkDir) })
+	bin, config, certDir := SingboxPaths()
+	write(t, bin, "bin", 0o755)
+	write(t, bin+".prev", "old", 0o755)
+	write(t, bin+".download", "partial", 0o755)
+	write(t, config, "{}", 0o600)
+	write(t, filepath.Join(certDir, SingboxCertFile), "cert", 0o600)
+	write(t, filepath.Join(certDir, SingboxKeyFile), "key", 0o600)
+
+	if err := UninstallSingbox(KindFallback); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	for _, p := range []string{bin, bin + ".prev", bin + ".download", config, config + ".prev", certDir} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s survived the uninstall", p)
+		}
+	}
+	if _, err := os.Stat(filepath.Dir(bin)); !os.IsNotExist(err) {
+		t.Fatalf("empty work dir survived the uninstall")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("fallback uninstall ran a service manager command: %v", calls)
+	}
+
+	// Idempotent: nothing there is not an error (the declaration is re-delivered
+	// on every reconnect).
+	if err := UninstallSingbox(KindFallback); err != nil {
+		t.Fatalf("second uninstall: %v", err)
+	}
+
+	// A non-empty work dir belongs to the operator (one-sing.sh may share it):
+	// it is left alone, and that too is not an error.
+	shared := filepath.Join(root, "shared")
+	SetWorkDir(shared)
+	keep := filepath.Join(shared, "operator.toml")
+	write(t, filepath.Join(shared, "sing-box"), "bin", 0o755)
+	write(t, keep, "x", 0o600)
+	if err := UninstallSingbox(KindFallback); err != nil {
+		t.Fatalf("uninstall with a foreign file in the work dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(shared, "sing-box")); !os.IsNotExist(err) {
+		t.Fatalf("binary survived")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("operator file was removed: %v", err)
+	}
+}

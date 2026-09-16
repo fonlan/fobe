@@ -214,6 +214,7 @@ CREATE TABLE IF NOT EXISTS node_singbox (
     node_id          TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
     version          TEXT NOT NULL DEFAULT '',
     desired_version  TEXT NOT NULL DEFAULT '',
+    desired_uninstall INTEGER NOT NULL DEFAULT 0, -- §9.2 面板卸载意图(探针回报 absent 后清零)
     config_hash      TEXT NOT NULL DEFAULT '',
     status           TEXT NOT NULL DEFAULT 'absent', -- absent|installing|running|degraded|rolled_back
     last_error       TEXT NOT NULL DEFAULT '',

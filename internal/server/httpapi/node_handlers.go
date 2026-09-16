@@ -205,7 +205,8 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 	if sb, err := s.Store.GetNodeSingbox(id); err == nil {
 		resp["singbox"] = map[string]any{
 			"version": sb.Version, "desired_version": sb.DesiredVersion,
-			"status": sb.Status, "last_error": sb.LastError, "port": sb.Port,
+			"desired_uninstall": sb.DesiredUninstall,
+			"status":            sb.Status, "last_error": sb.LastError, "port": sb.Port,
 			"cert_sha256": sb.CertSHA256, "cert_not_after": sb.CertNotAfter,
 		}
 	}

@@ -590,6 +590,15 @@ export function singboxAction(id: string, action: 'start' | 'stop' | 'restart'):
   return request(`/api/nodes/${encodeURIComponent(id)}/singbox/${action}`, { method: 'POST', body: {} });
 }
 
+/**
+ * Remove sing-box from a node (§9.2). A desired-state write, not a one-shot
+ * command: an offline probe converges on its next handshake, and the node is
+ * excluded from every later batch update until it is installed again.
+ */
+export function singboxUninstall(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/singbox/uninstall`, { method: 'POST', body: {} });
+}
+
 export function singboxSetPort(id: string, port: number): Promise<{ ok: boolean; port: number }> {
   return request(`/api/nodes/${encodeURIComponent(id)}/singbox/port`, {
     method: 'PUT',

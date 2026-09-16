@@ -100,6 +100,8 @@ export interface NodeBilling {
 export interface SingboxInfo {
   version: string;
   desired_version: string;
+  /** Removal requested but not confirmed yet (§9.2). */
+  desired_uninstall?: boolean;
   status: string;
   last_error: string;
   port: number;
@@ -303,6 +305,8 @@ export interface SingboxStatus {
   node_id: string;
   version: string;
   desired_version: string;
+  /** Operator asked for removal; the probe's "absent" report clears it (§9.2). */
+  desired_uninstall: boolean;
   config_hash: string;
   status: string;
   last_error: string;

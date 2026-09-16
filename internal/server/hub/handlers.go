@@ -298,13 +298,33 @@ func (h *Hub) recordSingboxState(nodeID string, s *protocol.SingboxState) {
 		cur.CertNotAfter = s.CertNotAfter
 	}
 	cur.Version = s.Version
-	cur.Port = s.Port
+	if s.Port > 0 {
+		// A port of 0 is "no inbound right now", not a correction: keeping the
+		// stored value is what lets an uninstall/reinstall round trip reuse the
+		// operator's port (and its firewall rule) instead of drawing a new
+		// random one (§9.2 实现修订 2026-09-16).
+		cur.Port = s.Port
+	}
 	cur.LastError = s.LastError
 	switch {
 	case s.Running:
 		cur.Status = "running"
 	case s.LastError != "":
 		cur.Status = "degraded"
+	case s.Version == "" && cur.DesiredUninstall:
+		// The probe says "no sing-box here and nothing went wrong" — the
+		// confirmation of a panel-requested uninstall (§9.2 实现修订
+		// 2026-09-16). Gated on the pending removal on purpose: the probe also
+		// pushes a periodic `state` frame carrying its *last* snapshot, and
+		// without the gate an install that takes minutes (a ~90 MiB download)
+		// would be reported as absent by the stale frame of the uninstall
+		// before it. Clearing the reported half is what drops the node out of
+		// every subscription (§10: a node is listed only while it has a port
+		// and a pinned certificate).
+		cur.Status = "absent"
+		cur.DesiredUninstall = false
+		cur.ConfigHash = ""
+		cur.CertPEM, cur.CertSHA256, cur.CertNotAfter = "", "", 0
 	}
 	if err := h.store.UpsertNodeSingbox(cur); err != nil {
 		h.log.Warn("upsert singbox state", "node", nodeID, "err", err)
@@ -390,13 +410,23 @@ func (h *Hub) buildDesiredState(nodeID string) protocol.DesiredState {
 		iface := net.Iface
 		desired.TrafficIface = &iface
 	}
-	if sb, err := h.store.GetNodeSingbox(nodeID); err == nil && sb.DesiredVersion != "" {
-		desired.Singbox = &protocol.SingboxDesired{
-			Version: sb.DesiredVersion,
-			Port:    sb.Port,
-		}
-		if cfg, err := h.store.GetSetting("singbox_config:" + nodeID); err == nil {
-			desired.Singbox.ConfigJSON = cfg
+	if sb, err := h.store.GetNodeSingbox(nodeID); err == nil {
+		switch {
+		case sb.DesiredUninstall:
+			// §9.2 实现修订 2026-09-16: removal is a declared state, so an
+			// offline probe converges on reconnect even though the operator's
+			// click may be hours old (a queued command would have expired).
+			// The port rides along purely so the probe can hand it back in its
+			// absent report (see recordSingboxState).
+			desired.Singbox = &protocol.SingboxDesired{Uninstall: true, Port: sb.Port}
+		case sb.DesiredVersion != "":
+			desired.Singbox = &protocol.SingboxDesired{
+				Version: sb.DesiredVersion,
+				Port:    sb.Port,
+			}
+			if cfg, err := h.store.GetSetting("singbox_config:" + nodeID); err == nil {
+				desired.Singbox.ConfigJSON = cfg
+			}
 		}
 	}
 	// §5.5: the agent build this server wants, plus the earliest moment the

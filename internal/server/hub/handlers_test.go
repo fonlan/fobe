@@ -207,3 +207,104 @@ func TestOnTrafficWithoutNodeNetwork(t *testing.T) {
 		t.Fatalf("counter = %+v (%v), want 1000 used", c, err)
 	}
 }
+
+// TestRecordSingboxStateAbsentConfirmsUninstall covers the confirmation half of
+// the panel's uninstall (design §9.2 实现修订 2026-09-16): only a report that
+// says "no sing-box here and nothing wrong" clears the reported half and the
+// pending removal flag. It is what takes the node out of §10 subscriptions
+// (they list a node only while it has a port and a pinned certificate) and what
+// lets an operator reinstall on the same port.
+func TestRecordSingboxStateAbsentConfirmsUninstall(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n9")
+	if err := h.store.UpsertNodeSingbox(&store.NodeSingbox{
+		NodeID: "n9", Version: "1.10.0", DesiredUninstall: true, Port: 23456,
+		Status: "running", CertPEM: "pem", CertSHA256: "sum", CertNotAfter: 123, ConfigHash: "h",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// a failed removal reports the leftovers *and* the cause: the flag stays,
+	// so the manager keeps retrying and the panel keeps explaining why
+	h.recordSingboxState("n9", &protocol.SingboxState{
+		Version: "1.10.0", Port: 23456, LastError: "uninstall: remove /etc/one-sing: permission denied",
+	})
+	sb, err := h.store.GetNodeSingbox("n9")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if sb.Status != "degraded" || !sb.DesiredUninstall || sb.CertPEM != "pem" {
+		t.Fatalf("failed removal must not look uninstalled: %+v", sb)
+	}
+
+	// the confirmation: nothing installed, nothing wrong
+	h.recordSingboxState("n9", &protocol.SingboxState{Running: false, Version: "", Port: 23456})
+	sb, err = h.store.GetNodeSingbox("n9")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if sb.Status != "absent" || sb.DesiredUninstall || sb.ConfigHash != "" {
+		t.Fatalf("absent report not applied: %+v", sb)
+	}
+	if sb.CertPEM != "" || sb.CertSHA256 != "" || sb.CertNotAfter != 0 {
+		t.Fatalf("certificate not cleared (node stays in subscriptions): %+v", sb)
+	}
+	if sb.Port != 23456 {
+		t.Fatalf("port must survive so a reinstall reuses it: %+v", sb)
+	}
+}
+
+// TestRecordSingboxStateAbsentNeedsAPendingRemoval pins the gate on the absent
+// rule: the probe re-sends its last snapshot every 5 minutes, and an install
+// that takes minutes must not be reported as "absent" by the install's own
+// stale predecessor snapshot.
+func TestRecordSingboxStateAbsentNeedsAPendingRemoval(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n11")
+	if err := h.store.UpsertNodeSingbox(&store.NodeSingbox{
+		NodeID: "n11", DesiredVersion: "1.11.5", Status: "installing", Port: 23456, CertPEM: "pem",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	h.recordSingboxState("n11", &protocol.SingboxState{Running: false, Version: "", Port: 23456})
+	sb, err := h.store.GetNodeSingbox("n11")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if sb.Status != "installing" || sb.CertPEM != "pem" {
+		t.Fatalf("a stale snapshot must not be read as an uninstall confirmation: %+v", sb)
+	}
+}
+
+// TestBuildDesiredStateDeclaresRemoval pins the declarative carrier: an offline
+// probe learns about the operator's uninstall from hello_ack, where a queued
+// one-shot command would already have expired (10 min TTL).
+func TestBuildDesiredStateDeclaresRemoval(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n10")
+	if err := h.store.UpsertNodeSingbox(&store.NodeSingbox{
+		NodeID: "n10", Version: "1.10.0", DesiredUninstall: true, Port: 23456,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	desired := h.buildDesiredState("n10")
+	if desired.Singbox == nil || !desired.Singbox.Uninstall || desired.Singbox.Version != "" {
+		t.Fatalf("removal not declared: %+v", desired.Singbox)
+	}
+	// the port rides along only so the probe can hand it back in its absent
+	// report (a reinstall then reuses it); it installs nothing on its own
+	if desired.Singbox.Port != 23456 {
+		t.Fatalf("removal declaration dropped the port: %+v", desired.Singbox)
+	}
+
+	// installed again: the declaration goes back to the managed form
+	if err := h.store.UpsertNodeSingbox(&store.NodeSingbox{
+		NodeID: "n10", DesiredVersion: "1.11.5", Port: 23456,
+	}); err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+	desired = h.buildDesiredState("n10")
+	if desired.Singbox == nil || desired.Singbox.Uninstall || desired.Singbox.Version != "1.11.5" {
+		t.Fatalf("install declaration wrong: %+v", desired.Singbox)
+	}
+}

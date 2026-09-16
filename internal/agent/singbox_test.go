@@ -751,3 +751,66 @@ func TestCheckConfigMissingFile(t *testing.T) {
 		t.Fatalf("err = %v, want no-config error", err)
 	}
 }
+
+// TestConvergeUninstallsOnDeclaredRemoval covers the probe half of the panel's
+// uninstall (design §9.2 实现修订 2026-09-16): the declaration removes the
+// layout, reports an "absent" state with no error (that is what the server
+// treats as confirmation) and clears the flag; a re-delivered declaration is a
+// silent no-op rather than a failure.
+func TestConvergeUninstallsOnDeclaredRemoval(t *testing.T) {
+	dir := t.TempDir()
+	service.SetWorkDir(dir)
+	t.Cleanup(func() { service.SetWorkDir(service.SingboxWorkDir) })
+
+	bin, config, certDir := service.SingboxPaths()
+	if err := os.MkdirAll(certDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{bin, bin + ".prev", config, filepath.Join(certDir, service.SingboxCertFile)} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := newSingboxManager(&Config{ServerURL: "http://127.0.0.1:1"}, testLogger())
+	m.SetDesired(&protocol.SingboxDesired{Uninstall: true, Port: 23456})
+	select {
+	case <-m.kick:
+	default:
+		t.Fatalf("SetDesired did not nudge convergence")
+	}
+	m.converge() // the manager goroutine is not running in this test
+
+	for _, p := range []string{bin, bin + ".prev", config, certDir} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s survived the uninstall", p)
+		}
+	}
+	st := m.Snapshot()
+	if st == nil || st.Running || st.Version != "" || st.LastError != "" {
+		t.Fatalf("absent report wrong: %+v", st)
+	}
+	if st.Port != 23456 {
+		t.Fatalf("absent report lost the port: %+v", st)
+	}
+	if m.desiredUninstall {
+		t.Fatalf("removal flag not cleared after a successful uninstall")
+	}
+
+	// The declaration is re-delivered on every handshake until the server sees
+	// the report: that must stay a silent no-op, not an error (a reported error
+	// would keep the node 卸载中 forever).
+	m.SetDesired(&protocol.SingboxDesired{Uninstall: true, Port: 23456})
+	m.converge()
+	if st := m.Snapshot(); st == nil || st.LastError != "" || st.Version != "" {
+		t.Fatalf("re-delivered removal produced an error: %+v", st)
+	}
+
+	// Installing again cancels a pending removal: the desired state is one
+	// thing at a time, and the install declaration is the later word.
+	m.SetDesired(&protocol.SingboxDesired{Uninstall: true, Port: 23456})
+	m.SetDesired(&protocol.SingboxDesired{Version: "1.11.5", Port: 23456, ConfigJSON: "{}"})
+	if m.desiredUninstall {
+		t.Fatalf("install did not cancel the pending removal")
+	}
+}

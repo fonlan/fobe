@@ -514,3 +514,154 @@ func TestSingboxInstallAndDesiredPush(t *testing.T) {
 		t.Fatalf("bad version: %d %s", r.Status, r.Body)
 	}
 }
+
+// TestSingboxUninstallIsDesiredStateNotACommand covers the panel's uninstall
+// action (design §9.2 实现修订 2026-09-16): the intent is a declared state, the
+// reported half survives until the probe confirms, and the node stops being a
+// batch-update target the moment the removal is declared.
+func TestSingboxUninstallIsDesiredStateNotACommand(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+	setAnytlsPassword(t, srv, cookie)
+
+	nodeID, secret := seedNode(t, api, "probe-un", "m-un-1", "203.0.113.14")
+
+	// nothing installed (no row at all) → refused, nothing is queued
+	r := doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+nodeID+"/singbox/uninstall", cookie, nil)
+	if r.Status != http.StatusBadRequest || r.errCode(t) != "singbox_not_installed" {
+		t.Fatalf("uninstall without sing-box: %d %s", r.Status, r.Body)
+	}
+
+	// a managed, agent-reported node: desired + reported halves both filled
+	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
+		NodeID: nodeID, Version: "1.10.0", DesiredVersion: "1.10.0", ConfigHash: "h",
+		Status: "running", Port: 23456, CertPEM: testCertPEM, CertSHA256: "f00d",
+	}); err != nil {
+		t.Fatalf("seed managed node: %v", err)
+	}
+	if targets, err := api.Store.ListSingboxTargets(); err != nil || len(targets) != 1 {
+		t.Fatalf("managed node is not a batch target: %+v err=%v", targets, err)
+	}
+
+	// fake agent connects so the declared removal must be pushed live
+	hdr := http.Header{"X-Fobe-Node-ID": {nodeID}, "X-Fobe-Node-Secret": {secret}}
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+srv.URL[len("http"):]+"/ws/agent", hdr)
+	if err != nil {
+		t.Fatalf("agent dial: %v", err)
+	}
+	defer ws.Close()
+	readType := func(want string) protocol.Envelope {
+		for {
+			ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+			var env protocol.Envelope
+			if err := ws.ReadJSON(&env); err != nil {
+				t.Fatalf("read (want %s): %v", want, err)
+			}
+			if env.Type == want {
+				return env
+			}
+		}
+	}
+	_ = ws.WriteJSON(protocol.NewEnvelope(protocol.TypeHello, "", protocol.Hello{MachineID: "m-un-1", Version: "dev"}))
+	readType(protocol.TypeHelloAck)
+
+	r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+nodeID+"/singbox/uninstall", cookie, nil)
+	if r.Status != 200 {
+		t.Fatalf("uninstall: %d %s", r.Status, r.Body)
+	}
+	var desired protocol.DesiredState
+	if err := json.Unmarshal(readType(protocol.TypeDesired).Payload, &desired); err != nil {
+		t.Fatalf("desired payload: %v", err)
+	}
+	if desired.Singbox == nil || !desired.Singbox.Uninstall || desired.Singbox.Version != "" {
+		t.Fatalf("desired removal not declared: %+v", desired.Singbox)
+	}
+	if desired.Singbox.Port != 23456 {
+		t.Fatalf("removal declaration dropped the port: %+v", desired.Singbox)
+	}
+
+	sb, err := api.Store.GetNodeSingbox(nodeID)
+	if err != nil {
+		t.Fatalf("get node singbox: %v", err)
+	}
+	if !sb.DesiredUninstall || sb.DesiredVersion != "" {
+		t.Fatalf("desired half not cleared: %+v", sb)
+	}
+	// the reported half is the probe's business: it stays until the probe says
+	// otherwise, so the panel never claims the binary is gone before it is
+	if sb.Version != "1.10.0" || sb.CertPEM != testCertPEM || sb.Port != 23456 {
+		t.Fatalf("reported half was cleared too early: %+v", sb)
+	}
+	// §9.5.4: a later batch update must not reinstall what was just removed
+	if targets, err := api.Store.ListSingboxTargets(); err != nil || len(targets) != 0 {
+		t.Fatalf("uninstalled node still a batch target: %+v err=%v", targets, err)
+	}
+	// the panel reads the flag from both endpoints
+	m := doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+nodeID+"/singbox", cookie, nil).JSONMap(t)
+	if sm, _ := m["singbox"].(map[string]any); sm == nil || sm["desired_uninstall"] != true {
+		t.Fatalf("GET singbox missing desired_uninstall: %s", m)
+	}
+	dm := doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+nodeID, cookie, nil).JSONMap(t)
+	if sm, _ := dm["singbox"].(map[string]any); sm == nil || sm["desired_uninstall"] != true {
+		t.Fatalf("GET node missing desired_uninstall: %s", dm)
+	}
+
+	// while the removal is pending the port endpoint refuses: a write there
+	// would cancel the removal the operator just asked for
+	r = doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+nodeID+"/singbox/port", cookie, map[string]any{"port": 30000})
+	if r.Status != http.StatusBadRequest || r.errCode(t) != "uninstall_pending" {
+		t.Fatalf("port change while a removal is pending: %d %s", r.Status, r.Body)
+	}
+
+	// a second click while the removal is still pending re-arms it (the
+	// declaration may have been missed) instead of failing
+	if r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+nodeID+"/singbox/uninstall", cookie, nil); r.Status != 200 {
+		t.Fatalf("re-arm uninstall: %d %s", r.Status, r.Body)
+	}
+	readType(protocol.TypeDesired)
+
+	// the probe confirms: nothing installed, nothing wrong
+	_ = ws.WriteJSON(protocol.NewEnvelope(protocol.TypeState, "", protocol.State{
+		Singbox: &protocol.SingboxState{Running: false, Version: "", Port: 23456},
+	}))
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		sb, err = api.Store.GetNodeSingbox(nodeID)
+		if err == nil && sb.Status == "absent" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("absent report not applied: %+v err=%v", sb, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if sb.DesiredUninstall || sb.Version != "" || sb.CertPEM != "" || sb.CertSHA256 != "" {
+		t.Fatalf("reported half not cleared on confirmation: %+v", sb)
+	}
+	// the port survives so a reinstall reuses it
+	if sb.Port != 23456 {
+		t.Fatalf("port lost on uninstall: %d", sb.Port)
+	}
+
+	// nothing is installed any more: a further uninstall click is honest about
+	// there being nothing to remove
+	r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+nodeID+"/singbox/uninstall", cookie, nil)
+	if r.Status != http.StatusBadRequest || r.errCode(t) != "singbox_not_installed" {
+		t.Fatalf("uninstall after confirmation: %d %s", r.Status, r.Body)
+	}
+	// and it can be installed again, reusing the port the operator chose
+	// (§9.2: 版本必须显式指定)
+	r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+nodeID+"/singbox/install", cookie,
+		map[string]string{"version": "1.11.5"})
+	if r.Status != 200 {
+		t.Fatalf("reinstall: %d %s", r.Status, r.Body)
+	}
+	if sb, err = api.Store.GetNodeSingbox(nodeID); err != nil || sb.DesiredUninstall || sb.DesiredVersion != "1.11.5" || sb.Port != 23456 {
+		t.Fatalf("state after reinstall: %+v err=%v", sb, err)
+	}
+	// the removal guard is gone: the port can be re-pointed again
+	r = doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+nodeID+"/singbox/port", cookie, map[string]any{"port": 30000})
+	if r.Status != 200 {
+		t.Fatalf("port change after reinstall: %d %s", r.Status, r.Body)
+	}
+}
