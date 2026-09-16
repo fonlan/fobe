@@ -430,6 +430,36 @@ export interface SingboxLocalInbound {
   adoptable: boolean;
 }
 
+/** One editable inbound of the probe's own config.json (the editor model,
+ *  §9.3 实现修订 2026-09-17b). `credential` is present because this IS the
+ *  operator's configuration and he has to be able to change it. */
+export interface SingboxInbound {
+  type: string;
+  tag: string;
+  port: number;
+  label: string;
+  editable: boolean;
+  credential?: string;
+  has_cred: boolean;
+  server_name?: string;
+  uuid?: string;
+  flow?: string;
+  username?: string;
+  method?: string;
+  /** Position in the file's inbound array — every edit carries it back. */
+  number: number;
+  /** Set on a write to make this listener the node's own (the panel writes its
+   *  own credential, which no API hands out). */
+  adopt?: boolean;
+}
+
+export interface SingboxConfigPayload {
+  inbounds: SingboxInbound[];
+  reported: boolean;
+  renderable: boolean;
+  edited: boolean;
+}
+
 export interface SingboxLocalDiscovery {
   present: boolean;
   running: boolean;

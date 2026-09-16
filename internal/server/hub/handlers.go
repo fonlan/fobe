@@ -455,6 +455,7 @@ func (h *Hub) recordSingboxLocal(nodeID string, s *protocol.SingboxLocal) {
 	snap := store.NodeSingboxLocal{
 		LocalHash:    s.ConfigSHA256,
 		ConfigPath:   s.ConfigPath,
+		AnytlsCerts:  s.AnytlsCerts,
 		LocalVersion: s.Version,
 		LocalRunning: s.Running,
 		LocalUnit:    s.UnitActive,
@@ -468,7 +469,7 @@ func (h *Hub) recordSingboxLocal(nodeID string, s *protocol.SingboxLocal) {
 	// time (config_path, unit state), and a probe whose config nobody touches
 	// would keep a snapshot missing them forever — the panel would show a
 	// discovery with holes and no way to refresh it short of editing the file.
-	if cur, err := h.store.GetNodeSingboxLocal(nodeID, h.crypt); err == nil && cur == snap {
+	if cur, err := h.store.GetNodeSingboxLocal(nodeID, h.crypt); err == nil && cur.Same(snap) {
 		return
 	}
 	if err := h.store.SetNodeSingboxLocal(nodeID, snap, h.crypt); err != nil {
@@ -559,7 +560,11 @@ func (h *Hub) buildDesiredState(nodeID string) protocol.DesiredState {
 			// The port rides along purely so the probe can hand it back in its
 			// absent report (see recordSingboxState).
 			desired.Singbox = &protocol.SingboxDesired{Uninstall: true, Port: sb.Port}
-		case sb.DesiredVersion != "":
+		case sb.DesiredVersion != "" || sb.ConfigHash != "":
+			// §9.3 实现修订 2026-09-17b: a config-only desired state is real
+			// (the operator edited the probe's file from the panel), so the
+			// frame must go out even when no version was ever declared — a node
+			// taken over from one-sing.sh never had one.
 			desired.Singbox = &protocol.SingboxDesired{
 				Version: sb.DesiredVersion,
 				Port:    sb.Port,

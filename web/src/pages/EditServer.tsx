@@ -17,7 +17,8 @@ import type {
   LatencyTarget,
   NodeDetailData,
   NodeInterface,
-  SingboxLocalInbound,
+  SingboxConfigPayload,
+  SingboxInbound,
   SingboxStatus,
   SingboxVersion,
 } from '../types';
@@ -619,19 +620,31 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  // §9.3 实现修订 2026-09-17: which discovered inbounds the operator ticked.
-  const [picked, setPicked] = useState<Record<string, boolean>>({});
+  // §9.3 实现修订 2026-09-17b (editor model): the probe's config.json is the
+  // truth. `cfg` is that file as the panel last saw it; `edits` are the
+  // operator's uncommitted changes keyed by inbound number.
+  const [cfg, setCfg] = useState<SingboxConfigPayload | null>(null);
+  const [cfgHash, setCfgHash] = useState('');
+  const [edits, setEdits] = useState<Record<number, Partial<SingboxInbound>>>({});
+  const [newInbound, setNewInbound] = useState<Partial<SingboxInbound> | null>(null);
+  // Which inbounds the operator ticked for "接管" — in the editor model that is
+  // simply an edit that leaves the credential blank, so the merged inbound keeps
+  // serving what it already served.
+  const [picked, setPicked] = useState<Record<number, boolean>>({});
 
   const load = useCallback(async () => {
     try {
-      const [st, vs] = await Promise.all([
+      const [st, vs, cv] = await Promise.all([
         api.getNodeSingbox(nodeId).catch(() => ({ singbox: null })),
         api.singboxVersions().catch(() => ({ versions: [] })),
+        api.singboxConfig(nodeId).catch(() => null),
       ]);
       setSb(st.singbox);
       setVersions(vs.versions ?? []);
       setVersion((cur) => cur || (vs.versions ?? [])[0]?.version || '');
       setPort((cur) => cur || (st.singbox?.port ? String(st.singbox.port) : ''));
+      setCfg(cv);
+      setCfgHash((cv as { hash?: string } | null)?.hash ?? '');
       setErr(null);
     } catch (e) {
       setErr(apiErrorMessage(e, t));
@@ -695,10 +708,8 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
     }
   };
 
-  const adoptable = (local?.inbounds ?? []).filter((i) => i.adoptable);
-  const pickedList = adoptable.filter((i) => picked[i.type + ':' + i.port]);
-  const inboundLabel = (i: SingboxLocalInbound) =>
-    (i.type === 'socks5' ? 'socks' : i.type) + ' · :' + i.port;
+  const pickedInbounds = (cfg?.inbounds ?? []).filter((i) => picked[i.number] && i.editable);
+  const pickedCount = pickedInbounds.length;
 
   return (
     <div className="stack">
@@ -720,9 +731,9 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
         <span className="hint">{t('sb_cert_until', { time: fmtTime(sb.cert_not_after) })}</span>
       ) : null}
 
-      {/* §9.3 实现修订 2026-09-17: the probe's own sing-box. Shown whenever the
-          agent reported one — with no desired state at all (the one-sing.sh
-          case) this section is the only sing-box information the panel has. */}
+      {/* §9.3 实现修订 2026-09-17b: the probe's own config.json, editable.
+          Nothing here is "adopted": the file is the source of truth, the panel
+          shows exactly what is in it, and an edit is merged back onto it. */}
       {local?.present && (
         <div className="sb-local">
           <div className="row-wrap">
@@ -737,61 +748,296 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
                     : t('sb_local_unknown'),
               })}
             </span>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy || !onlineNow}
+              onClick={() =>
+                void run(async () => {
+                  await api.singboxRefresh(nodeId);
+                }, t('sb_refresh_queued'))
+              }
+            >
+              {t('sb_refresh')}
+            </button>
           </div>
           {local.config_path && <span className="hint mono">{local.config_path}</span>}
           {local.error && <span className="hint">{t('sb_local_error')}: {local.error}</span>}
-          {local.inbounds.length === 0 ? (
-            <span className="hint">{t('sb_local_no_inbounds')}</span>
+
+          {!cfg?.reported ? (
+            <span className="hint">{t('sb_local_no_config')}</span>
           ) : (
-            <ul className="sb-local-list">
-              {local.inbounds.map((i) => (
-                <li key={i.type + ':' + i.port}>
-                  {i.adoptable ? (
-                    <label className="check-inline">
-                      <input
-                        type="checkbox"
-                        checked={!!picked[i.type + ':' + i.port]}
-                        onChange={(e) =>
-                          setPicked((cur) => ({ ...cur, [i.type + ':' + i.port]: e.target.checked }))
-                        }
-                      />
-                      <span className="mono">{inboundLabel(i)}</span>
-                      {i.tag && i.tag !== i.label ? <span className="hint"> {i.tag}</span> : null}
-                      {!i.cred_set && <span className="hint"> {t('sb_local_no_cred')}</span>}
-                    </label>
-                  ) : (
-                    <span className="hint mono">
-                      {inboundLabel(i)} · {t('sb_local_not_adoptable')}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
+            <table className="sb-inbound-table">
+              <thead>
+                <tr>
+                  <th />
+                  <th>{t('sb_col_type')}</th>
+                  <th>{t('sb_col_port')}</th>
+                  <th>{t('sb_col_tag')}</th>
+                  <th>{t('sb_col_cred')}</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {cfg.inbounds.map((ib) => {
+                  const edit = { ...ib, ...edits[ib.number] };
+                  const dirty = !!edits[ib.number];
+                  const locked = ib.port === sb?.port || ib.port === Number(port);
+                  return (
+                    <tr key={ib.number}>
+                      <td>
+                        {ib.editable ? (
+                          <input
+                            type="checkbox"
+                            title={t('sb_inbound_select')}
+                            checked={!!picked[ib.number]}
+                            onChange={(e) =>
+                              setPicked((cur) => ({ ...cur, [ib.number]: e.target.checked }))
+                            }
+                          />
+                        ) : null}
+                      </td>
+                      <td className="mono">{ib.type}</td>
+                      <td>
+                        <input
+                          className="mono sb-num"
+                          type="number"
+                          min={10000}
+                          max={60000}
+                          value={edit.port ?? ''}
+                          disabled={!ib.editable}
+                          onChange={(e) =>
+                            setEdits((cur) => ({
+                              ...cur,
+                              [ib.number]: { ...cur[ib.number], port: Number(e.target.value) },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          className="mono"
+                          value={edit.tag ?? ''}
+                          disabled={!ib.editable}
+                          onChange={(e) =>
+                            setEdits((cur) => ({
+                              ...cur,
+                              [ib.number]: { ...cur[ib.number], tag: e.target.value },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          className="mono"
+                          type="text"
+                          value={edit.credential ?? ''}
+                          disabled={!ib.editable}
+                          placeholder={t('sb_cred_keep')}
+                          onChange={(e) =>
+                            setEdits((cur) => ({
+                              ...cur,
+                              [ib.number]: { ...cur[ib.number], credential: e.target.value },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td className="row-wrap">
+                        {dirty && (
+                          <button
+                            type="button"
+                            className="btn primary"
+                            disabled={busy}
+                            title={t('sb_save_inbound')}
+                            onClick={() =>
+                              void run(async () => {
+                                await api.singboxConfigEdit(nodeId, {
+                                  reported_hash: cfgHash,
+                                  update: [
+                                    {
+                                      number: ib.number,
+                                      type: edit.type,
+                                      tag: edit.tag,
+                                      port: Number(edit.port),
+                                      credential: edit.credential || undefined,
+                                      server_name: edit.server_name,
+                                      flow: edit.flow,
+                                      username: edit.username,
+                                    },
+                                  ],
+                                });
+                                setEdits((cur) => {
+                                  const next = { ...cur };
+                                  delete next[ib.number];
+                                  return next;
+                                });
+                              }, t('sb_inbound_saved'))
+                            }
+                          >
+                            {t('save')}
+                          </button>
+                        )}
+                        {ib.editable && (
+                          <button
+                            type="button"
+                            className="btn danger"
+                            disabled={busy || locked || cfg.inbounds.length <= 1}
+                            title={locked ? t('sb_inbound_locked') : t('sb_inbound_delete')}
+                            onClick={() => {
+                              if (!window.confirm(t('sb_inbound_delete_confirm', { port: String(ib.port) })))
+                                return;
+                              void run(
+                                () =>
+                                  api.singboxConfigEdit(nodeId, {
+                                    reported_hash: cfgHash,
+                                    delete: [ib.number],
+                                  }),
+                                t('sb_inbound_deleted'),
+                              );
+                            }}
+                          >
+                            {t('delete')}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           )}
-          {adoptable.length > 0 && (
+
+          <div className="row-wrap">
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              onClick={() => setNewInbound({ type: 'anytls', port: 0, tag: '', credential: '' })}
+            >
+              {t('sb_inbound_add')}
+            </button>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy || pickedCount === 0}
+              onClick={() =>
+                void run(
+                  () =>
+                    api.singboxConfigEdit(nodeId, {
+                      reported_hash: cfgHash,
+                      // Adopting means "this listener serves what my clients
+                      // already have": `adopt` makes the server write the
+                      // credential its subscriptions hand out (the panel cannot
+                      // send that value — no API returns the global password).
+                      update: pickedInbounds.map((ib) => ({
+                        number: ib.number,
+                        type: ib.type,
+                        tag: ib.tag,
+                        port: ib.port,
+                        adopt: ib.type === 'anytls',
+                      })),
+                    }),
+                  t('sb_adopt_queued'),
+                )
+              }
+            >
+              {t('sb_adopt')}
+            </button>
+            <span className="hint">{t('sb_adopt_hint2')}</span>
+          </div>
+
+          {newInbound && (
             <div className="row-wrap">
+              <label className="field inline">
+                <span>{t('sb_col_type')}</span>
+                <select
+                  value={newInbound.type}
+                  onChange={(e) => setNewInbound({ ...newInbound, type: e.target.value })}
+                >
+                  {['anytls', 'vless', 'shadowsocks', 'socks'].map((ty) => (
+                    <option key={ty} value={ty}>
+                      {ty}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field inline">
+                <span>{t('sb_col_port')}</span>
+                <input
+                  className="mono sb-num"
+                  type="number"
+                  min={10000}
+                  max={60000}
+                  value={newInbound.port || ''}
+                  onChange={(e) => setNewInbound({ ...newInbound, port: Number(e.target.value) })}
+                />
+              </label>
+              <label className="field inline">
+                <span>{t('sb_col_cred')}</span>
+                <input
+                  className="mono"
+                  value={newInbound.credential ?? ''}
+                  placeholder={
+                    newInbound.type === 'vless'
+                      ? t('sb_cred_uuid')
+                      : newInbound.type === 'shadowsocks'
+                        ? t('sb_cred_ss')
+                        : t('sb_cred_password')
+                  }
+                  onChange={(e) => setNewInbound({ ...newInbound, credential: e.target.value })}
+                />
+              </label>
+              {newInbound.type === 'vless' && (
+                <label className="field inline">
+                  <span>SNI</span>
+                  <input
+                    className="mono"
+                    value={newInbound.server_name ?? ''}
+                    onChange={(e) => setNewInbound({ ...newInbound, server_name: e.target.value })}
+                  />
+                </label>
+              )}
+              {newInbound.type === 'shadowsocks' && (
+                <label className="field inline">
+                  <span>method</span>
+                  <input
+                    className="mono"
+                    value={newInbound.method ?? '2022-blake3-aes-128-gcm'}
+                    onChange={(e) => setNewInbound({ ...newInbound, method: e.target.value })}
+                  />
+                </label>
+              )}
+              {newInbound.type === 'socks' && (
+                <>
+                  <label className="field inline">
+                    <span>{t('sb_cred_username')}</span>
+                    <input
+                      className="mono"
+                      value={newInbound.username ?? ''}
+                      onChange={(e) => setNewInbound({ ...newInbound, username: e.target.value })}
+                    />
+                  </label>
+                </>
+              )}
               <button
                 type="button"
                 className="btn primary"
-                disabled={busy || pickedList.length === 0}
+                disabled={busy || !newInbound.port}
                 onClick={() =>
-                  void run(
-                    () =>
-                      api.singboxAdopt(
-                        nodeId,
-                        pickedList.map((i) => ({ type: i.type, port: i.port })),
-                      ),
-                    t('sb_adopt_queued'),
-                  )
+                  void run(async () => {
+                    await api.singboxConfigEdit(nodeId, {
+                      reported_hash: cfgHash,
+                      add: [{ ...newInbound, new: true }],
+                    });
+                    setNewInbound(null);
+                  }, t('sb_inbound_created'))
                 }
               >
-                {t('sb_adopt')}
+                {t('sb_inbound_add_create')}
               </button>
-              <span className="hint">
-                {local.adopted > 0
-                  ? t('sb_adopt_done', { n: local.adopted })
-                  : t('sb_adopt_hint')}
-              </span>
+              <button type="button" className="btn" onClick={() => setNewInbound(null)}>
+                {t('cancel')}
+              </button>
             </div>
           )}
         </div>

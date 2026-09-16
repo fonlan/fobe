@@ -69,7 +69,7 @@ func TestLocalSnapshotEncryptedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got != in {
+	if !got.Same(in) {
 		t.Fatalf("round trip changed the snapshot:\n got %+v\nwant %+v", got, in)
 	}
 

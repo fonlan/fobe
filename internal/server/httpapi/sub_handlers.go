@@ -814,10 +814,6 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 		s.Log.Error("subscription: anytls password", "err", err)
 		return nil
 	}
-	// The global credential is still *resolved* here on purpose: a subscription
-	// report is a "use it" moment (§10.1 实现修订 2026-09-16), so a node that
-	// never adopted an anytls password must still find one. Which value each
-	// node renders is decided per entry below (per-node override > global).
 	format := s.relayNameFormat()
 	nodes := make([]singbox.ProxyNode, 0, len(entries))
 	for _, e := range entries {
@@ -832,61 +828,83 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 		if err != nil {
 			continue
 		}
-		// §19.9: a node-level anytls password override wins over the global one.
-		// Adoption deliberately does not write one (the panel's inbound keeps the
-		// global credential); a hand-set override from another flow still wins.
-		nodePassword := password
-		if override, err := s.Store.GetNodeSingboxPasswordOverride(e.NodeID); err == nil && override != "" {
-			nodePassword = override
+		name := entryBaseName(target)
+
+		// §9.3 实现修订 2026-09-17b (editor model): the probe's config.json is
+		// the source of truth, so the payload is rendered from the file the
+		// probe last reported. A `jq`-appended inbound therefore shows up here
+		// without any adoption step, and the panel's own inbound keeps its
+		// reported certificate for pinning.
+		live, _ := s.liveNodesFor(e.NodeID, name, target.PrimaryIP)
+		if len(live) == 0 {
+			// No report yet (an install in flight, an agent that predates the
+			// field, or a row written before the editor model): fall back to
+			// the managed pair so a fresh node still appears as soon as it has
+			// a port and a certificate.
+			if !subRenderable(target, sb) {
+				continue
+			}
+			live = []singbox.ProxyNode{{
+				ID: e.NodeID, Name: name, Server: target.PrimaryIP, Port: sb.Port,
+				Password: s.nodeAnytlsPassword(e.NodeID, password), CertPEM: sb.CertPEM,
+			}}
 		}
-		// Adopted inbounds are dialled directly, so they belong to the direct
-		// branch only: a relay entry's src port lands on the node's anytls
-		// inbound (§10.2), never on an adopted one.
-		var adopted []singbox.ProxyNode
-		if e.RelayNodeID == "" && sb.ExtrasPresent {
-			extras := s.loadExtraInbounds(e.NodeID)
-			adopted = singbox.ProxyNodesFor(extras, e.NodeID, entryBaseName(target), target.PrimaryIP, sb.CertPEM)
-			for i := range adopted {
-				if e.Alias != "" {
-					// Several inbounds come from one entry: only the first
-					// takes the alias verbatim, the rest keep their suffix so
-					// the names stay unique.
-					adopted[i].Name = e.Alias
-					if i > 0 {
-						adopted[i].Name = e.Alias + " · " + adopted[i].NameSuffix
+
+		if e.RelayNodeID == "" {
+			if e.Alias != "" {
+				// One entry can carry several inbounds: the first takes the
+				// alias verbatim, the rest keep their suffix so names stay
+				// unique inside a client's proxy group.
+				for i := range live {
+					if i == 0 {
+						live[i].Name = e.Alias
+					} else {
+						live[i].Name = e.Alias + " · " + live[i].NameSuffix
 					}
 				}
 			}
+			nodes = append(nodes, live...)
+			continue
 		}
-		var server, name string
-		var port int
-		if e.RelayNodeID == "" {
-			// A node with adopted inbounds but no anytls inbound of its own has
-			// no direct entry to render — the adopted list below is the whole
-			// payload, so this is not an error.
-			if sb.Port <= 0 || sb.CertPEM == "" {
-				nodes = append(nodes, adopted...)
-				continue
-			}
-			server, port, name = target.PrimaryIP, sb.Port, entryBaseName(target)
-		} else {
-			relay, err := s.Store.GetNode(e.RelayNodeID)
-			if err != nil || relay.PrimaryIP == "" || sb.Port <= 0 || sb.CertPEM == "" {
-				continue // the relay leg is gone (rule deleted / node removed)
-			}
-			server, port = relay.PrimaryIP, e.SrcPort
-			name = relayAutoName(format, target, relay, e)
+
+		// A relayed entry dials the relay's primary IP and the src port of its
+		// DNAT rule, while the pinned certificate still belongs to the target
+		// (DNAT is layer 4; TLS terminates on B). It lands on the node's anytls
+		// inbound, so only that one inbound is relayed — an adopted or
+		// hand-written inbound is reachable directly, never through the rule.
+		relay, err := s.Store.GetNode(e.RelayNodeID)
+		if err != nil || relay.PrimaryIP == "" {
+			continue // the relay leg is gone (rule deleted / node removed)
 		}
+		var relayed *singbox.ProxyNode
+		for i := range live {
+			if (live[i].Protocol == "" || live[i].Protocol == singbox.ProtoAnytls) && live[i].CertPEM != "" {
+				relayed = &live[i]
+				break
+			}
+		}
+		if relayed == nil {
+			continue // no anytls inbound on the target: nothing to reach through A
+		}
+		name = relayAutoName(format, target, relay, e)
 		if e.Alias != "" {
 			name = e.Alias
 		}
 		nodes = append(nodes, singbox.ProxyNode{
-			ID: e.NodeID, Name: name, Server: server, Port: port,
-			Password: nodePassword, CertPEM: sb.CertPEM,
+			ID: e.NodeID, Name: name, Server: relay.PrimaryIP, Port: e.SrcPort,
+			Password: relayed.Password, CertPEM: relayed.CertPEM,
 		})
-		nodes = append(nodes, adopted...)
 	}
 	return nodes
+}
+
+// nodeAnytlsPassword is the credential the panel's own inbound serves: the
+// per-node override when one exists (§19.9), else the global shared password.
+func (s *Server) nodeAnytlsPassword(nodeID, global string) string {
+	if override, err := s.Store.GetNodeSingboxPasswordOverride(nodeID); err == nil && override != "" {
+		return override
+	}
+	return global
 }
 
 // renderSubscription produces the final config body for the chosen format:

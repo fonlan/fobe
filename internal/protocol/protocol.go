@@ -209,7 +209,18 @@ type SingboxLocal struct {
 	// ConfigSHA256 is over the exact bytes above, so the server can tell an
 	// unchanged report from a real edit without diffing the whole document.
 	ConfigSHA256 string `json:"config_sha256,omitempty"`
-	Error        string `json:"error,omitempty"`
+	// AnytlsCerts carries the PEM of each anytls inbound's certificate file,
+	// keyed by the inbound's port. Config.json names a *path*; a subscription
+	// client needs the *bytes* to pin the server, and only the probe can read
+	// that path (§9.3 实现修订 2026-09-17b — before this, a hand-managed anytls
+	// inbound was skipped from every subscription because fobe had no
+	// certificate to pin).
+	//
+	// Certificates are public data — the private key never leaves the probe
+	// (§9.3), and this map is the same PEM the node reports for the inbound the
+	// panel installed.
+	AnytlsCerts map[int]string `json:"anytls_certs,omitempty"`
+	Error       string         `json:"error,omitempty"`
 }
 
 // SingboxState is what the agent actually observes locally. Optional fields
@@ -361,6 +372,13 @@ type Cmd struct {
 // declare "the complete set". Each edit is one targeted transaction, and the
 // agent reports the resulting ruleset in `state` right after it.
 const CmdKindNftForwards = "nft_forwards"
+
+// CmdKindSingboxScan asks the agent to re-read its local sing-box right now and
+// push a state frame, instead of waiting for its next scan tick (design §9.3
+// 实现修订 2026-09-17b). The panel uses it right after an operator edits
+// config.json by hand — the editor model's subscription is rendered from the
+// last reported file, so "look again" has to be a round trip, not a minute.
+const CmdKindSingboxScan = "scan_singbox"
 
 // Forwards actions carried by ForwardsRequest.Action.
 const (

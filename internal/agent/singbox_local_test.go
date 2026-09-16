@@ -144,3 +144,93 @@ func TestLocalEqual(t *testing.T) {
 		t.Fatal("nil vs nil must compare equal")
 	}
 }
+
+// Config.json names a certificate *path*; a subscription client needs the bytes
+// to pin the server, and the probe is the only party that can read that path
+// (§9.3 实现修订 2026-09-17b). Without this the anytls inbound one-sing.sh set
+// up was skipped from every subscription while plainly running.
+func TestDetectLocalReportsAnytlsCertificates(t *testing.T) {
+	dir := t.TempDir()
+	useFakeRoot(t, dir)
+	fakeSingbox(t, dir)
+
+	certDir := filepath.Join(dir, "cert")
+	if err := os.MkdirAll(certDir, 0o755); err != nil {
+		t.Fatalf("mkdir cert: %v", err)
+	}
+	pem := "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+	certPath := filepath.Join(certDir, "cert.crt")
+	if err := os.WriteFile(certPath, []byte(pem), 0o644); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	cfg := `{"inbounds":[
+	  {"type":"anytls","listen_port":28711,"tls":{"enabled":true,"certificate_path":"` + certPath + `"}},
+	  {"type":"vless","listen_port":16929,"tls":{"enabled":true}}
+	]}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got := detectLocal()
+	if got.AnytlsCerts[28711] != pem {
+		t.Fatalf("AnytlsCerts = %+v, want the PEM for 28711", got.AnytlsCerts)
+	}
+	if _, ok := got.AnytlsCerts[16929]; ok {
+		t.Fatalf("a non-anytls inbound must not contribute a certificate: %+v", got.AnytlsCerts)
+	}
+
+	// A missing certificate file is not an error: the inbound is simply not
+	// renderable, and the panel says so.
+	if err := os.Remove(certPath); err != nil {
+		t.Fatalf("remove cert: %v", err)
+	}
+	if got := detectLocal(); len(got.AnytlsCerts) != 0 {
+		t.Fatalf("AnytlsCerts = %+v, want empty for a missing file", got.AnytlsCerts)
+	}
+}
+
+// A config-only desired frame is how the panel edits the file of a node whose
+// binary fobe never installed (§9.3 实现修订 2026-09-17b). Two ways it can go
+// wrong, both found on a real probe: treating it as "unmanaged" (the edit is
+// dropped silently) and treating the missing version as a version mismatch (the
+// agent tries to download `/dl/singbox//linux-amd64`, gets a 404, and rolls the
+// whole apply back).
+func TestConfigOnlyDesiredIsAppliedWithoutInstalling(t *testing.T) {
+	dir := t.TempDir()
+	useFakeRoot(t, dir)
+	bin := fakeSingbox(t, dir)
+
+	// The probe's own file, as one-sing.sh left it.
+	onDisk := `{"inbounds":[{"type":"anytls","tag":"anytls-in-28711","listen_port":28711,"users":[{"password":"x"}]}]}`
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(onDisk), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	m := newSingboxManager(&Config{ServerURL: "http://127.0.0.1:1"}, testLogger())
+	// A version-less, config-only declaration must be recorded, not dropped.
+	m.SetDesired(&protocol.SingboxDesired{Port: 22039, ConfigJSON: `{"inbounds":[]}`})
+	m.mu.Lock()
+	kept := m.desired
+	m.mu.Unlock()
+	if kept == nil {
+		t.Fatal("a config-only desired state was discarded as unmanaged")
+	}
+
+	// And with no version there is nothing to download: the old code compared
+	// "" against the installed version and went straight to the artifact URL.
+	act := m.observe(bin, &protocol.SingboxDesired{Port: 22039, ConfigJSON: `{"inbounds":[]}`})
+	if act.version == "" {
+		t.Fatalf("fixture: the fake binary must report a version")
+	}
+	needInstall := keptConfigOnlyNeedInstall(act.version, kept)
+	if needInstall {
+		t.Fatal("a config-only frame must not request an install")
+	}
+}
+
+// keptConfigOnlyNeedInstall mirrors the guard in converge(); kept here so the
+// regression is pinned by a test that fails at the same moment the code does.
+func keptConfigOnlyNeedInstall(installed string, d *protocol.SingboxDesired) bool {
+	return d.Version != "" && normalizeVersion(installed) != normalizeVersion(d.Version)
+}

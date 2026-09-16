@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -153,8 +154,14 @@ func (m *singboxManager) SetDesired(d *protocol.SingboxDesired) {
 		return
 	}
 	m.desiredUninstall = false
-	if d != nil && normalizeVersion(d.Version) == "" {
-		d = nil // empty version = not managed (§9 版本显式)
+	// "No version" means unmanaged (§9 版本显式) — but only when there is no
+	// config either. A config-only declaration is how the panel edits the file
+	// of a node it never installed (an operator's one-sing.sh setup): the
+	// version is empty because fobe does not own the binary, while the config is
+	// the whole point of the frame. Treating that as "unmanaged" is what made
+	// every edit to such a node vanish without a trace.
+	if d != nil && normalizeVersion(d.Version) == "" && d.ConfigJSON == "" {
+		d = nil
 	}
 	// A different target invalidates the stored error: it described the
 	// previous attempt, and repeating it would put the wrong cause on screen.
@@ -237,6 +244,11 @@ func (m *singboxManager) scanLocal() {
 	}
 }
 
+// ScanLocal re-reads the local sing-box immediately and publishes the report
+// when it changed. It is `scanLocal` for other packages (the panel's
+// "refresh from probe" command, §9.3 实现修订 2026-09-17b).
+func (m *singboxManager) ScanLocal() { m.scanLocal() }
+
 // Local returns the last discovery report, or nil before the first scan.
 func (m *singboxManager) Local() *protocol.SingboxLocal {
 	m.mu.Lock()
@@ -259,7 +271,70 @@ func localEqual(a, b *protocol.SingboxLocal) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return *a == *b
+	// Not a struct comparison: the payload carries a map (the anytls
+	// certificates), which Go refuses to compare with ==.
+	if a.Present != b.Present || a.Version != b.Version || a.Running != b.Running ||
+		a.UnitActive != b.UnitActive || a.UnitKnown != b.UnitKnown ||
+		a.ConfigPath != b.ConfigPath || a.ConfigJSON != b.ConfigJSON ||
+		a.ConfigSHA256 != b.ConfigSHA256 || a.Error != b.Error ||
+		len(a.AnytlsCerts) != len(b.AnytlsCerts) {
+		return false
+	}
+	for port, pem := range a.AnytlsCerts {
+		if b.AnytlsCerts[port] != pem {
+			return false
+		}
+	}
+	return true
+}
+
+// maxCertBytes caps one certificate read. A self-signed cert is ~1 KB; anything
+// past this is not a certificate, and shipping it in every state frame would be
+// pure wire cost.
+const maxCertBytes = 64 << 10
+
+// readAnytlsCerts reads the certificate file each anytls inbound points at,
+// keyed by the inbound's port.
+//
+// The file names a path; a subscription client needs the bytes to pin the
+// server, and the probe is the only party that can read that path. Best-effort
+// per inbound: a missing or oversized file is simply omitted, and the renderer
+// then skips that inbound (rendering it insecure=true is the one thing this
+// project does not do, §9.3).
+func readAnytlsCerts(configJSON []byte) map[int]string {
+	var doc struct {
+		Inbounds []struct {
+			Type       string `json:"type"`
+			ListenPort int    `json:"listen_port"`
+			TLS        *struct {
+				CertificatePath string `json:"certificate_path"`
+			} `json:"tls"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(configJSON, &doc); err != nil {
+		return nil
+	}
+	out := map[int]string{}
+	for _, in := range doc.Inbounds {
+		if in.Type != "anytls" || in.ListenPort <= 0 || in.TLS == nil || in.TLS.CertificatePath == "" {
+			continue
+		}
+		if len(out) >= 8 {
+			break // a config with more anytls inbounds than this is not one we can serve anyway
+		}
+		raw, err := os.ReadFile(in.TLS.CertificatePath)
+		if err != nil || len(raw) == 0 || len(raw) > maxCertBytes {
+			continue
+		}
+		if !bytes.Contains(raw, []byte("BEGIN CERTIFICATE")) {
+			continue
+		}
+		out[in.ListenPort] = string(raw)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // maxLocalConfigBytes caps the config file the agent will read into a report.
@@ -326,6 +401,7 @@ func detectLocal() *protocol.SingboxLocal {
 		}
 		out.ConfigJSON = string(raw)
 		out.ConfigSHA256 = sha256Hex(raw)
+		out.AnytlsCerts = readAnytlsCerts(raw)
 	case os.IsNotExist(err):
 		problems = append(problems, "config file does not exist")
 	default:
@@ -419,7 +495,17 @@ func (m *singboxManager) converge() {
 		return
 	}
 
-	needInstall := normalizeVersion(act.version) != normalizeVersion(d.Version)
+	// "No desired version" is not "install version nothing": a config-only
+	// declaration (the panel editing a node whose binary fobe never installed)
+	// must not touch the artifact at all. Without this guard the agent tried to
+	// download `/dl/singbox//linux-amd64` — a 404 — and rolled the whole apply
+	// back, which is how every panel edit to a one-sing.sh node ended as
+	// "download : get sha256: 404 Not Found" in the log and nothing on disk.
+	needInstall := d.Version != "" && normalizeVersion(act.version) != normalizeVersion(d.Version)
+	// configHashMatch is a comparison of the file on disk against the desired
+	// bytes (see observe), not a cached "what I wrote last" — which is what
+	// makes an operator's hand edit visible here instead of being overwritten
+	// only when fobe happens to change something.
 	needConfig := d.ConfigJSON != "" && !act.configHashMatch
 	if !needInstall && !needConfig {
 		if act.running {

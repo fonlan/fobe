@@ -28,6 +28,9 @@ import (
 // single writer makes each statement atomic, not the pair — two concurrent
 // installs would otherwise bake two different passwords into two node configs,
 // and only one of them would be the one subscriptions hand out.
+//
+// peekAnytlsPassword is the read-only counterpart: the node list and the access
+// log ask "is there a credential" without creating one.
 func (s *Server) ensureAnytlsPassword() (string, error) {
 	s.anytlsMu.Lock()
 	defer s.anytlsMu.Unlock()
@@ -67,4 +70,20 @@ func (s *Server) ensureAnytlsPassword() (string, error) {
 	})
 	s.Log.Info("generated the global anytls password", "length", len(password))
 	return password, nil
+}
+
+// peekAnytlsPassword returns the stored global password, or "" when there is
+// none yet, WITHOUT generating one. Read-only paths (node list, access log)
+// must not mint a credential; only a real "use it" moment may (§10.1 实现修订
+// 2026-09-16).
+func (s *Server) peekAnytlsPassword() string {
+	raw, err := s.Store.GetSetting("anytls_password")
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	plain, err := s.Crypt.Decrypt(raw)
+	if err != nil {
+		return ""
+	}
+	return plain
 }

@@ -422,6 +422,15 @@ func (s *Server) SyncSingboxConfigs() int {
 	}
 	updated := 0
 	for _, t := range targets {
+		// §9.3 实现修订 2026-09-17b: a node whose config the panel has edited
+		// (or which was taken over from one-sing.sh) owns its own file. Rebuilding
+		// it from the current template would erase every inbound the operator
+		// added — the exact behaviour the editor model removes. The template fix
+		// this pass exists for still reaches every node the panel installed from
+		// scratch and never edited.
+		if s.configEdited(t.NodeID) {
+			continue
+		}
 		sb, err := s.Store.GetNodeSingbox(t.NodeID)
 		if err != nil {
 			continue
@@ -479,14 +488,22 @@ func shortHash(h string) string {
 // "offline" and "the agent vanished between the online check and the send").
 func (s *Server) pushDesired(nodeID string) bool {
 	sb, err := s.Store.GetNodeSingbox(nodeID)
-	if err != nil || sb.DesiredVersion == "" {
+	if err != nil {
+		return false
+	}
+	cfg, cfgErr := s.Store.GetSetting("singbox_config:" + nodeID)
+	// §9.3 实现修订 2026-09-17b: a config edit is a desired state of its own.
+	// A node adopted from one-sing.sh has no version the panel ever declared
+	// (fobe did not install its binary), yet the edit still has to reach the
+	// probe — requiring a desired version here is what silently dropped it.
+	if sb.DesiredVersion == "" && (cfgErr != nil || cfg == "") {
 		return false
 	}
 	desired := protocol.DesiredState{Singbox: &protocol.SingboxDesired{
 		Version: sb.DesiredVersion,
 		Port:    sb.Port,
 	}}
-	if cfg, err := s.Store.GetSetting("singbox_config:" + nodeID); err == nil {
+	if cfgErr == nil {
 		desired.Singbox.ConfigJSON = cfg
 	}
 	return s.Hub.Send(nodeID, protocol.NewEnvelope(protocol.TypeDesired, "", desired))

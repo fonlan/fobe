@@ -158,7 +158,7 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 	// §10: the same predicate the subscription renderer applies, so the picker
 	// offers exactly the nodes that can appear in the output.
 	if sb, err := s.Store.GetNodeSingbox(n.ID); err == nil {
-		v.SingboxReady = subRenderable(n, sb)
+		v.SingboxReady = s.nodeRenderable(n, sb)
 	}
 
 	// Today's bucket is computed outside the network-config branch: §8.2

@@ -301,6 +301,7 @@ func (s *Server) handleSingboxAdopt(w http.ResponseWriter, r *http.Request) {
 		Actor: "panel", NodeID: id, Action: "singbox_adopt",
 		Command: strings.Join(ports, ","), SourceIP: s.Trust.RealIP(r),
 	})
+	s.markConfigEdited(id)
 	s.pushDesired(id)
 	s.publishEvent("node_updated", id)
 	writeJSON(w, http.StatusOK, map[string]any{

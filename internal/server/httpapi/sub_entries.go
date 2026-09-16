@@ -291,10 +291,10 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 	for i := range nodes {
 		target := &nodes[i]
 		sb, _ := s.Store.GetNodeSingbox(target.ID)
-		if _, bound := boundByKey[entryKey(store.SubscriptionEntry{NodeID: target.ID})]; bound || subRenderable(target, sb) {
+		if _, bound := boundByKey[entryKey(store.SubscriptionEntry{NodeID: target.ID})]; bound || s.nodeRenderable(target, sb) {
 			views = append(views, view(target, nil, store.SubscriptionEntry{NodeID: target.ID}, sb, false))
 		}
-		if !subRenderable(target, sb) {
+		if !s.nodeRenderable(target, sb) {
 			// The landing node of a relay entry is the node the client's TLS
 			// session ends on, so it has to be a working anytls node. The relay
 			// itself does not: it only has to route packets (and have an

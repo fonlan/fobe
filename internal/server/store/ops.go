@@ -519,15 +519,20 @@ func (s *Store) SetNodeSingboxPasswordOverride(nodeID, password string) error {
 // may contain credentials, so both halves of this table are Cryptor
 // ciphertext at rest (see SetNodeSingboxLocal).
 type NodeSingboxLocal struct {
-	LocalHash    string `json:"local_hash"`
-	ConfigPath   string `json:"config_path"`
-	LocalVersion string `json:"local_version"`
-	LocalRunning bool   `json:"local_running"`
-	LocalUnit    bool   `json:"local_unit_active"`
-	LocalUnitOK  bool   `json:"local_unit_known"`
-	LocalPresent bool   `json:"local_present"`
-	ConfigJSON   string `json:"config_json"`
-	Error        string `json:"error"`
+	LocalHash  string `json:"local_hash"`
+	ConfigPath string `json:"config_path"`
+	// AnytlsCerts maps an anytls inbound's port to its certificate PEM, as the
+	// probe reported it. Config.json only names a path; a subscription client
+	// needs the bytes to pin the server, so the probe ships them (§9.3 实现修订
+	// 2026-09-17b).
+	AnytlsCerts  map[int]string `json:"anytls_certs,omitempty"`
+	LocalVersion string         `json:"local_version"`
+	LocalRunning bool           `json:"local_running"`
+	LocalUnit    bool           `json:"local_unit_active"`
+	LocalUnitOK  bool           `json:"local_unit_known"`
+	LocalPresent bool           `json:"local_present"`
+	ConfigJSON   string         `json:"config_json"`
+	Error        string         `json:"error"`
 }
 
 // GetNodeSingboxLocal reads the discovery snapshot (metadata + config bytes),
@@ -944,4 +949,70 @@ func PruneBackups(dir string, keep int) error {
 		}
 	}
 	return nil
+}
+
+// SoleAnytlsPortInDoc returns the single anytls port a config document declares,
+// or 0 when there is none or several. It is exported so the HTTP layer answers
+// "which listener is this document's anytls" the same way the store does.
+func SoleAnytlsPortInDoc(doc string) int { return soleAnytlsPortInDoc(doc) }
+
+// SolePanelPort returns the one anytls port when a panel-edited config has
+// exactly one, 0 otherwise.
+//
+// It exists so the panel's "接管" write does not depend on reading the config
+// back (the report arrives at the agent's cadence, so the document it just
+// pushed is ahead of what anyone can read): the operator ticked a listener,
+// and if that listener is the file's only anytls inbound it is now the node's
+// own (§9.3 实现修订 2026-09-17b).
+func (s *Store) SolePanelPort(nodeID string) int {
+	local, err := s.GetNodeSingboxLocal(nodeID, nil)
+	if err != nil || local.ConfigJSON == "" {
+		return 0
+	}
+	return soleAnytlsPortInDoc(local.ConfigJSON)
+}
+
+// Same answers "is this snapshot identical to that one" without using ==, which
+// a map field makes illegal.
+func (l NodeSingboxLocal) Same(other NodeSingboxLocal) bool {
+	if l.LocalHash != other.LocalHash || l.ConfigPath != other.ConfigPath ||
+		l.LocalVersion != other.LocalVersion || l.LocalRunning != other.LocalRunning ||
+		l.LocalUnit != other.LocalUnit || l.LocalUnitOK != other.LocalUnitOK ||
+		l.LocalPresent != other.LocalPresent || l.ConfigJSON != other.ConfigJSON ||
+		l.Error != other.Error || len(l.AnytlsCerts) != len(other.AnytlsCerts) {
+		return false
+	}
+	for port, pem := range l.AnytlsCerts {
+		if other.AnytlsCerts[port] != pem {
+			return false
+		}
+	}
+	return true
+}
+
+// soleAnytlsPortInDoc mirrors the httpapi helper; it lives here so the store can
+// answer without importing the HTTP layer (which imports it).
+func soleAnytlsPortInDoc(doc string) int {
+	var parsed struct {
+		Inbounds []map[string]any `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(doc), &parsed); err != nil {
+		return 0
+	}
+	port := 0
+	for _, in := range parsed.Inbounds {
+		if t, _ := in["type"].(string); t != "anytls" {
+			continue
+		}
+		switch n := in["listen_port"].(type) {
+		case float64:
+			if p := int(n); p > 0 {
+				if port != 0 {
+					return 0
+				}
+				port = p
+			}
+		}
+	}
+	return port
 }

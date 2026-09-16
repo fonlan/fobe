@@ -214,6 +214,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/nodes/{id}/singbox/adopt", s.requireSession(s.handleSingboxAdopt))
 	mux.HandleFunc("POST /api/nodes/{id}/singbox/{action}", s.requireSession(s.handleSingboxAction))
 	mux.HandleFunc("PUT /api/nodes/{id}/singbox/port", s.requireSession(s.handleSingboxPort))
+	// §9.3 实现修订 2026-09-17b (editor model): the probe's config.json is the
+	// source of truth, so the panel reads it and edits it in place rather than
+	// declaring a desired config of its own. Literal paths, so they keep winning
+	// over the {action} wildcard above.
+	mux.HandleFunc("GET /api/nodes/{id}/singbox/config", s.requireSession(s.handleGetNodeSingboxConfig))
+	mux.HandleFunc("PUT /api/nodes/{id}/singbox/config", s.requireSession(s.handlePutNodeSingboxConfig))
+	mux.HandleFunc("POST /api/nodes/{id}/singbox/refresh", s.requireSession(s.handleNodeSingboxRefresh))
 	// §14 manual primary IP + §16 detail-page 5s probe stream
 	mux.HandleFunc("PUT /api/nodes/{id}/primary-ip", s.requireSession(s.handleSetPrimaryIP))
 	mux.HandleFunc("POST /api/nodes/{id}/probe", s.requireSession(s.handleNodeProbe))

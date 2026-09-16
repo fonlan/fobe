@@ -150,6 +150,12 @@ func ParseLocalInbounds(configJSON string) ([]LocalInbound, error) {
 	return out, nil
 }
 
+// AdoptableProtocol is the allow-list of protocols the panel can model and
+// edit. Anything else stays visible in the inventory but is not editable: a
+// read-only display of a `mixed` inbound is honest, an editor that silently
+// drops its fields is not.
+func AdoptableProtocol(typ string) bool { return adoptableProtocol(typ) }
+
 // adoptableProtocol is the allow-list: the four protocols one-sing.sh writes
 // plus their aliases. Anything else (a `tun`, a `mixed`, a future type) stays
 // in the "found but not imported" list.

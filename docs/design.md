@@ -435,6 +435,16 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 > - **生成配置必须过 sing-box 的严格解码**：`BuildNodeConfigWithInbounds` **重建**入站对象而不是整体 marshal，只放行 `allowedInboundKeys`/`allowedTLSKeys`/`allowedRealityKeys` 白名单内的键。这不是洁癖：闸门①是 live 探针上唯一的防线，而真机验证时踩了两个**服务级**的坑——`ExtraInbound.Password` 被赋成用户级密码，生成的 vless 入站多了个顶层 `password`（`inbounds[1].password: unknown field`）；以及 `reality.public_key` 是**客户端**字段，进服务端配置同样被拒。两次都是 agent 停服→写盘→`check` 失败→回滚（回滚后服务与脚本入站完好，已核对），但代价是操作员的服务被重启一次。**结论**：新增任何进配置的字段，先想清楚它是不是 sing-box 认的键，并跑 `TestGeneratedInboundCarriesNoUnknownKeys`。
 > - **代价**：① 白名单意味着 fobe 还不建模的入站选项（例如某个新协议的字段）会被**静默丢弃**——明知而选，因为配置被 sing-box 拒绝等于服务中断；② 快照是操作员文件的加密副本，换主密钥/恢复旧库后解不开会**报错**而不是当成"没报过"（同 §10.1 的取向）；③ 接管后的 `config.json` 仍由 fobe 独占，脚本再 `jq` 追加的入站会在下一次收敛被移除。
 
+> **实现修订 2026-09-17b（编辑器模型：文件是真相，fobe 退成编辑者）**：上一条修订把「识别 → 接管」做成了"接管一次、之后由 fobe 整份重写"，实战反馈是**这个代价不该由操作员承担**——他继续用 `one-sing.sh` 的 `jq` 加一个入站，下一次收敛就把它抹了；而"接管"这个词本身也在暗示一件他没打算做的事（交出配置所有权）。本修订**推翻"期望状态是配置真相"在 sing-box 上的适用性**：
+> - **`/etc/one-sing/config.json` 是唯一真相**。agent 每轮（60s + 启动 + 面板"从探针刷新"命令）只读扫描，文件变了就把**原文**上报；服务端解析、加密存档，**不再按模板重写**。面板显示的就是探针盘上那一份。
+> - **编辑 = 读-合并-写**：`PUT /api/nodes/{id}/singbox/config` 携带 `reported_hash`（渲染时的文件指纹）+ `add/update/delete`。哈希对不上直接 `409 config_changed` —— 撞上"最后写赢"比"基于陈旧副本静默合并"好。合并**只碰被编辑的字段**：`sniff`、`multiplex`、`padding_scheme` 这类 fobe 不建模的选项原样保留，缺省的凭据**继承文件里的值**（面板回显脱敏字段时绝不清空密码）。合并后的整份文档写进 `settings.singbox_config:<id>` 并作为期望态下发；agent 看到字节不同就 `check` → 写盘 → `systemctl restart one-sing.service`（还是那三道闸门）。
+> - **手工加的东西立刻可见**：订阅从"最近上报的文件"渲染——`jq` 加一个 VLESS，下一轮上报后订阅里就有它，不需要任何"接管"。`POST /api/nodes/{id}/singbox/refresh` 让操作员改完文件不用等一轮。`node_singbox.port` 只表示"哪个监听是面板自己的"（订阅条目名不带后缀、证书按上报值 pin、渲染时用全局密码），首次编辑时按文件里最后一个 anytls 入站确定，之后不再变。
+> - **接管退化成一次普通编辑**：勾选 = 一个 credential 留空的 update（服务端写入面板自己那份全局任何 anytls 密码，前端拿不到它），端口与其余字段照旧。没有"接管后别的东西会被删"这种语义。
+> - **证书要文件里的字节**：config.json 只写 `certificate_path`，而客户端 pin 的是 PEM。agent 顺带上报每个 anytls 入站的证书内容（按端口索引，≤64 KiB、必须含 `BEGIN CERTIFICATE`），否则那些监听**永远进不了订阅**（本项目不做 `insecure=true`，§9.3）。
+> - **agent 侧三处配套（都是真机上抓出来的）**：① 无版本的期望帧**不是**"未管理"——`SetDesired` 只有在 `Version=="" && ConfigJSON==""` 时才算 unmanaged，否则面板对脚本节点的编辑会被静默丢弃；② 无版本时**绝不去装内核**（`needInstall` 要求 `d.Version != ""`），否则 agent 会去下 `/dl/singbox//linux-amd64` 拿到 404、回滚整次 apply，日志里只有 `download : get sha256: 404 Not Found`；③ `hub.buildDesiredState` / `pushDesired` 在**只有 config、没有 desired_version** 时也要发帧（`ConfigHash != ""` 即算有期望态）。
+> - **`SyncSingboxConfigs()` 跳过被面板编辑过的节点**（`settings.singbox_edited:<id>` 标记）：模板变化只修复"从头由面板装、且从未被编辑"的节点。改了模板就想把操作员的文件再覆盖一遍，正是这次要消灭的行为。
+> - **代价（写清楚）**：① 订阅最长滞后一个上报周期（agent 变即推，通常数秒；可手动刷新）；② 两个写者抢同一文件时最后写赢，面板不保证等于盘上——它显示的是"最近上报"，且拒绝基于陈旧指纹的写入；③ 面板读得到凭据（它是操作员的配置，必须能改），仍经 Cryptor 加密落库、审计只记动作与端口。
+
 > **实现修订 2026-09-16（非特权目录重定位）**：`--unprivileged` 不可写 `/etc`，故布局为 `dirname(-config)/one-sing/`（安装路径即 `/opt/fobe-agent/one-sing/`，`FOBE_SINGBOX_HOME` 优先）。服务端仍生成 root 布局的绝对证书路径，agent 在写盘与 config hash 比对时同步替换前缀；否则每次 60 秒收敛都会误判配置变化并重启。非特权模式不迁移 root 的旧布局，也不接管 `one-sing.service`。
 
 - **私钥永不离开探针**：首次启用时由 agent 用 Go 标准库 `crypto/x509` 现场生成自签证书（不依赖 openssl——OpenWrt 常常没有），存 `/etc/one-sing/cert/{cert.crt,private.key}`（0600）。密钥算法保持 ECDSA P-256（而非 one-sing.sh 的 RSA-4096）：探针是小机器、密钥在设备上现场生成，而客户端是按 SHA256 指纹 pinning 的，算法对客户端不可见。

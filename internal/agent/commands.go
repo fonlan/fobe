@@ -86,6 +86,13 @@ func (s *agentSession) runCommand(id, kind string, payload json.RawMessage) prot
 				res.Error = err.Error()
 			}
 			s.sbx.Nudge()
+		case protocol.CmdKindSingboxScan:
+			// §9.3 实现修订 2026-09-17b: the operator edited config.json by hand
+			// and is looking at the page. Re-read now and push a state frame —
+			// the subscription is rendered from the file we last reported, so
+			// this is the difference between "seconds" and "up to a minute".
+			s.sbx.ScanLocal()
+			s.sendState()
 		case "tail_logs":
 			// §12.1: AI-triggered log read. Best-effort by design —
 			// missing log sources answer empty with exit 0.

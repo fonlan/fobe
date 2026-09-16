@@ -46,7 +46,14 @@ func ProxyNodesFor(extras []ExtraInbound, nodeID, name, server, certPEM string) 
 			n.Password = e.Password
 		case ProtoAnytls:
 			n.Password = firstUserPassword(e, e.Password)
-			n.CertPEM = certPEM
+			// Only overwrite when the caller has a certificate for this
+			// inbound. A report-side caller passes "" for everything except the
+			// panel's own port, and clobbering the others with "" is what made
+			// a hand-added anytls inbound vanish from the subscription while it
+			// was plainly in the file.
+			if certPEM != "" {
+				n.CertPEM = certPEM
+			}
 			if e.TLS != nil && e.TLS.ServerName != "" {
 				n.ServerName = e.TLS.ServerName
 			}
@@ -120,4 +127,55 @@ func extraRealityShortID(e ExtraInbound) string {
 		}
 	}
 	return ""
+}
+
+// LiveProxyNodes renders everything a probe's own config.json declares
+// (design §9.3 实现修订 2026-09-17b, the editor model).
+//
+// This is the difference between "the panel owns the file" and "the file is the
+// truth": a `jq`-appended inbound shows up in the subscription without ever
+// having been adopted, because the payload is rendered from the file the probe
+// reported rather than from a server-side desired state.
+//
+// panelPort is the inbound the *panel* owns (the one the install flow declares
+// and whose certificate the node reports). It gets the panel's credential and
+// the reported certificate for pinning, plus the node's plain name — it is the
+// entry every existing client already holds. Everything else carries what the
+// file says, including the certificate path in the file.
+func LiveProxyNodes(configJSON, nodeID, name, server string, panelPort int, panelPassword string, certs map[int]string) []ProxyNode {
+	inbounds, err := ParseLocalInbounds(configJSON)
+	if err != nil {
+		return nil
+	}
+	nodes := make([]ProxyNode, 0, len(inbounds))
+	for i, ib := range inbounds {
+		if ib.Port <= 0 {
+			continue
+		}
+		e := ExtraInboundFrom(ib)
+		built := ProxyNodesFor([]ExtraInbound{e}, nodeID, name, server, certs[ib.Port])
+		for _, n := range built {
+			if n.Port == panelPort {
+				if n.Protocol == ProtoAnytls {
+					// The panel's inbound is the file's entry at that port, but
+					// its credential is the panel's: a re-install regenerates the
+					// listener from the template, so the file's password is not
+					// what clients were handed.
+					n.Password = panelPassword
+				}
+				n.Name = name
+				n.NameSuffix = ""
+			}
+			if n.Protocol == ProtoAnytls && n.CertPEM == "" {
+				// The file names a certificate *path*; a client needs the bytes
+				// to pin. No bytes → skip: rendering insecure=true is the one
+				// thing this project does not do (§9.3). The panel still lists
+				// it, so the operator can see why it is missing.
+				continue
+			}
+			nodes = append(nodes, n)
+		}
+		_ = i
+	}
+	return nodes
 }

@@ -28,6 +28,8 @@ import type {
   SettingView,
   SingboxCache,
   SingboxCacheStatus,
+  SingboxConfigPayload,
+  SingboxInbound,
   SingboxDownloadAccepted,
   SingboxImpact,
   SingboxReleases,
@@ -676,6 +678,32 @@ export function singboxAction(id: string, action: 'start' | 'stop' | 'restart'):
  */
 export function singboxUninstall(id: string): Promise<{ ok: boolean }> {
   return request(`/api/nodes/${encodeURIComponent(id)}/singbox/uninstall`, { method: 'POST', body: {} });
+}
+
+/** The editable inbound list of the probe's own config.json (§9.3 实现修订
+ *  2026-09-17b). The file is the source of truth; this is what the panel shows
+ *  and edits, and `reported_hash` is the concurrency guard for writes. */
+export function singboxConfig(id: string): Promise<SingboxConfigPayload & { hash?: string }> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/singbox/config`);
+}
+
+/** Read-merge-write one batch of edits back onto that file and restart. */
+export function singboxConfigEdit(
+  id: string,
+  body: {
+    reported_hash?: string;
+    add?: (Partial<SingboxInbound> & { new?: boolean })[];
+    update?: (Partial<SingboxInbound> & { adopt?: boolean })[];
+    delete?: number[];
+  },
+): Promise<{ ok: boolean; inbounds: number }> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/singbox/config`, { method: 'PUT', body });
+}
+
+/** Ask the probe to re-read its config now (the panel's "I just edited the
+ *  file" path — the subscription renders from the last reported file). */
+export function singboxRefresh(id: string): Promise<{ ok: boolean; command_id: string }> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/singbox/refresh`, { method: 'POST', body: {} });
 }
 
 /** Adopt inbounds the probe already runs into fobe's desired config
