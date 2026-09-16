@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/singboxcache"
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/singboxcache"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/store"
 	"github.com/gorilla/websocket"
 )
 

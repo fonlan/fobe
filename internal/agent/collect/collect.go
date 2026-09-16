@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 // Snapshot is one observation of the collector.

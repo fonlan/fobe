@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/fobe-panel/fobe/internal/server/agentupdate"
+	"github.com/fonlan/fobe/internal/server/agentupdate"
 )
 
 // Settings groups (design §4.4 / §12.1 / §13 / §14 / §15 / §16):

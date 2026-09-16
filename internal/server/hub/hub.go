@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
-	"github.com/fobe-panel/fobe/internal/server/geoip"
-	"github.com/fobe-panel/fobe/internal/server/security"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/server/geoip"
+	"github.com/fonlan/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/server/store"
 	"github.com/gorilla/websocket"
 )
 

@@ -36,7 +36,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 const (

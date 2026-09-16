@@ -17,7 +17,7 @@ CGO_ENABLED=0 go build -ldflags "-X main.version=$VERSION" -o "$OUT/fobe-server"
 echo "==> agent (linux/amd64, static)"
 mkdir -p "$OUT/dl/agent/$VERSION"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags "-s -w -X github.com/fobe-panel/fobe/internal/agent.Version=$VERSION" \
+    -ldflags "-s -w -X github.com/fonlan/fobe/internal/agent.Version=$VERSION" \
     -o "$OUT/dl/agent/$VERSION/linux-amd64" ./cmd/agent
 
 # sha256 manifest consumed by install.sh and the panel version picker

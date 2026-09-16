@@ -32,7 +32,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/geoip"
+	"github.com/fonlan/fobe/internal/server/geoip"
 )
 
 // Settings keys. geoip.status is server-owned state (written here, never

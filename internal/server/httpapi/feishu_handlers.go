@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/notify"
+	"github.com/fonlan/fobe/internal/server/notify"
 )
 
 // handleFeishuQRStart begins a fresh scan-to-add attempt. Superseding an

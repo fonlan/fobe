@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 // The envelope type is always "cmd"; the kind travels inside the payload.

@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
 )
 
 // --- sing-box artifact download progress (design §9.5.3) ---

@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/agent/service"
+	"github.com/fonlan/fobe/internal/agent/service"
 )
 
 // Self-signed certificate for the anytls inbound (design §9.3): the private

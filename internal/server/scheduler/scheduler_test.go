@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/notify"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/notify"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 func testStore(t *testing.T) *store.Store {

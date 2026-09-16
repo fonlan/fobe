@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/agent/service"
+	"github.com/fonlan/fobe/internal/agent/service"
 )
 
 const (

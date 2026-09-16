@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/singboxcache"
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
-	"github.com/fobe-panel/fobe/internal/server/singboxupdate"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/singboxcache"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/singboxupdate"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // --- sing-box artifact cache + one-click batch update (design §9.2) ---

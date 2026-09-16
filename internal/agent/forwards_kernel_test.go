@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 func kernelEnv(t *testing.T) nftEnv {

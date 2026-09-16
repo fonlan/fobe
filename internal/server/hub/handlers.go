@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
-	"github.com/fobe-panel/fobe/internal/server/quota"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/server/quota"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // --- frame handlers ---

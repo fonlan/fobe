@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/fobe-panel/fobe/internal/server/agentupdate"
-	"github.com/fobe-panel/fobe/internal/server/security"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/agentupdate"
+	"github.com/fonlan/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // Agent self-update surface (design §5.5). The decisions themselves live in

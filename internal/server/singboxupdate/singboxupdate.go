@@ -27,8 +27,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // SettingLastUpdate holds the JSON-encoded Job below. It is server-owned state:

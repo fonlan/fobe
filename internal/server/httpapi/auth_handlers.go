@@ -4,8 +4,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/fobe-panel/fobe/internal/server/security"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 const (

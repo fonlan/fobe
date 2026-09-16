@@ -48,7 +48,7 @@ RUN set -eu; \
         base="$VER"; \
         if [ -z "$base" ]; then base="dev"; fi; \
         CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-          -ldflags "-s -w -X github.com/fobe-panel/fobe/internal/agent.Version=$base-pending" \
+          -ldflags "-s -w -X github.com/fonlan/fobe/internal/agent.Version=$base-pending" \
           -o /tmp/agent-pending ./cmd/agent; \
         fp="$(sha256sum /tmp/agent-pending | cut -c1-12)"; \
         case "$fp" in *[0-9]*) ;; *) fp="0$fp" ;; esac; \
@@ -57,7 +57,7 @@ RUN set -eu; \
     esac; \
     CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o /out/fobe-server ./cmd/server \
  && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-      -ldflags "-s -w -X github.com/fobe-panel/fobe/internal/agent.Version=$VER" \
+      -ldflags "-s -w -X github.com/fonlan/fobe/internal/agent.Version=$VER" \
       -o /out/agent-seed/agent/$VER/linux-amd64 ./cmd/agent \
  && sha256sum /out/agent-seed/agent/$VER/linux-amd64 | awk '{print $1}' > /out/agent-seed/agent/$VER/linux-amd64.sha256 \
  && printf '{"version":"%s","artifacts":[{"os":"linux","arch":"amd64","file":"linux-amd64"}]}\n' "$VER" \

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/notify"
-	"github.com/fobe-panel/fobe/internal/server/quota"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/notify"
+	"github.com/fonlan/fobe/internal/server/quota"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 type Scheduler struct {

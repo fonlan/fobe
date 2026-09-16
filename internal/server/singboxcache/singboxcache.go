@@ -28,7 +28,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
 )
 
 // Settings keys written by the manager. They are server-owned state: the panel

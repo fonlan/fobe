@@ -16,9 +16,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/agent/collect"
-	"github.com/fobe-panel/fobe/internal/agent/service"
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/agent/collect"
+	"github.com/fonlan/fobe/internal/agent/service"
+	"github.com/fonlan/fobe/internal/protocol"
 	"github.com/gorilla/websocket"
 )
 
@@ -37,7 +37,7 @@ const (
 )
 
 // Version is the agent build version, injected via
-// -ldflags "-X github.com/fobe-panel/fobe/internal/agent.Version=...".
+// -ldflags "-X github.com/fonlan/fobe/internal/agent.Version=...".
 var Version = "dev"
 
 // Register exchanges a reg token for node credentials and persists them.

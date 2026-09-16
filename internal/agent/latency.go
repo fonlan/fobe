@@ -5,7 +5,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 // hasRawSocket/hasPingSocket live in the per-platform ICMP files: they probe

@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/fobe-panel/fobe/internal/server/geoip"
-	"github.com/fobe-panel/fobe/internal/server/geoipupdate"
+	"github.com/fonlan/fobe/internal/server/geoip"
+	"github.com/fonlan/fobe/internal/server/geoipupdate"
 )
 
 // --- GeoIP MMDB (design §14/§14.1) ---

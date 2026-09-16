@@ -4,7 +4,7 @@ import (
 	"net"
 	"sort"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 // LocalIPs enumerates the host's addresses (design §14): loopback and

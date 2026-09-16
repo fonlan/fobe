@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 // readNet returns the cumulative rx/tx counters of iface (per /proc/net/dev),

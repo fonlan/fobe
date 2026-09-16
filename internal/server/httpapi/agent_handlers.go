@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/security"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // --- registration tokens (design §4.2: single-use, TTL 30min) ---

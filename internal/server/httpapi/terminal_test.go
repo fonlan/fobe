@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
-	"github.com/fobe-panel/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/server/security"
 	"github.com/gorilla/websocket"
 )
 

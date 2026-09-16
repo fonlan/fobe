@@ -6,10 +6,10 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
-	"github.com/fobe-panel/fobe/internal/server/singbox"
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/server/singbox"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // --- sing-box lifecycle management (design §9) ---

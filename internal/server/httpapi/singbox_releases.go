@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // --- upstream release listing + explicit version download (design §9.5) ---

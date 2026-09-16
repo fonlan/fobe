@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/agent/service"
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/agent/service"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 func TestParseSingboxVersion(t *testing.T) {

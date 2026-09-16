@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/fobe-panel/fobe/internal/server/security"
-	"github.com/fobe-panel/fobe/internal/server/singbox"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/server/singbox"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // --- subscriptions & templates (design §10) ---

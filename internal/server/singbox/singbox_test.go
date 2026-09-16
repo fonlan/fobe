@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/fobe-panel/fobe/internal/agent/service"
+	"github.com/fonlan/fobe/internal/agent/service"
 )
 
 func TestBuildNodeConfig(t *testing.T) {

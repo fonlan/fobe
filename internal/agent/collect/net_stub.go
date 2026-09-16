@@ -2,7 +2,7 @@
 
 package collect
 
-import "github.com/fobe-panel/fobe/internal/protocol"
+import "github.com/fonlan/fobe/internal/protocol"
 
 // Non-linux stubs so the repo builds on dev machines (macOS). The agent
 // binary itself is only ever cross-compiled for linux/amd64 (design §5.1).

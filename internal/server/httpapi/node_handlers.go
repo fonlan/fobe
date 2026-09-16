@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
-	"github.com/fobe-panel/fobe/internal/server/quota"
-	"github.com/fobe-panel/fobe/internal/server/security"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/server/quota"
+	"github.com/fonlan/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // nodeView is the list/card shape the frontend renders (design §16).

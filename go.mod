@@ -1,4 +1,4 @@
-module github.com/fobe-panel/fobe
+module github.com/fonlan/fobe
 
 go 1.25
 

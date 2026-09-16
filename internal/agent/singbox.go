@@ -22,8 +22,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/agent/service"
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/agent/service"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 // sing-box lifecycle (design §9): the server only ships a desired state

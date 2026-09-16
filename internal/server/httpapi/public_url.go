@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 var errInvalidPublicURL = errors.New("invalid public url")

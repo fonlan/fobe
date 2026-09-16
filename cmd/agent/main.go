@@ -11,7 +11,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/fobe-panel/fobe/internal/agent"
+	"github.com/fonlan/fobe/internal/agent"
 )
 
 func main() {

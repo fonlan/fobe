@@ -7,9 +7,9 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/agent/collect"
-	"github.com/fobe-panel/fobe/internal/agent/service"
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/agent/collect"
+	"github.com/fonlan/fobe/internal/agent/service"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 const (

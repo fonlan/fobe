@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/geoip"
+	"github.com/fonlan/fobe/internal/server/geoip"
 )
 
 // progressInterval throttles byte-level reports: a fast mirror would otherwise

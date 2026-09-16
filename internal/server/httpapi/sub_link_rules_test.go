@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 func TestSubscriptionLinkStaysCopyable(t *testing.T) {

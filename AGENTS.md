@@ -82,7 +82,8 @@ docker compose exec server fobe-server admin unblock <ip|all> | reset-password |
 - 数据库：表/列加在 `store/schema.sql`；给老库加列走 `migrateAdditive`（必须幂等）。改 schema 必须同时 bump `store.SchemaVersion`——它驱动迁移前自动快照与降级告警；降级安全的前提是 schema 永远只做增量、所有查询显式列名（design §6 兼容策略）。连接是单写者（`SetMaxOpenConns(1)`），别引入并发写路径。
 - 新设置项用 `域.键` 命名（如 `server.public_url`、`ai.kill_switch`），经 `SetSetting`/`GetSetting`（敏感的用加密版本）。
 - 日志用 `log/slog`。
-- 版本注入：agent 是 `-X github.com/fobe-panel/fobe/internal/agent.Version=$VERSION`，server 是 `-X main.version=$VERSION`——别弄混。
+- 版本注入：agent 是 `-X github.com/fonlan/fobe/internal/agent.Version=$VERSION`，server 是 `-X main.version=$VERSION`——别弄混。
+- **改模块名必须同步 5 处 ldflags**（`deploy/Dockerfile.server` ×2、`scripts/dev.sh` ×2、`scripts/build.sh` ×1）——它们把 module path 当字面量抄了一遍。`-X` 指向不存在的符号时 **`go build` 不报错、静默忽略**，`Version` 留在 `dev`，而 §5.5 的发布门槛 fail-closed ⇒ **探针自更新被静默停用**，编译/测试/CI 全绿。验证别用 `strings <binary> | grep <版本号>`：`-ldflags` 原文会被记进 buildinfo，必然命中，是假阳性；要真跑出来——临时 `main` 打印 `agent.Version`、带 `-X` 构建后运行，看到哨兵号才算绑上。
 
 **前端**
 

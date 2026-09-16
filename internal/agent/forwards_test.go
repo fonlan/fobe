@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 // The fixtures under testdata/forwards are verbatim output of nft 1.0.6

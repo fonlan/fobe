@@ -12,17 +12,17 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/fobe-panel/fobe/internal/server/agentupdate"
-	"github.com/fobe-panel/fobe/internal/server/feishureg"
-	"github.com/fobe-panel/fobe/internal/server/geoip"
-	"github.com/fobe-panel/fobe/internal/server/geoipupdate"
-	"github.com/fobe-panel/fobe/internal/server/hub"
-	"github.com/fobe-panel/fobe/internal/server/notify"
-	"github.com/fobe-panel/fobe/internal/server/security"
-	"github.com/fobe-panel/fobe/internal/server/singboxcache"
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
-	"github.com/fobe-panel/fobe/internal/server/singboxupdate"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/agentupdate"
+	"github.com/fonlan/fobe/internal/server/feishureg"
+	"github.com/fonlan/fobe/internal/server/geoip"
+	"github.com/fonlan/fobe/internal/server/geoipupdate"
+	"github.com/fonlan/fobe/internal/server/hub"
+	"github.com/fonlan/fobe/internal/server/notify"
+	"github.com/fonlan/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/server/singboxcache"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/singboxupdate"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // Server carries the shared dependencies of every handler.

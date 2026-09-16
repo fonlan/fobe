@@ -79,7 +79,7 @@ unset FOBE_WEB_DIR || true
 agent_version() {
     mkdir -p "$FOBE_DL_DIR/.agent-fp"
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-        -ldflags "-s -w -X github.com/fobe-panel/fobe/internal/agent.Version=$AGENT_PENDING_VERSION" \
+        -ldflags "-s -w -X github.com/fonlan/fobe/internal/agent.Version=$AGENT_PENDING_VERSION" \
         -o "$FOBE_DL_DIR/.agent-fp/linux-amd64" ./cmd/agent
     local fp
     fp="$(shasum -a 256 "$FOBE_DL_DIR/.agent-fp/linux-amd64" | cut -c1-12)"
@@ -129,7 +129,7 @@ else
     echo "dev.sh: 编译 agent $VERSION (linux/amd64) ..."
     mkdir -p "$AGENT_DIR"
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-        -ldflags "-s -w -X github.com/fobe-panel/fobe/internal/agent.Version=$VERSION" \
+        -ldflags "-s -w -X github.com/fonlan/fobe/internal/agent.Version=$VERSION" \
         -o "$AGENT_DIR/linux-amd64" ./cmd/agent
     ( cd "$AGENT_DIR" && shasum -a 256 linux-amd64 > linux-amd64.sha256 )
 fi

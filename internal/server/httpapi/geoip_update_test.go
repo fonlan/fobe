@@ -17,8 +17,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/fobe-panel/fobe/internal/server/geoip"
-	"github.com/fobe-panel/fobe/internal/server/geoipupdate"
+	"github.com/fonlan/fobe/internal/server/geoip"
+	"github.com/fonlan/fobe/internal/server/geoipupdate"
 )
 
 // mmdbFixture is the checked-in test database: the only payload in the repo

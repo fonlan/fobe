@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/protocol"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // upstreamAI returns a mock OpenAI-compatible upstream that answers with a

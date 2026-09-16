@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/fobe-panel/fobe/internal/server/security"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // loginSession logs in with the seeded test password and returns the

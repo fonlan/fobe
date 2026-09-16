@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
-	"github.com/fobe-panel/fobe/internal/server/store"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/store"
 )
 
 // writeCachedVersion lays out a minimal but valid cached release under

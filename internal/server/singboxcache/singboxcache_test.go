@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
 )
 
 func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

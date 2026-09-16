@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/server/singboxdl"
+	"github.com/fonlan/fobe/internal/server/singboxdl"
 
 	"github.com/gorilla/websocket"
 )

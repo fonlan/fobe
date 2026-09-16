@@ -11,7 +11,7 @@ import (
 	"sync"
 
 	"github.com/creack/pty"
-	"github.com/fobe-panel/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/protocol"
 )
 
 const (
