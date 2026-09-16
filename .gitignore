@@ -31,3 +31,6 @@ web/vite.config.d.ts
 
 # @fonlan/dsh-task-kanban
 .dsh/
+
+# Local skills metadata (agent 工具的本地锁文件,不入库)
+skills-lock.json
