@@ -30,7 +30,7 @@
 | 16 | 指标保留 | 明细只存 7 天；另存永久「按天流量」表 | 7 天以外的曲线不可得（月曲线靠日表） |
 | 17 | 延迟测量 | 探针**主动**测面板配置的目标；本地测量频率由设置项 `latency.interval_seconds` 控制（默认 5s）、60s 批量上报；ICMP + TCP 握手两种 | 拿不到"用户→探针"的真实延迟 |
 | 18 | 登录加固 | 失败 3 次拉黑 IP（持久化）+ CLI 解封；**不做 2FA** | 黑名单依赖 XFF 信任链；无第二因子 |
-| 19 | 告警 | Telegram Bot + 通用 Webhook | 没装 Telegram 就收不到 |
+| 19 | 告警 | Telegram Bot + 通用 Webhook + **飞书**（2026-09-16 增：应用机器人 / 群自定义机器人） | 一条告警要么进 Telegram、要么进飞书或你自己的 Webhook——通道各自独立，配一个是一个 |
 | 20 | 接入层 | **不在 fobe 内实现**：外部 nginx 提供 TLS 与反代，证书自备自管 | fobe 不碰证书；你必须让 nginx 传对 XFF 与 Upgrade 头（见 §3 与 README） |
 | 21 | agent 自更新 | **一直跟随服务端**：版本不一致就切（含降级），agent 自发、免确认；Kill Switch on 时冻结（§5.5） | 服务端版本号成为对外契约；不保留 `.prev` ⇒ **没有本地回滚**；存量探针必须人工重装一次才进入自动跟随 |
 
@@ -38,7 +38,7 @@
 
 ## 1. 范围
 
-**v1 做**：单用户面板；探针注册与心跳；硬件/网络指标；流量配额与四种口径；缴费与重置周期；sing-box 安装/更新/回滚/启停；anytls 自签证书服务端；订阅渲染（sing-box / Clash 模板）；Web 终端；延迟测量；IP 与国旗；Telegram/Webhook 告警；中英双语；明暗主题；AI 助手；**外部接入文档（README 给出可直接复制的 nginx 配置）**。
+**v1 做**：单用户面板；探针注册与心跳；硬件/网络指标；流量配额与四种口径；缴费与重置周期；sing-box 安装/更新/回滚/启停；anytls 自签证书服务端；订阅渲染（sing-box / Clash 模板）；Web 终端；延迟测量；IP 与国旗；Telegram/Webhook/飞书 告警；中英双语；明暗主题；AI 助手；**外部接入文档（README 给出可直接复制的 nginx 配置）**。
 
 **v1 不做**：**反向代理与证书签发/续期（由你自备的外部 nginx 负责，fobe 内不含任何反代组件）**；多用户与权限体系；在线支付；到期自动停服；TOTP；非 x86 架构；除 anytls 以外的协议；探针集群编排；Prometheus 导出。
 
@@ -633,10 +633,19 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 | sing-box 批量更新未收敛 | 分发后 15 分钟仍未报告目标版本（§9.5.4） | 15 分钟 |
 | 计数器重置 | 流量计数回绕 | 立即（信息级） |
 
-通道：**Telegram Bot** + **通用 Webhook**（JSON POST，HMAC 签名头）。
+通道：**Telegram Bot** + **通用 Webhook**（JSON POST，HMAC 签名头）+ **飞书**（2026-09-16 修订）。
 
 - 同类告警去重合并（同一节点同一类型 1 小时内只发一次，恢复时补一条 recovery）。
 - 面板内"通知中心"保留全部历史，`alerts` 表为权威。
+
+### 15.1 飞书通道（2026-09-16 修订）
+
+两条子通道，共用 `internal/server/notify` 里的一个 `Feishu` 通知器（**应用模式优先于群机器人模式**，两者都配时只走应用）：
+
+1. **应用机器人（推荐，支持"直接扫码接入"）**：面板调用 `POST https://accounts.feishu.cn/oauth/v1/app/registration`（RFC 8628 设备授权风格）拿 `device_code` + `user_code`，把 `verification_uri_complete` 渲染成二维码（前端用 `qrcode.react`，自托管、不引 CDN）。用户用飞书 App 扫码 → 在**自己的租户里确认创建一个自建应用**（`archetype=PersonalAgent`，预填应用名/描述，并经 URL 上的 gzip+base64url `addons` 预授权 `im:message:send_as_bot`）→ 面板轮询 `action=poll` 拿到 `client_id/client_secret` 与扫码人的 `open_id`，加密落库并把**扫码人本人**设为接收者。此后告警由机器人以私聊形式送达：`POST /open-apis/im/v1/messages`（`tenant_access_token` 进程内缓存，过期前 60s 刷新，token 失效自动换新重试一次）。若轮询响应里 `user_info.tenant_brand=lark`，后续请求整体切到 `accounts.larksuite.com` / `open.larksuite.com`（与官方 SDK 一致），域名记在 `notify.feishu_domain`。
+- 代价：这一步**需要一个飞书账号并联网访问飞书的域名**（面板自己出网，不需要公网入站/回调地址，因此局域网部署也能用）；扫码确认页由飞书托管，**面板无法替用户跳过"创建应用"那一次确认**；会话是进程内状态（重启即失效，重新扫一次即可，不影响已绑定的配置）。手动填写 `App ID/App Secret/接收者 ID` 是同一条发送路径的备选入口（老应用、或因组织策略不便扫码的场景），接收者 ID 按前缀判定类型（`ou_` 用户 / `oc_` 群 / `on_` union），也可手填 `chat_id` 把告警发进群。
+- 安全：`app_secret`、群机器人 webhook URL（路径里自带 token）与加签密钥都按 §4.4 经 `security.Cryptor` 加密存储、GET 不回读；解除绑定是**删除**设置行（空值仍会被当作"已配置"，见 store 的 `DeleteSetting`）。
+2. **群自定义机器人**：在飞书群里添加"自定义机器人"拿到的 webhook 地址（+ 可选加签密钥）直接粘贴即可，不需要应用凭据；POST `{msg_type:"text", content:{text}, timestamp, sign}`，`sign` 为 HMAC-SHA256（**密钥是 `"<unix秒>\n<加签密钥>"`、消息为空**）、base64 编码，与 Telegram/通用 Webhook 的签名方案不同，别混用。
 
 ---
 

@@ -13,9 +13,11 @@ import (
 	"sync"
 
 	"github.com/fobe-panel/fobe/internal/server/agentupdate"
+	"github.com/fobe-panel/fobe/internal/server/feishureg"
 	"github.com/fobe-panel/fobe/internal/server/geoip"
 	"github.com/fobe-panel/fobe/internal/server/geoipupdate"
 	"github.com/fobe-panel/fobe/internal/server/hub"
+	"github.com/fobe-panel/fobe/internal/server/notify"
 	"github.com/fobe-panel/fobe/internal/server/security"
 	"github.com/fobe-panel/fobe/internal/server/singboxcache"
 	"github.com/fobe-panel/fobe/internal/server/singboxdl"
@@ -71,6 +73,12 @@ type Server struct {
 	// AgentUpdate is the §5.5 self-update manager. Optional: dev builds and
 	// tests can run without one (no target is offered then).
 	AgentUpdate *agentupdate.Manager
+
+	// 飞书 notification surface (§15, 2026-09-16 修订). Feishu is the delivery
+	// channel (shared with the scheduler); FeishuReg owns the scan-to-add
+	// registration session. Both optional: the section degrades gracefully.
+	Feishu    *notify.Feishu
+	FeishuReg *feishureg.Manager
 
 	// events broker for /ws/events (live panel updates)
 	evMu   sync.Mutex
@@ -144,6 +152,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/alerts", s.requireSession(s.handleListAlerts))
 	mux.HandleFunc("GET /api/settings", s.requireSession(s.handleGetSettings))
 	mux.HandleFunc("PUT /api/settings", s.requireSession(s.handlePutSettings))
+	// §15 飞书 (2026-09-16): scan-to-add registration session, channel test,
+	// unbind. The QR session is per-process state; no restart can resume it.
+	mux.HandleFunc("POST /api/settings/feishu/qr", s.requireSession(s.handleFeishuQRStart))
+	mux.HandleFunc("GET /api/settings/feishu/qr", s.requireSession(s.handleFeishuQRStatus))
+	mux.HandleFunc("DELETE /api/settings/feishu/qr", s.requireSession(s.handleFeishuQRCancel))
+	mux.HandleFunc("POST /api/settings/feishu/test", s.requireSession(s.handleFeishuTest))
+	mux.HandleFunc("DELETE /api/settings/feishu/config", s.requireSession(s.handleFeishuClear))
 	mux.HandleFunc("POST /api/ai/chat", s.requireSession(s.handleAIChat))
 	mux.HandleFunc("POST /api/ai/actions/{id}/confirm", s.requireSession(s.handleConfirmAIAction))
 

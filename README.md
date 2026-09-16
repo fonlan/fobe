@@ -110,6 +110,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 - **更新面板**：`docker compose pull && docker compose up -d`——探针会按 0–5 分钟错峰自动跟随服务端版本（双向跟随，服务端回退探针也回退），数据都在 `data/` 卷里，重建容器不丢。
 - **备份**：整机状态就是 `data/` 一个目录（数据库、主密钥、GeoIP 库、产物缓存、快照），停服后拷走即可。快照默认开启（启动即拍 + 每 24h 一轮 + 迁移前必拍，保留 3 份）；恢复 = 停服后用快照替换 `data/fobe.db`。
 - **登录失败自锁自救**：`docker compose exec server fobe-server admin unblock all`。
+- **接飞书告警**：设置 → 飞书 → 「扫码接入」，用飞书 App 扫码并在确认页创建应用后即完成绑定，告警由该机器人私聊发给你（面板只出网、不需要公网回调地址）。不想建应用就用「群自定义机器人」：在飞书群里加一个自定义机器人，把 Webhook 地址粘进面板。Telegram 与通用 Webhook 走同一页上方的「通知」卡片，两个通道可以同时开。
 
 ## 开发
 

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/fobe-panel/fobe/internal/server/agentupdate"
+	"github.com/fobe-panel/fobe/internal/server/feishureg"
 	"github.com/fobe-panel/fobe/internal/server/geoip"
 	"github.com/fobe-panel/fobe/internal/server/geoipupdate"
 	"github.com/fobe-panel/fobe/internal/server/httpapi"
@@ -170,10 +171,51 @@ func runServer() {
 		}
 		return val, true
 	}
+	feishu := notify.NewFeishu(decryptSetting, notifyClient)
 	channels := []notify.Notifier{
 		notify.NewTelegram(decryptSetting, notifyClient),
 		notify.NewWebhook(decryptSetting, notifyClient),
+		feishu,
 	}
+	// §15 飞书扫码接入 (2026-09-16 修订): one shared Feishu channel + its
+	// registration manager. The Save closure persists the fresh app's
+	// credentials (secret encrypted at rest), pins the scanning user as the
+	// receive target, audits the binding and says hello in Feishu — the
+	// channel being alive is the user's confirmation that the scan worked.
+	api.Feishu = feishu
+	api.FeishuReg = feishureg.New(feishureg.Config{
+		Log:     log,
+		AppName: "fobe 探针告警",
+		AppDesc: "接收 fobe 探针面板的告警与恢复通知",
+		Save: func(appID, appSecret, openID, botName, domain string) error {
+			enc, err := crypt.Encrypt(appSecret)
+			if err != nil {
+				return err
+			}
+			for _, kv := range []struct {
+				key string
+				val string
+				enc bool
+			}{
+				{"notify.feishu_app_id", appID, false},
+				{"notify.feishu_app_secret", enc, true},
+				{"notify.feishu_receive_id", openID, false},
+				{"notify.feishu_bot_name", botName, false},
+				{"notify.feishu_domain", domain, false},
+			} {
+				if err := st.SetSetting(kv.key, kv.val, kv.enc); err != nil {
+					return err
+				}
+			}
+			_ = st.InsertAudit(&store.AuditEntry{Actor: "panel", Action: "feishu_qr_saved", Command: botName})
+			// Same shape the real alerts will have (MessageText), so this is
+			// also a sample of what the user signed up for.
+			if err := feishu.SendText("[fobe] TEST notification\nFeishu notification channel connected."); err != nil {
+				log.Warn("feishu welcome send", "err", err)
+			}
+			return nil
+		},
+	})
 	// Backups are on by default (snapshots land next to the database, §17) —
 	// the 2026-09-16 corruption incident cost the settings table because the
 	// only copy of the data was the data itself. FOBE_BACKUP_DIR relocates

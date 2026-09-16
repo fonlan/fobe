@@ -233,6 +233,23 @@ export interface SettingView {
   set: boolean;
 }
 
+/** Scan-to-add session view (mirrors feishureg.Status). */
+export interface FeishuQRStatus {
+  state: 'idle' | 'qr_ready' | 'saving' | 'succeeded' | 'expired' | 'denied' | 'cancelled' | 'error';
+  qr_url?: string;
+  expires_at?: number;
+  remaining_seconds?: number;
+  bot_name?: string;
+  error?: string;
+}
+
+/** POST /api/settings/feishu/test — ok=false carries the upstream reason. */
+export interface FeishuTestResult {
+  ok: boolean;
+  code?: string;
+  detail?: string;
+}
+
 // --- subscriptions & templates (design §10) ---
 
 export interface SubscriptionRow {

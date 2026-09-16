@@ -20,12 +20,23 @@ const (
 	KeyTelegramChatID = "notify.telegram_chat_id"
 	KeyWebhookURL     = "notify.webhook_url"
 	KeyWebhookSecret  = "notify.webhook_secret" // encrypted at rest
+
+	// 飞书 (design §15, 2026-09-16 修订). App mode = 自建应用 from the QR scan
+	// flow (feishureg); webhook mode = group custom-bot webhook URL.
+	KeyFeishuAppID         = "notify.feishu_app_id"
+	KeyFeishuAppSecret     = "notify.feishu_app_secret"     // encrypted at rest
+	KeyFeishuReceiveID     = "notify.feishu_receive_id"     // ou_/oc_/on_ prefixed
+	KeyFeishuBotName       = "notify.feishu_bot_name"       // display cache only
+	KeyFeishuDomain        = "notify.feishu_domain"         // feishu | lark
+	KeyFeishuWebhookURL    = "notify.feishu_webhook_url"    // embeds a token → encrypted at rest
+	KeyFeishuWebhookSecret = "notify.feishu_webhook_secret" // encrypted at rest
 )
 
 // Event kinds of the webhook/telegram body ("alert" or "recovery").
 const (
 	EventAlert    = "alert"
 	EventRecovery = "recovery"
+	EventTest     = "test" // panel test button / QR welcome message only
 )
 
 // ErrNotConfigured is returned by Deliver when the channel has no settings;

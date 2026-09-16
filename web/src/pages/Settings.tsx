@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { QRCodeSVG } from 'qrcode.react';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import Modal from '../components/Modal';
@@ -11,6 +12,7 @@ import { fmtBytes, fmtRate, fmtTime } from '../format';
 import type {
   AgentUpdateStatus,
   BlacklistRow,
+  FeishuQRStatus,
   GeoIPDownload,
   GeoIPStatus,
   SessionRow,
@@ -37,6 +39,9 @@ const DL_FAILURE_VISIBLE = 30 * 60;
 const SERVER_KEYS = ['server.public_url'] as const;
 const AI_KEYS = ['ai.base_url', 'ai.model', 'ai.api_key', 'ai.default_policy'] as const;
 const NOTIFY_KEYS = ['notify.telegram_bot_token', 'notify.telegram_chat_id', 'notify.webhook_url', 'notify.webhook_secret'] as const;
+/** §15 飞书: app credentials (QR or manual) and the group custom-bot webhook save separately. */
+const FEISHU_APP_KEYS = ['notify.feishu_app_id', 'notify.feishu_app_secret', 'notify.feishu_receive_id', 'notify.feishu_domain'] as const;
+const FEISHU_WEBHOOK_KEYS = ['notify.feishu_webhook_url', 'notify.feishu_webhook_secret'] as const;
 const PROXY_KEYS = ['anytls_password'] as const;
 /** §14.1 database refresh policy; the database itself has its own endpoints. */
 const GEOIP_KEYS = ['geoip.auto_update', 'geoip.max_age_days', 'geoip.url'] as const;
@@ -258,6 +263,17 @@ export default function Settings() {
         </div>
         <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(NOTIFY_KEYS)} label={t('save')} />
       </section>
+
+      <FeishuCard
+        settings={settings}
+        field={field}
+        busy={busy}
+        savedMsg={savedMsg}
+        onSaveApp={() => void saveGroup(FEISHU_APP_KEYS)}
+        onSaveWebhook={() => void saveGroup(FEISHU_WEBHOOK_KEYS)}
+        onChanged={() => void load()}
+        saveLabel={t('save')}
+      />
 
       <section className="card">
         <h3>{t('sec_proxy')}</h3>
@@ -1295,6 +1311,229 @@ function GeoIPCard({
         {field('geoip.url', t('geoip_url'), { type: 'url' })}
       </div>
       <SaveRow busy={busy} savedMsg={savedMsg} onSave={onSave} label={saveLabel} />
+    </section>
+  );
+}
+
+/**
+ * §15 飞书 (2026-09-16 修订). Three ways in, one channel out:
+ *
+ *  1. 扫码接入 — starts a device-flow session server-side and renders the
+ *     verification URL as a QR code; the user scans with the 飞书 app, confirms
+ *     app creation in their own tenant, and the panel binds the fresh bot to
+ *     their open id. Polling is server-driven, so the card only re-reads a
+ *     status endpoint.
+ *  2. manual app credentials (auditing an existing self-built app).
+ *  3. group custom-bot webhook (no app needed).
+ */
+function FeishuCard({
+  settings,
+  field,
+  busy,
+  savedMsg,
+  onSaveApp,
+  onSaveWebhook,
+  onChanged,
+  saveLabel,
+}: {
+  settings: Record<string, SettingView>;
+  field: (
+    key: string,
+    label: string,
+    opts?: { password?: boolean; type?: string; select?: { value: string; label: string }[]; defaultValue?: string },
+  ) => ReactNode;
+  busy: boolean;
+  savedMsg: string | null;
+  onSaveApp: () => void;
+  onSaveWebhook: () => void;
+  onChanged: () => void;
+  saveLabel: string;
+}) {
+  const { t } = useI18n();
+  const [qr, setQr] = useState<FeishuQRStatus | null>(null);
+  const [qrBusy, setQrBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const appBound = settings['notify.feishu_app_id']?.set === true;
+  const webhookBound = settings['notify.feishu_webhook_url']?.set === true;
+  const botName = settings['notify.feishu_bot_name']?.value || '';
+  const qrActive = qr !== null && (qr.state === 'qr_ready' || qr.state === 'saving');
+
+  // Poll the session while it is open. The server owns the device flow; this
+  // is only a status read, and it stops as soon as the state is terminal.
+  useEffect(() => {
+    if (!qrActive) return;
+    const h = window.setInterval(() => {
+      api
+        .getFeishuQR()
+        .then((st) => {
+          setQr(st);
+          // A finished binding wrote new settings: refresh so the bound line
+          // and the fields stop showing the pre-scan values.
+          if (st.state === 'succeeded') onChanged();
+        })
+        .catch(() => {
+          /* transient: the next tick retries */
+        });
+    }, 2000);
+    return () => window.clearInterval(h);
+  }, [qrActive, onChanged]);
+
+  const startQR = async () => {
+    setQrBusy(true);
+    setErr(null);
+    setTest(null);
+    try {
+      setQr(await api.startFeishuQR());
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setQrBusy(false);
+    }
+  };
+
+  const cancelQR = async () => {
+    try {
+      setQr(await api.cancelFeishuQR());
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    }
+  };
+
+  const runTest = async () => {
+    setTesting(true);
+    setTest(null);
+    try {
+      const r = await api.testFeishu();
+      if (r.ok) {
+        setTest({ ok: true, text: t('feishu_test_ok') });
+      } else if (r.code === 'feishu_not_configured') {
+        setTest({ ok: false, text: t('feishu_test_not_configured') });
+      } else {
+        setTest({ ok: false, text: t('feishu_test_fail', { detail: r.detail || r.code || '' }) });
+      }
+    } catch (e) {
+      setTest({ ok: false, text: apiErrorMessage(e, t) });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const clear = async (mode: 'app' | 'webhook') => {
+    const question = mode === 'app' ? t('feishu_clear_app_confirm') : t('feishu_clear_webhook_confirm');
+    if (!window.confirm(question)) return;
+    setErr(null);
+    setTest(null);
+    try {
+      await api.clearFeishuConfig(mode);
+      if (mode === 'app') setQr(null);
+      onChanged();
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    }
+  };
+
+  // Terminal-state copy: succeeded/expired/denied/cancelled/error all read
+  // from one state key, with the error code refining the failure case.
+  const qrState = qr?.state ?? 'idle';
+  const qrMessage = (() => {
+    if (!qr || qr.state === 'idle') return null;
+    if (qr.state === 'succeeded') return t('feishu_qr_state_succeeded', { bot: qr.bot_name || 'fobe' });
+    if (qr.state === 'qr_ready') return t('feishu_qr_state_qr_ready');
+    if (qr.state === 'saving') return t('feishu_qr_state_saving');
+    if (qr.state === 'error' && qr.error) return t(`feishu_qr_err_${qr.error}` as never);
+    return t(`feishu_qr_state_${qr.state}` as never);
+  })();
+
+  return (
+    <section className="card">
+      <div className="row-between">
+        <h3>{t('sec_feishu')}</h3>
+        <span className={'chip' + (appBound || webhookBound ? ' status-ok' : '')}>
+          {appBound
+            ? t('feishu_app_bound', { bot: botName || 'fobe' })
+            : webhookBound
+              ? t('feishu_webhook_bound')
+              : t('feishu_app_unbound')}
+        </span>
+      </div>
+      <p className="hint">{t('feishu_desc')}</p>
+      {err && <div className="form-error">{err}</div>}
+      {test && <div className={test.ok ? 'form-ok' : 'form-error'}>{test.text}</div>}
+
+      <div className="row-wrap" style={{ marginTop: 12 }}>
+        <button type="button" className="btn primary" disabled={qrBusy || qrActive} onClick={() => void startQR()}>
+          {qrBusy ? '…' : appBound || qr ? t('feishu_qr_restart') : t('feishu_qr_start')}
+        </button>
+        {qrActive && qr?.state === 'qr_ready' && (
+          <button type="button" className="btn" onClick={() => void cancelQR()}>
+            {t('feishu_qr_cancel')}
+          </button>
+        )}
+        <button type="button" className="btn" disabled={testing || (!appBound && !webhookBound)} onClick={() => void runTest()}>
+          {testing ? '…' : t('feishu_test')}
+        </button>
+        {appBound && (
+          <button type="button" className="btn danger" onClick={() => void clear('app')}>
+            {t('feishu_clear_app')}
+          </button>
+        )}
+      </div>
+
+      {qrActive && qr?.qr_url && (
+        <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+          {/* White plate: the QR must stay scannable in the dark theme too. */}
+          <div style={{ background: '#fff', padding: 12, borderRadius: 8, lineHeight: 0 }}>
+            <QRCodeSVG value={qr.qr_url} size={168} level="M" />
+          </div>
+          <div className="hint" style={{ textAlign: 'center' }}>
+            {t('feishu_qr_scan_hint')}
+          </div>
+          <div className="hint">
+            {qr.state === 'saving' ? t('feishu_qr_state_saving') : t('feishu_qr_waiting')}
+            {qr.state === 'qr_ready' && qr.remaining_seconds !== undefined
+              ? ' · ' + t('feishu_qr_remaining', { n: qr.remaining_seconds })
+              : ''}
+          </div>
+        </div>
+      )}
+      {qrMessage && !qrActive && qrState !== 'idle' && (
+        <div className={qrState === 'succeeded' ? 'form-ok' : 'hint'} style={{ marginTop: 10 }}>
+          {qrMessage}
+        </div>
+      )}
+
+      <h4 style={{ marginTop: 16 }}>{t('feishu_manual_hint')}</h4>
+      <div className="form-grid">
+        {field('notify.feishu_app_id', t('feishu_app_id'), {})}
+        {field('notify.feishu_app_secret', t('feishu_app_secret'), { password: true })}
+        {field('notify.feishu_receive_id', t('feishu_receive_id'), {})}
+        {field('notify.feishu_domain', t('feishu_domain'), {
+          select: [
+            { value: 'feishu', label: 'feishu.cn' },
+            { value: 'lark', label: 'larksuite.com' },
+          ],
+        })}
+      </div>
+      <p className="hint">{t('feishu_receive_id_hint')}</p>
+      <SaveRow busy={busy} savedMsg={savedMsg} onSave={onSaveApp} label={saveLabel} />
+
+      <div className="row-between" style={{ marginTop: 16 }}>
+        <h4>{t('feishu_webhook_title')}</h4>
+        {webhookBound && (
+          <button type="button" className="btn danger small" onClick={() => void clear('webhook')}>
+            {t('feishu_clear_webhook')}
+          </button>
+        )}
+      </div>
+      <p className="hint">{t('feishu_webhook_hint')}</p>
+      <div className="form-grid">
+        {field('notify.feishu_webhook_url', t('webhook_url'), {})}
+        {field('notify.feishu_webhook_secret', t('webhook_secret'), { password: true })}
+      </div>
+      <SaveRow busy={busy} savedMsg={savedMsg} onSave={onSaveWebhook} label={saveLabel} />
     </section>
   );
 }

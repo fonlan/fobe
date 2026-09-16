@@ -48,6 +48,15 @@ func (s *Store) SetSetting(key, value string, encrypted bool) error {
 	return nil
 }
 
+// DeleteSetting removes a key entirely — used when a channel is unbound
+// (feishu QR/config clear), where an empty row would still read as "set".
+func (s *Store) DeleteSetting(key string) error {
+	if _, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, key); err != nil {
+		return fmt.Errorf("delete setting %s: %w", key, err)
+	}
+	return nil
+}
+
 // --- registration tokens (design §4.2: single-use, TTL 30min) ---
 
 type RegToken struct {

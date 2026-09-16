@@ -13,6 +13,9 @@ import (
 //   anytls_password (encrypted; global shared proxy password, §10)
 //   notify.telegram_bot_token (encrypted), notify.telegram_chat_id,
 //   notify.webhook_url, notify.webhook_secret
+//   notify.feishu_app_id / app_secret (encrypted) / receive_id / bot_name /
+//   domain / webhook_url (encrypted) / webhook_secret (encrypted) (§15,
+//   2026-09-16 修订: the QR flow itself writes these via feishureg.Save)
 //   retention.metrics_days
 //   geoip.auto_update, geoip.max_age_days, geoip.url (§14.1; the MMDB itself
 //   arrives via the upload/download endpoints, and geoip.status is server-owned)
@@ -30,10 +33,13 @@ type settingView struct {
 
 // sensitiveKeys are write-only: GET returns set/unset, never the value.
 var sensitiveKeys = map[string]bool{
-	"ai.api_key":                true,
-	"anytls_password":           true,
-	"notify.telegram_bot_token": true,
-	"notify.webhook_secret":     true,
+	"ai.api_key":                   true,
+	"anytls_password":              true,
+	"notify.telegram_bot_token":    true,
+	"notify.webhook_secret":        true,
+	"notify.feishu_app_secret":     true,
+	"notify.feishu_webhook_url":    true, // embeds the bot token in its path
+	"notify.feishu_webhook_secret": true,
 }
 
 // allowedKeys guards PUT against arbitrary key injection.
@@ -46,6 +52,10 @@ var allowedKeys = func() map[string]bool {
 		"server.public_url",
 		"ai.base_url", "ai.model", "ai.default_policy",
 		"notify.telegram_chat_id", "notify.webhook_url",
+		// §15 飞书 (2026-09-16): app mode + group custom-bot webhook mode.
+		"notify.feishu_app_id", "notify.feishu_app_secret", "notify.feishu_receive_id",
+		"notify.feishu_bot_name", "notify.feishu_domain",
+		"notify.feishu_webhook_url", "notify.feishu_webhook_secret",
 		"retention.metrics_days", "retention.latency_days",
 		"latency.interval_seconds",
 		"alert.traffic_warn_pct", "alert.traffic_crit_pct",
@@ -126,6 +136,11 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		// (the default), so refuse it instead of pretending to have turned it off.
 		if key == agentupdate.SettingAutoUpdate && !validBoolSetting(value) {
 			writeErr(w, http.StatusBadRequest, "bad_switch")
+			return
+		}
+		// §15 飞书 host selector; anything but the two known brands is refused.
+		if key == "notify.feishu_domain" && value != "feishu" && value != "lark" {
+			writeErr(w, http.StatusBadRequest, "bad_feishu_domain")
 			return
 		}
 		if key == "latency.interval_seconds" && !validLatencyInterval(value) {

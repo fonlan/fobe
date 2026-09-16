@@ -67,9 +67,12 @@ func (t *Telegram) Deliver(ev Event) error {
 func MessageText(ev Event) string {
 	var b strings.Builder
 	b.WriteString("[fobe] ")
-	if ev.Event == EventRecovery {
+	switch ev.Event {
+	case EventRecovery:
 		b.WriteString("RECOVERED ")
-	} else {
+	case EventTest:
+		b.WriteString("TEST ")
+	default:
 		b.WriteString("ALERT ")
 	}
 	b.WriteString(ev.Kind)

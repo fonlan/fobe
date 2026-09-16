@@ -8,6 +8,8 @@ import type {
   AuditRow,
   BlacklistRow,
   CommandRow,
+  FeishuQRStatus,
+  FeishuTestResult,
   GeoIPStatus,
   GeoIPUpdateAccepted,
   ImportStats,
@@ -409,6 +411,29 @@ export function getSettings(): Promise<SettingsResponse> {
 
 export function putSettings(settings: Record<string, string>): Promise<{ ok: boolean }> {
   return request('/api/settings', { method: 'PUT', body: { settings } });
+}
+
+// --- 飞书 notifications (design §15, scan-to-add onboarding) -----------------
+
+export function startFeishuQR(): Promise<FeishuQRStatus> {
+  return request('/api/settings/feishu/qr', { method: 'POST' });
+}
+
+export function getFeishuQR(): Promise<FeishuQRStatus> {
+  return request('/api/settings/feishu/qr');
+}
+
+export function cancelFeishuQR(): Promise<FeishuQRStatus> {
+  return request('/api/settings/feishu/qr', { method: 'DELETE' });
+}
+
+/** ok=false carries a code (+ upstream detail) the card renders inline. */
+export function testFeishu(): Promise<FeishuTestResult> {
+  return request('/api/settings/feishu/test', { method: 'POST' });
+}
+
+export function clearFeishuConfig(mode: 'app' | 'webhook'): Promise<{ ok: boolean }> {
+  return request(`/api/settings/feishu/config?mode=${mode}`, { method: 'DELETE' });
 }
 
 export type ServerTheme = 'light' | 'dark' | 'system';
