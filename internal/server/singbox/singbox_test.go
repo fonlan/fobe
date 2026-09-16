@@ -155,8 +155,21 @@ func TestRenderNodes(t *testing.T) {
 	if len(outs) != 2 {
 		t.Fatalf("json items = %d, want 2", len(outs))
 	}
-	if outs[0]["tag"] != "fobe-abc" || outs[1]["tag"] == outs[0]["tag"] {
-		t.Fatalf("tags must be unique per node: %s", j)
+	// §10 实现修订 2026-09-16: tags come from the node *name* (so a template can
+	// write selector/urltest groups and route.final), disambiguated on repeats.
+	if outs[0]["tag"] != "fobe-东京 01" || outs[1]["tag"] != "fobe-东京 01-2" {
+		t.Fatalf("tags must be name-derived and unique: %s", j)
+	}
+
+	// a probe without a name keeps its id as the tag base
+	anon := []ProxyNode{{ID: "xyz", Server: "203.0.113.8", Port: 20004, Password: "pw",
+		CertPEM: "-----BEGIN CERTIFICATE-----\nC\n-----END CERTIFICATE-----\n"}}
+	aj, err := RenderNodesJSON(anon)
+	if err != nil {
+		t.Fatalf("render json (unnamed): %v", err)
+	}
+	if !strings.Contains(aj, `"tag": "fobe-xyz"`) {
+		t.Fatalf("unnamed node must fall back to its id: %s", aj)
 	}
 
 	y := RenderNodesYAML(nodes)

@@ -37,19 +37,47 @@ type sbNodeOutbound struct {
 	TLS        sbNodeTLS `json:"tls"`
 }
 
+// nodeName is the human-readable half of both renderers' identifiers: the node
+// name, or the node id when the probe never got one.
+func nodeName(n ProxyNode) string {
+	if n.Name == "" {
+		return n.ID
+	}
+	return n.Name
+}
+
+// nodeTag builds a sing-box outbound tag: "fobe-<name>", with "-2", "-3"
+// appended for repeated names (same disambiguation rule as the Clash renderer,
+// different separator because a JSON string has no comment character to dodge).
+//
+// Deriving the tag from the *name* rather than the random node id is what makes
+// a sing-box template able to write selector/urltest groups and route.final at
+// all — with `fobe-<id>` there was no way to know the tags in advance
+// (§10 实现修订 2026-09-16). The cost: existing clients that pinned tags in
+// their own config re-fetch the subscription, which is what a subscription is
+// for.
+func nodeTag(name string, seen map[string]int) string {
+	seen[name]++
+	if c := seen[name]; c > 1 {
+		return fmt.Sprintf("fobe-%s-%d", name, c)
+	}
+	return "fobe-" + name
+}
+
 // RenderNodesJSON renders {{nodes}} for sing-box templates: a comma-joined
 // list of anytls outbound objects (no enclosing brackets — the template owns
 // the surrounding JSON structure). Each node pins the probe certificate and
-// never sets insecure=true.
+// never sets insecure=true. Tags are `fobe-<node name>`.
 func RenderNodesJSON(nodes []ProxyNode) (string, error) {
 	items := make([]string, 0, len(nodes))
+	seen := map[string]int{}
 	for _, n := range nodes {
 		if n.Server == "" || n.Port <= 0 || n.CertPEM == "" {
 			continue // cannot render a securely pinned outbound without these
 		}
 		raw, err := json.MarshalIndent(sbNodeOutbound{
 			Type:       "anytls",
-			Tag:        "fobe-" + n.ID,
+			Tag:        nodeTag(nodeName(n), seen),
 			Server:     n.Server,
 			ServerPort: n.Port,
 			Password:   n.Password,
@@ -80,10 +108,7 @@ func RenderNodesYAML(nodes []ProxyNode) string {
 		if n.Server == "" || n.Port <= 0 || n.CertPEM == "" {
 			continue
 		}
-		name := n.Name
-		if name == "" {
-			name = n.ID
-		}
+		name := nodeName(n)
 		seen[name]++
 		if c := seen[name]; c > 1 {
 			name = fmt.Sprintf("%s #%d", name, c)
