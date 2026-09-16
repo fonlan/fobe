@@ -300,6 +300,79 @@ func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, versi
 	return nil
 }
 
+// SyncSingboxConfigs regenerates the stored config of every managed node whose
+// bytes no longer match what the current template produces, and pushes it.
+//
+// A node's config is written once per change and then kept in
+// `singbox_config:<node_id>`; nothing re-derives it. That is fine while the
+// generator is stable, but when generation itself changes — as it did when the
+// address-based DNS section had to go (§9.4 实现修订 2026-09-16) — every
+// existing node keeps receiving the stale bytes for good: the agent compares
+// hashes, finds disk == desired, and has no reason to rewrite the file, so the
+// operator's only way out is "click install again". A template bug must not
+// need that. Startup-only and idempotent: nodes already on the current template
+// are skipped, so an ordinary restart rewrites nothing.
+func (s *Server) SyncSingboxConfigs() int {
+	password, ok := s.GetDecryptedSetting("anytls_password")
+	if !ok || password == "" {
+		return 0 // no shared password = no managed config to rebuild
+	}
+	targets, err := s.Store.ListSingboxTargets()
+	if err != nil {
+		s.Log.Warn("singbox config sync: list targets", "err", err)
+		return 0
+	}
+	updated := 0
+	for _, t := range targets {
+		sb, err := s.Store.GetNodeSingbox(t.NodeID)
+		if err != nil {
+			continue
+		}
+		config, err := singbox.BuildNodeConfig(sb.Port, password)
+		if err != nil {
+			// A port the template refuses (never assigned, or out of range) is
+			// not this pass's business; the next operator change fixes it.
+			s.Log.Warn("singbox config sync: build", "node", t.NodeID, "port", sb.Port, "err", err)
+			continue
+		}
+		if stored, err := s.Store.GetSetting("singbox_config:" + t.NodeID); err == nil && stored == string(config) {
+			continue
+		}
+		if err := s.Store.SetSetting("singbox_config:"+t.NodeID, string(config), false); err != nil {
+			s.Log.Warn("singbox config sync: persist", "node", t.NodeID, "err", err)
+			continue
+		}
+		old := sb.ConfigHash
+		sb.ConfigHash = singbox.ConfigHash(config)
+		if err := s.Store.UpsertNodeSingbox(sb); err != nil {
+			s.Log.Warn("singbox config sync: upsert", "node", t.NodeID, "err", err)
+			continue
+		}
+		s.Store.InsertAudit(&store.AuditEntry{
+			Actor: "system", NodeID: t.NodeID, Action: "singbox_config_sync",
+			Command: shortHash(old) + " -> " + shortHash(sb.ConfigHash),
+		})
+		s.pushDesired(t.NodeID)
+		updated++
+	}
+	if updated > 0 {
+		s.Log.Info("singbox config sync: regenerated stale node configs", "nodes", updated)
+	}
+	return updated
+}
+
+// shortHash keeps audit lines readable; the full fingerprint lives in
+// node_singbox.config_hash and in the setting itself.
+func shortHash(h string) string {
+	if h == "" {
+		return "-"
+	}
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
 // pushDesired sends the current desired state to an online agent. Offline
 // nodes receive it inside hello_ack after reconnect (§7) — nothing to replay.
 // It reports whether the frame reached a connected agent (false covers both

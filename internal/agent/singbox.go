@@ -256,7 +256,17 @@ func (m *singboxManager) converge() {
 			m.report(d, act.version, true, "", pair)
 			return
 		}
-		// right version, right config, just not running: start and verify
+		// Right version, right config, just not running: gate ① still runs.
+		// Skipping it here is how a config sing-box refuses to *load* — the
+		// removed address-based DNS section (§9.4) — camped on disk for good:
+		// the file never changed, so the change path (the only caller of
+		// `check`) was never entered, and every round reported gate ③'s
+		// "process exited" instead of the reason. Nothing has been replaced at
+		// this point, so a failure needs no rollback.
+		if err := checkConfig(bin, configPath); err != nil {
+			m.report(d, act.version, false, err.Error(), pair)
+			return
+		}
 		if err := m.start(bin, configPath); err != nil {
 			m.report(d, act.version, false, err.Error(), pair)
 			return
@@ -318,13 +328,9 @@ func (m *singboxManager) apply(bin, configPath string, d *protocol.SingboxDesire
 			return fmt.Errorf("write config: %w", err)
 		}
 	}
-	if _, err := os.Stat(configPath); err != nil {
-		return fmt.Errorf("no config to check: %w", err)
-	}
-
 	// gate ①: the config must parse before anything touches the running service
-	if out, err := runCmd(bin, checkTimeout, "check", "-c", configPath); err != nil {
-		return fmt.Errorf("config check: %w: %s", err, tailStr(out, 200))
+	if err := checkConfig(bin, configPath); err != nil {
+		return err
 	}
 
 	// gate ②: write/refresh the service definition and start
@@ -406,6 +412,20 @@ func singboxState(d *protocol.SingboxDesired, version string, running bool, last
 		CertNotAfter: pair.NotAfter,
 		LastError:    lastErr,
 	}
+}
+
+// checkConfig is gate ① (§9.2): the config must parse before anything touches
+// the running service. It is a gate of its own because both paths that start
+// sing-box have to pass it — the change path and the "already on target, just
+// not running" path.
+func checkConfig(bin, configPath string) error {
+	if _, err := os.Stat(configPath); err != nil {
+		return fmt.Errorf("no config to check: %w", err)
+	}
+	if out, err := runCmd(bin, checkTimeout, "check", "-c", configPath); err != nil {
+		return fmt.Errorf("config check: %w: %s", err, tailStr(out, 200))
+	}
+	return nil
 }
 
 // report assembles the reportable state and publishes it, attaching the

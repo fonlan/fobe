@@ -701,3 +701,53 @@ func TestReportOnlyKeepsFailureReasonOffTarget(t *testing.T) {
 		t.Fatalf("a new desired version must drop the previous reason, got %q", m.lastErr)
 	}
 }
+
+// Gate ① must run on the "already on the target version, just not running"
+// path too. Skipping it there let a config sing-box refuses to load camp on
+// disk forever: the file never changed, so the change path — the only caller of
+// `check` — was never entered, and every round reported gate ③'s "process
+// exited during observation window" instead of the real reason.
+func TestConvergeChecksConfigBeforeStartingExistingVersion(t *testing.T) {
+	dir := t.TempDir()
+	service.SetWorkDir(dir)
+	defer service.SetWorkDir(service.SingboxWorkDir)
+
+	// A fake binary that answers `version` with the desired version and refuses
+	// `check` exactly like sing-box 1.15 does for the removed DNS format.
+	fake := "#!/bin/sh\ncase \"$1\" in\n" +
+		"version) echo \"sing-box version 1.15.0-alpha.4\" ;;\n" +
+		"check) echo 'legacy DNS server formats are deprecated' >&2; exit 1 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(dir, "sing-box"), []byte(fake), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+	cfg := []byte(`{"log":{"level":"warn"}}`)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), cfg, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	m := newSingboxManager(&Config{ServerURL: "http://127.0.0.1:1"}, testLogger())
+	d := &protocol.SingboxDesired{Version: "1.15.0-alpha.4", Port: 22039, ConfigJSON: string(cfg)}
+	m.SetDesired(d)
+	m.converge()
+
+	st := m.Snapshot()
+	if st == nil {
+		t.Fatal("no state reported")
+	}
+	if !strings.Contains(st.LastError, "config check") {
+		t.Fatalf("last_error = %q, want the gate ① verdict", st.LastError)
+	}
+	if st.Running {
+		t.Fatal("a config that fails check must never be reported as running")
+	}
+}
+
+// checkConfig reports a missing config instead of running the binary, so gate ①
+// is honest on a probe that has none.
+func TestCheckConfigMissingFile(t *testing.T) {
+	err := checkConfig("/nonexistent/sing-box", filepath.Join(t.TempDir(), "config.json"))
+	if err == nil || !strings.Contains(err.Error(), "no config to check") {
+		t.Fatalf("err = %v, want no-config error", err)
+	}
+}

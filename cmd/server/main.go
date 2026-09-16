@@ -286,6 +286,13 @@ func runServer() {
 	// stopped (the deadline is persisted with the job).
 	api.SingboxUpdater().Start(bgCtx)
 
+	// §9.1: a node's config is generated once and then cached in settings, so a
+	// change to the *generator* would otherwise never reach existing nodes —
+	// they would keep pushing the stale bytes and the agent (which only
+	// compares hashes) would have no reason to rewrite the file. Rebuild what
+	// no longer matches the current template, before anyone can be served.
+	api.SyncSingboxConfigs()
+
 	addr := env("FOBE_LISTEN", "0.0.0.0:8080")
 	srv := &http.Server{
 		Addr:              addr,
