@@ -109,6 +109,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 - **更新面板**：`docker compose pull && docker compose up -d`——探针会按 0–5 分钟错峰自动跟随服务端版本（双向跟随，服务端回退探针也回退），数据都在 `data/` 卷里，重建容器不丢。
 - **卸载某台服务器的 sing-box**：设置 → 服务器 → 编辑 → 「sing-box 服务端」卡片点 **卸载 sing-box**（二次确认）。卸载是**期望状态**而不是一次性命令：探针离线时也照样记着，重连后自动停服并删掉服务单元、二进制、配置与自签证书。该节点随即从订阅里消失，之后的「批量更新 sing-box」也会跳过它；想重新启用就再点安装，入站端口沿用原来的（证书会重新签发，客户端需重拉订阅）。
+- **端口转发（nftables）**：设置 → 服务器 → 编辑 → 「端口转发（nftables）」卡片里增删改探针上的转发规则。布局与 [nfpf.sh](https://github.com/fonlan/nfpf) 完全相同（`table ip nat` 的 `prerouting` DNAT + `postrouting` masquerade），所以**用那个脚本或手工 `nft` 加过的规则也会出现在这里，并且能在这里改**。列表默认读最近一次上报（探针离线也能看），点「从探针刷新」会立刻问一次探针；改动是在线探针一次往返内生效，离线则入队（10 分钟内探针上线后自动执行）。首次添加会自动建表建链、打开内核 IPv4 转发，并把规则写进 `/etc/nftables.conf`（与 nfpf.sh 相同的持久化文件——**手工维护过该文件的注意，它会被实况覆盖**）。备注（comment）会写进规则本身，位置与 nfpf.sh 相同；双引号在 nft 字符串语法里没有转义写法，因此备注不允许含双引号（反斜杠按原样保存）。**若保存后备注为空**，说明链路里还有旧二进制（面板后端或探针 agent 是加备注字段之前的构建，Go 会静默忽略未知字段）：重启后端（`scripts/dev.sh` 起的话必须重启，后端不热更）、并让探针更新到当前 agent 后重存一次——现在这种情况会在卡片上给出明确提示，不再静默。
 - **出订阅**：订阅与模板页创建订阅后得到 `/sub/<token>` 链接，填进客户端即可拉取；链接**随时可在订阅行点「链接」再次查看/复制**，不是只显示一次。模板决定输出结构：`{{nodes}}` 注入节点，`{{rules}}` 注入同页「路由规则」卡片里对应格式的片段（片段自带 `-` 与缩进，模板只管外层的键）。订阅行还能绑定模板（不绑、或模板格式与客户端请求的格式不一致时用内置默认模板）；轮换 Token 会让旧链接立即失效。
 - **备份**：整机状态就是 `data/` 一个目录（数据库、主密钥、GeoIP 库、产物缓存、快照），停服后拷走即可。快照默认开启（启动即拍 + 每 24h 一轮 + 迁移前必拍，保留 3 份）；恢复 = 停服后用快照替换 `data/fobe.db`。
 - **登录失败自锁自救**：`docker compose exec server fobe-server admin unblock all`。
@@ -130,6 +131,7 @@ cd web && npm run build     # 前端 tsc 类型检查 + 构建
 - 不用 dev.sh 时手动各起一个进程：后端 `FOBE_MASTER_KEY=dev-key-not-for-prod FOBE_DB=./data/dev.db go run ./cmd/server`（不设 `FOBE_WEB_DIR` 即 API-only 模式，`/api`、`/ws`、`/sub`、`/install.sh`、`/dl` 行为与生产完全一致）；前端 `cd web && npm install && npm run dev`（Vite 已代理上述路径，其中 `/ws` 的 `ws: true` 不能漏）。
 - 本机出镜像：`docker compose up -d --build`；不出容器用 `scripts/build.sh [outdir]` 产三件套（server、linux/amd64 agent + manifest、web dist）。
 - 发版：推 `v*` tag，CI 跑完测试自动构建镜像推到 GHCR（[`.github/workflows/release.yml`](.github/workflows/release.yml)）。
+- 端口转发的真机验证（需要 root 与可抛弃环境，会清空 `table ip nat`）：`docker run --rm --privileged -v "$PWD":/src -w /src golang:1.25 sh -c 'apt-get update -qq && apt-get install -y -qq nftables >/dev/null && FOBE_NFT_TEST=1 go test ./internal/agent -run TestForwardsNftKernel -v'`。
 - 本地装探针时 `--server` 要填**探针能访问到的地址**（局域网 IP 或内网穿透域名），不是 `127.0.0.1`。
 
 ## 环境变量

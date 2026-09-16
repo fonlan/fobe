@@ -299,12 +299,12 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | | `metrics` | 60s 一次；面板打开详情页时服务端可请求 5s 实时流 |
 | | `traffic` | 60s 一次：选定网卡的累计计数 + 日增量 |
 | | `latency` | 60s 一次批量；本地采样点数量按 `latency.interval_seconds`（默认 5s）变化 |
-| | `state` | 节点信息、IP/网卡清单、sing-box 实际状态 |
+| | `state` | 节点信息、IP/网卡清单、sing-box 实际状态、nftables 端口转发清单（§21，`forwards`，**旧 agent 不带该字段**） |
 | | `cmd_result` | 指令执行结果（stdout/stderr/exit code，截断） |
 | | `terminal` | 终端输出/关闭 |
 | server → agent | `hello_ack` | 期望状态全量下发（含流量网卡选择、`agent_target_version` / `agent_update_after`，§5.5） |
 | | `desired` | 增量下发期望状态（流量网卡、sing-box 版本/配置/端口/密码/证书要求、以及 `singbox.uninstall` 卸载声明，§9.2 实现修订 2026-09-16） |
-| | `cmd` | 一次性命令（AI 执行、面板操作） |
+| | `cmd` | 一次性命令（AI 执行、面板操作、§21 端口转发编辑：`nft_forwards`，结果为 stdout 里的 `ForwardsResult` JSON） |
 | | `terminal_open/input/resize/close` | 终端会话 |
 | | `probe_metrics` | 请求临时高频指标采集 5s |
 | | `latency_config` | 立即更新本地延迟测量频率（全局设置变更时推送） |
@@ -707,6 +707,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - **详情页「命令」卡片移除（实现修订 2026-09-16）**：面板不再提供对探针的任意 shell 下发入口——前端命令卡片与 `POST /api/nodes/{id}/commands` 路由一并删除。指令队列本体（`commands` 表、`enqueueCommand`、离线排队与幂等）保留：AI 执行（§12）与面板动作（sing-box 启停/重启）仍走同一条队列与审计；`GET /api/nodes/{id}/commands` 保留，供 AI 面板轮询执行结果。取舍：普通面板用户少一个"顺手敲 shell"的危险面，命令执行的入口收敛到 AI 确认流（§12.3）。
 - **基本信息新增「发行版」（2026-09-16）**：agent 读 `/etc/os-release`（回退 `/usr/lib/os-release`，仍只做文件读取，遵守不调外部命令的约定）取 `ID` + `VERSION_ID`，随 `hello` 与注册请求上报，落 `nodes.distro_id / distro_version`（增量迁移，`SchemaVersion=2`）；详情页基本信息显示「Debian 13」式标签与自绘发行版徽标（内联 SVG、自托管，不引 CDN）。OpenWrt 衍生系统（iStoreOS、ImmortalWrt 等）改写 `ID` 但保留 `ID_LIKE="lede openwrt"`，按 `ID_LIKE` 归一化为 openwrt，并在 os-release 缺失时回退 `/etc/openwrt_release`。没有 `VERSION_ID` 的滚动发行版（如 Arch）只显示名称；未知 ID 回退首字母徽标，旧 agent 未上报时显示 `-`。
 - **详情页「AnyTLS 端口」卡片（2026-09-16）**：基本信息网格在 **sing-box 已启用**（`desired_version` 非空）时多一张 `AnyTLS 端口` 卡片，显示入站端口（副标题为当前版本），数据来自 `GET /api/nodes/{id}` 已在返回的 `singbox` 对象——不额外发请求。未启用、或已被卸载（`desired_version=''`）时不渲染：那时端口字段不再指向任何在跑的东西。编辑服务器页的 sing-box 卡片同步新增「卸载 sing-box」按钮（二次确认，见 §9.2 实现修订）：卸载下发后探针在线时每 5s 重读一次状态（与"安装中"同一条轮询），离线则如实提示"卸载已记录,重连后执行"。
+- **端口转发卡片（实现修订 2026-09-16，§21）**：编辑服务器页新增「端口转发（nftables）」卡片，列出探针 `ip nat prerouting` 里所有 DNAT 规则——**包括 nfpf.sh 或手工命令加的**——并可增删改。列表默认读服务端快照（打开页面不阻塞探针、离线也能看），「从探针刷新」按钮才走一次实况往返；改动手感是同步的：在线探针一次往返内返回新规则集，离线/超时则如实提示「已入队，探针上线后执行（10 分钟内有效）」并每 5s 重读快照直到探针回答。规则带面板不建模的匹配条件（源地址、计数器、端口范围）时只允许查看与删除，编辑按钮禁用并给出原因提示。备注（comment）可写，写在 DNAT 规则上、位置与 nfpf.sh 相同；双引号在 nft 字符串语法里无法表示，因此被拒绝（见 §21.3）。保存后若备注为空，agent 会回报 `comment_not_applied`，卡片按 §21.6 给出"agent/后端是旧二进制"的红字提示，不静默。
+
 - **审计日志独立成页（2026-09-16）**：审计从基础设置页的卡片移出，成为设置的子页 `/settings/audit`（子导航入口「审计日志」），表格结构与 `GET /api/audit` 的其余字段不变。节点列显示节点名称而非 ID：`ListAudit` 读取时 `LEFT JOIN nodes` 带出 `node_name`（`COALESCE` 成空串，避免无节点记录的 NULL 扫描错误），改名后的历史记录显示当前名称，节点已删除时前端回退显示原始 ID；审计表本身不回写，无 schema 变更。
 - 实时（2026-09-15 修订）：`/ws/events` 只覆盖状态类变化（节点增删改、sing-box、订阅、设置、GeoIP）——**常规指标上报不产生任何事件**，所以数据新鲜度必须靠「轮询 + 高频上报」两条腿：
   - **概览**：挂载且标签页可见期间，对每个在线节点打开 §16 的 5s 探测流，并 5s 拉一次列表。打开探测流是必要的：不打开就只能等 60s 基线节奏，卡片墙看起来像「不自动更新」。
@@ -836,4 +838,101 @@ services:
 9. ⚠ **服务端版本号成了对外契约**：随便打一个版本号（含把 `VERSION` 改成别的时间戳）就等于让**全部探针换一次二进制**，而降级路径是自动化测试里最容易缺的那条。发版前想清楚这个数字。
 10. ⚠ **混版窗口**：升级/降级过渡期一定是混版。承诺是"同大版本内双向兼容（新增字段可选、未知帧忽略）"，**不保证行为等价**。
 11. ⚠ **DL 目录是产物单点**：`data/` 没挂载成持久卷（被重建容器清空）或换了机器，全部探针会停在原地并告警——fail-closed 不会把探针搞砖，但也绝不会跟上，直到你把产物补齐。
+13. ⚠ **面板整文件重写 `/etc/nftables.conf`（§21）**：端口转发的持久化沿用 nfpf.sh 的做法——`nft list ruleset` 的实况快照整个写进该文件，并按需 `systemctl enable nftables`、写 `net.ipv4.ip_forward=1`。手工维护这个文件的人要注意：下一次在面板里增删改转发规则时，文件会被实况覆盖（注释头写明来源）。不想被覆盖就别让面板管转发，或把持久化交给别的文件（面板不读该文件，只写）。
 12. ⚠ **主密钥与密文同卷**（实现修订 2026-09-15，§4.4/§19.13）：零输入部署把自动生成的主密钥放在 `/data/.master_key`，与它加密的设置同一个挂载卷——能读卷的人（宿主机 root、备份文件拿到手的人）就能解密 AI key / Bot Token。换来的是不填任何变量即可启动。不接受这个代价：显式设置 `FOBE_MASTER_KEY`（env / secret），入口脚本就完全不碰磁盘。
+
+---
+
+## 21. nftables 端口转发（2026-09-16 新增）
+
+**需求**：在「编辑服务器」页管理探针所在服务器的 nftables 端口转发，**与 [fonlan/nfpf](https://github.com/fonlan/nfpf) 的 `nfpf.sh` 兼容**，并且要能识别、编辑、删除**脚本或手工添加的既有规则**。
+
+### 21.1 为什么是命令，而不是期望状态
+
+全项目的主线是声明式期望状态（§7），这里刻意反过来：**探针的 ruleset 是唯一事实来源，面板只做一次性的定向事务**。
+
+- ruleset 是**共享**的：nfpf.sh、手工 `nft`、别的面板都可能往里加规则。若把面板维护的清单当成"完整期望状态"去收敛，agent 就必须删掉自己不认识的规则——那正是"识别 nfpf.sh 规则"的反面。
+- 因此：读 = 解析实况（`state` 帧随带上报，或面板主动要求一次 `list`）；写 = 一条 `nft_forwards` 命令（add / update / delete），agent 在一个 `nft -f -` 事务里改完，立即把新规则集回给面板与 `state` 通道。
+- 命令仍是 §7 的离线队列：探针离线时入队（TTL 10 分钟），上线后执行；面板在此期间显示"已入队"，并每 5s 重读快照等它回答。旧 agent 不认识这个 kind，回 `unsupported command kind: nft_forwards`，面板据此提示"agent 版本过旧"（`forward_agent_unsupported`）。
+
+> 顺带修掉一个老问题：`Hub.NotifyCommand` 原本往一个**没人读**的 `Conn.notify` 通道里塞信号（命令只能等 `PumpCommands` 的 2s 轮询），现在改成 hub 级 `wake` 通道，`PumpCommands` 的 `select` 立即被唤醒——面板动作（含本节的转发编辑）从"最多 2s 才送达"变成即时。
+
+### 21.2 与 nfpf.sh 的兼容点（逐条对齐）
+
+| 项 | nfpf.sh | 本节实现 |
+|---|---|---|
+| 表/链 | `table ip nat` + `prerouting`(hook prerouting, prio -100) + `postrouting`(hook postrouting, prio 100) | 完全相同；缺失时按同样参数自动创建（首次添加即初始化，等价于脚本的 `init_nftables`） |
+| DNAT 规则 | `[iifname "X" ]<tcp\|udp> dport <src> dnat to <ip>:<port>` | 完全相同（同一事务里追加） |
+| 回程规则 | `ip daddr <ip> <proto> dport <port> masquerade`，**每条转发各一条** | 完全相同：每条转发配一条；同目标被多条转发共用时**按条数**删除，不会删掉幸存转发还需要的那条（脚本的文本删除会一次删光同目标的所有 masquerade） |
+| 持久化 | `nft list ruleset > /etc/nftables.conf` + `systemctl enable nftables` | 相同文件、相同内容形状（前面加两行注释头，仍是合法 `nft -f` 输入）；服务启用改为按需、幂等 |
+| 内核转发 | `enable_ip_forward`：`/etc/sysctl.conf` 追加 `net.ipv4.ip_forward=1` + `sysctl -p` | 功能等价：直接写 `/proc/sys/net/ipv4/ip_forward` 立即生效，并在 `/etc/sysctl.conf` **没有生效行时**才追加（脚本会重复追加） |
+| 注释 | `dnat to` 之后跟 `comment "…"`，经 `nft -f` 生效 | 完全相同的位置与写法；双引号无法表示（nft 字符串无转义）故拒绝 |
+| 冲突语义 | 同 proto+src_port 冲突，除非两条规则各自指定了**不同**的 `iifname` | 完全相同（面板与脚本必须对"这个端口被占了"有一致答案） |
+| 删除方式 | `nft flush ruleset` + 文本重写后整体重载 | **改按 handle 精确删除**：`flush ruleset` 会瞬时丢掉全部转发，还会抹掉别的工具（如 fw4/docker）的运行时状态——这是我们与脚本唯一的实质分歧，方向是更安全 |
+| 识别既有规则 | `grep "dnat to"` + 正则 | 优先 `nft -j`（JSON，精确到表达式）；老 nft 无 JSON 时回退文本正则（只认上面那种行形状） |
+
+### 21.3 注释（comment）：可写，但只有 `nft -f` 这条路
+
+先说踩过的坑：**命令行形式 `nft add rule ... comment "x"` 会报语法错误**，因为引号是**调用它的 shell** 吃掉的，nft 收到的是 `comment x`（两个裸词）。nfpf.sh 把规则写进临时文件再 `nft -f`，引号原样到达 nft，注释完全合法——所以脚本的注释功能是有效的。（第一次验证时正是踩了这个坑，误判成"dnat 是终结语句、注释写不进去"，实测 nft 0.9.3 / 1.0.6 / 1.0.9 / 1.1.6 上 `... dnat to 1.2.3.4:80 comment "web"` 经 `nft -f` 一律成功。）
+
+实现按这个事实来：
+
+- 注释写在 DNAT 规则上，位置与 nfpf.sh 一致（`dnat to` 之后）；panel 的脚本只经 `nft -f -`（stdin）送进 nft，永不经 shell。
+- **`"` 无法表示**：nft 的字符串字面量没有转义写法（`\` 也只是普通字符，原样存储、原样打印，实测确认），所以注释里出现双引号一律拒绝（`bad_comment` / `err_bad_comment`），而不是"帮用户转义"。
+- 换行/制表/控制字符同样拒绝（会把脚本行拆断）；长度上限 128 字符（对齐 nfpf.sh 的 `validate_comment`）。
+- 注释是 **rule 对象的字段**（`{"rule": {..., "comment": "x", "expr": [...]}}`），不是 expr 里的一项；解析以它为准，文本回退路径也认 `comment "…"` 后缀。
+
+### 21.4 只读规则（`extra_match`）
+
+带面板不建模的匹配条件（`ip saddr`、`counter`、端口范围/集合、`meta l4proto` 等）的 DNAT 规则**照常列出**（这是"识别既有规则"的一部分），但标 `extra_match`：面板拒绝编辑（改写会静默丢掉那些条件），允许删除（按 handle 精确删，不会误伤）。IPv6（`table ip6 nat`）、端口范围、多端口集合都不在 v1 范围——nfpf.sh 同样只做 IPv4 单端口。
+
+### 21.5 数据模型与接口
+
+- 快照表 `node_forwards`（每次上报整体替换；规则顺序保留）+ 状态表 `node_forward_status`（`supported/initialized/code/message/reported_at`）。`SchemaVersion` 8 → 9（增量，降级安全：老二进制按列名查，两张新表它根本不看）。
+- 表只是**缓存**：探针的 ruleset 才是事实。所以删除只发生在本面板，且被删除的规则若仍在探针上，下一次上报会把它带回来——这是有意的（"面板不是权威，探针才是"）。
+- 接口（全部 `requireSession`，错误码 snake_case，文案在 `i18n`）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/nodes/{id}/forwards` | 读快照；`?live=1` 则向探针要一次实况（离线/超时返回 `queued:true` 与已有快照，不报错） |
+| POST | `/api/nodes/{id}/forwards` | `{rule:{proto,src_port,iface,dst_ip,dst_port}}` 新增 |
+| PUT | `/api/nodes/{id}/forwards` | `{old,rule}` 替换（agent 侧一个事务完成 delete+add，失败则老规则原样保留） |
+| DELETE | `/api/nodes/{id}/forwards` | `{rule}` 删除（含配对 masquerade） |
+
+- 错误码映射：agent 的 `conflict/not_found/ambiguous/bad_*/need_root/nft_missing/chain_mismatch/nft_failed` → `forward_conflict`(409) / `forward_not_found`(404) / `forward_ambiguous`(409) / `bad_forward`(400) / `forward_need_root` / `forward_nft_missing` / `forward_chain_mismatch`(400) / `forward_failed`(502)。服务端只做廉价的形状校验（协议、端口范围、IPv4、接口名长度），**权威校验在 agent**——它才看得见探针上的实际规则。
+- 每次执行都落审计：入队时 `cmd:nft_forwards`（含 payload），成功后另记 `forward_add/update/delete` + 人类可读的 `tcp/8080@eth0 -> 10.0.0.1:80`。
+- 面板一条规则的身份是 `(proto, src_port, iface, dst_ip, dst_port)`，并**优先用 handle 定位**：ruleset 重载会重编号 handle，所以 handle 必须与其余字段同时匹配才生效（否则用元组兜底；元组命中了多条则拒绝猜测，回 `forward_ambiguous`）。
+
+### 21.6 写后校验（2026-09-16 修订：不许静默丢字段）
+
+"保存成功但备注是空的"这个症状查过一次，根因是**链路里有旧二进制**：面板后端或探针 agent 若来自加入备注字段之前的构建，Go 的 JSON 解码会**静默忽略**未知字段——规则照样写进去，备注凭空消失，任何地方都不报错（`decodeJSON` 不设 `DisallowUnknownFields`，这正是兼容旧前端的代价）。
+
+既然"静默"本身是缺陷，agent 现在**校验自己的写入结果**：新增/编辑成功后，拿实况规则集与请求逐项比对，对不上就回报 warning（规则已生效，所以不是错误）：
+
+| warning | 含义 | 面板 |
+|---|---|---|
+| `comment_not_applied` | 规则在、备注不在——探针 agent（或后端）太旧，不认识备注字段 | 红字提示"让探针跟随服务端更新或重装 agent 后重试" |
+| `write_not_applied` | 实况里找不到这条规则 | 红字提示"点从探针刷新核对" |
+
+未知 warning 按 `fw_warn: <原文>` 原样显示，不丢信息。
+
+### 21.7 验证
+
+- 单测：`internal/agent/forwards_test.go`（用 nft 1.0.6 在容器里跑出来的真实 JSON/文本输出做 fixture，覆盖解析、冲突、事务脚本、masquerade 计数、`ip_forward`）。
+- 端到端（真 kernel，需 root + 可抛弃环境）：
+
+```bash
+docker run --rm --privileged -v "$PWD":/src -w /src golang:1.25 sh -c \
+  'apt-get update -qq && apt-get install -y -qq nftables >/dev/null && \
+   FOBE_NFT_TEST=1 go test ./internal/agent -run TestForwardsNftKernel -v'
+```
+
+  它先按 nfpf.sh 的写法建表建链建规则，再验证面板能识别、能改目标、能删除其中一条而不动另一条要用的 masquerade，最后确认写出的 `/etc/nftables.conf` 能被 `nft -c -f` 接受。
+- 面板链路：`internal/server/httpapi/forwards_test.go`（模拟 agent 的 WS 会话，覆盖 live/queued/旧 agent/错误码映射/离队入队）。
+
+### 21.8 已知边界
+
+- 只有 IPv4、单端口、tcp/udp（nfpf.sh 同）；IPv6 与范围转发留给后续。
+- 探针 agent 必须先更新到带 §21 的版本，否则面板只能显示"版本过旧"（§5.5 自更新或重装）。
+- 面板新增的规则**没有来源标记**：nftables 里没有可靠的"这是我加的"字段（注释是用户可见的备注，不该被面板征用），所以列表不区分来源。这是有意的——所有 DNAT 规则都可读可删，来源标记只会给出会过期的假信息。
+- 未提供 AI 工具：端口转发会直接改变对外暴露面，v1 只走人工确认的面板路径（要开放给 AI 需按 §12.3 加确认与元操作门）。

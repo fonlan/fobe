@@ -11,7 +11,15 @@ import {
   toDateString,
   toDatetimeLocalInZone,
 } from '../format';
-import type { LatencyTarget, NodeDetailData, SingboxStatus, SingboxVersion } from '../types';
+import type {
+  ForwardsStatus,
+  ForwardRule,
+  LatencyTarget,
+  NodeDetailData,
+  NodeInterface,
+  SingboxStatus,
+  SingboxVersion,
+} from '../types';
 import Flag from '../components/Flag';
 import Tile from '../components/Tile';
 
@@ -91,6 +99,11 @@ export default function EditServer() {
       <section className="card">
         <h3>{t('sb_card')}</h3>
         <SingboxCard nodeId={id} onlineNow={data.online_now} onChanged={() => void load()} />
+      </section>
+
+      <section className="card">
+        <h3>{t('sec_forwards')}</h3>
+        <ForwardsCard nodeId={id} onlineNow={data.online_now} interfaces={data.interfaces ?? []} />
       </section>
 
       <section className="card">
@@ -761,6 +774,382 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
         </button>
       </div>
 
+      {msg && <span className="form-ok">{msg}</span>}
+      {err && <span className="form-error">{err}</span>}
+    </div>
+  );
+}
+
+// --- nftables port forwarding (design §21) ------------------------------------
+
+/** IPv4 only: the whole layout lives in nftables' `table ip` (nfpf.sh too). */
+const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+
+function validPort(raw: string): boolean {
+  if (!/^\d+$/.test(raw.trim())) return false;
+  const n = Number(raw);
+  return n >= 1 && n <= 65535;
+}
+
+function validIPv4(raw: string): boolean {
+  if (!IPV4_RE.test(raw)) return false;
+  return raw.split('.').every((part) => Number(part) <= 255);
+}
+
+/**
+ * Port forwarding lives on the edit page because it is server configuration,
+ * not monitoring. The probe's ruleset is the source of truth: the list is the
+ * last report (so it renders instantly, and while the probe is offline), and
+ * every edit is a one-shot command whose answer replaces it. Rules added
+ * outside the panel — nfpf.sh, hand-written nft — are the same rows here.
+ */
+function ForwardsCard({
+  nodeId,
+  onlineNow,
+  interfaces,
+}: {
+  nodeId: string;
+  onlineNow: boolean;
+  interfaces: NodeInterface[];
+}) {
+  const { t } = useI18n();
+  const [status, setStatus] = useState<ForwardsStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState<ForwardRule | null>(null);
+  // reported_at captured when a command was left queued: while it stays put the
+  // probe has not answered yet, so keep re-reading the (cheap) snapshot.
+  const [awaiting, setAwaiting] = useState<number | null>(null);
+
+  const [proto, setProto] = useState('tcp');
+  const [srcPort, setSrcPort] = useState('');
+  const [iface, setIface] = useState('');
+  const [dstIP, setDstIP] = useState('');
+  const [dstPort, setDstPort] = useState('');
+  const [comment, setComment] = useState('');
+
+  const load = useCallback(
+    async (live = false) => {
+      try {
+        const st = await api.nodeForwards(nodeId, live);
+        setStatus(st);
+        setAwaiting((prev) => (prev !== null && st.reported_at > prev ? null : prev));
+        setErr(null);
+      } catch (e) {
+        setErr(apiErrorMessage(e, t));
+      }
+    },
+    [nodeId, t],
+  );
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    if (awaiting === null) return;
+    const h = window.setInterval(() => void load(), 5000);
+    return () => window.clearInterval(h);
+  }, [awaiting, load]);
+
+  const resetForm = () => {
+    setEditing(null);
+    setProto('tcp');
+    setSrcPort('');
+    setIface('');
+    setDstIP('');
+    setDstPort('');
+    setComment('');
+  };
+
+  const startEdit = (rule: ForwardRule) => {
+    setEditing(rule);
+    setProto(rule.proto);
+    setSrcPort(String(rule.src_port));
+    setIface(rule.iface);
+    setDstIP(rule.dst_ip);
+    setDstPort(String(rule.dst_port));
+    setComment(rule.comment);
+    setMsg(null);
+    setErr(null);
+  };
+
+  const apply = async (fn: () => Promise<ForwardsStatus>, okMsg: string) => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      const st = await fn();
+      setStatus(st);
+      if (st.queued) {
+        setAwaiting(st.reported_at);
+        setMsg(t('fw_queued'));
+      } else {
+        setMsg(okMsg);
+      }
+      resetForm();
+    } catch (ex) {
+      setErr(apiErrorMessage(ex, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refresh = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      const st = await api.nodeForwards(nodeId, true);
+      setStatus(st);
+      if (st.queued) {
+        setAwaiting(st.reported_at);
+        setMsg(t('fw_queued'));
+      } else {
+        setMsg(t('fw_refreshed'));
+      }
+    } catch (ex) {
+      setErr(apiErrorMessage(ex, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // nft string literals have no escapes: a quote in the comment is not a
+  // validation nicety, it is unwritable (the server refuses it too).
+  const formValid =
+    (proto === 'tcp' || proto === 'udp') &&
+    validPort(srcPort) &&
+    validPort(dstPort) &&
+    validIPv4(dstIP.trim()) &&
+    !comment.includes('"');
+
+  const submit = () => {
+    if (!formValid) return;
+    const rule = {
+      proto,
+      src_port: Number(srcPort),
+      iface,
+      dst_ip: dstIP.trim(),
+      dst_port: Number(dstPort),
+      comment: comment.trim(),
+    };
+    if (editing) {
+      const old = {
+        proto: editing.proto,
+        src_port: editing.src_port,
+        iface: editing.iface,
+        dst_ip: editing.dst_ip,
+        dst_port: editing.dst_port,
+        comment: editing.comment,
+        handle: editing.handle,
+      };
+      void apply(() => api.updateNodeForward(nodeId, old, rule), t('fw_saved'));
+    } else {
+      void apply(() => api.addNodeForward(nodeId, rule), t('fw_saved'));
+    }
+  };
+
+  const remove = (rule: ForwardRule) => {
+    const desc = `${rule.proto}/${rule.src_port} -> ${rule.dst_ip}:${rule.dst_port}`;
+    if (!window.confirm(t('fw_delete_confirm', { rule: desc }))) return;
+    void apply(
+      () =>
+        api.deleteNodeForward(nodeId, {
+          proto: rule.proto,
+          src_port: rule.src_port,
+          iface: rule.iface,
+          dst_ip: rule.dst_ip,
+          dst_port: rule.dst_port,
+          comment: rule.comment,
+          handle: rule.handle,
+        }),
+      t('fw_saved'),
+    );
+  };
+
+  const rows = status?.forwards ?? [];
+  const ifaceOptions = interfaces.map((i) => i.name);
+  // A rule may name an interface the probe no longer reports (unplugged NIC):
+  // keep it selectable so editing another field cannot silently drop it.
+  if (iface !== '' && !ifaceOptions.includes(iface)) ifaceOptions.push(iface);
+
+  const stateHint = (() => {
+    if (!status) return null;
+    if (status.reported_at === 0) {
+      return <p className="hint">{status.agent_supported ? t('fw_never_reported') : t('fw_agent_old')}</p>;
+    }
+    if (status.code !== '') {
+      const key = 'fw_state_' + status.code;
+      const text = t(key, { message: status.message });
+      if (text !== key) return <p className="form-error">{text}</p>;
+      return (
+        <p className="form-error">
+          <span className="mono">{status.code}</span>
+          {status.message ? ': ' + status.message : ''}
+        </p>
+      );
+    }
+    if (!status.supported) return null; // no code and unsupported: nothing to say
+    if (!status.initialized) return <p className="hint">{t('fw_first_add_hint')}</p>;
+    if (rows.length === 0) return <p className="hint">{t('fw_empty')}</p>;
+    return null;
+  })();
+
+  return (
+    <div className="stack">
+      <p className="hint">{t('fw_desc')}</p>
+      {stateHint}
+
+      {rows.length > 0 && (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('fw_col_proto')}</th>
+                <th>{t('fw_col_src')}</th>
+                <th>{t('fw_col_iface')}</th>
+                <th>{t('fw_col_dst')}</th>
+                <th>{t('fw_col_note')}</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={`${r.proto}/${r.src_port}/${r.iface}/${r.handle}`}>
+                  <td>{r.proto.toUpperCase()}</td>
+                  <td className="mono">{r.src_port || t('fw_any')}</td>
+                  <td className="mono">{r.iface || t('fw_all_ifaces')}</td>
+                  <td className="mono break-anywhere">
+                    {r.dst_ip}:{r.dst_port}
+                    {r.extra_match && (
+                      <span className="chip chip-muted" title={t('fw_tip_extra_match')}>
+                        {t('fw_extra_match')}
+                      </span>
+                    )}
+                  </td>
+                  <td className="break-anywhere">
+                    {r.comment || <span className="hint">{t('none')}</span>}
+                  </td>
+                  <td>
+                    <div className="row-gap">
+                      <button
+                        type="button"
+                        className="btn small"
+                        disabled={busy || r.extra_match}
+                        title={r.extra_match ? t('fw_tip_extra_match') : undefined}
+                        onClick={() => startEdit(r)}
+                      >
+                        {t('fw_edit')}
+                      </button>
+                      <button type="button" className="btn small danger" disabled={busy} onClick={() => remove(r)}>
+                        {t('delete')}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="row-wrap">
+        <label className="field inline">
+          <span>{t('fw_col_proto')}</span>
+          <select value={proto} onChange={(e) => setProto(e.target.value)}>
+            <option value="tcp">TCP</option>
+            <option value="udp">UDP</option>
+          </select>
+        </label>
+        <label className="field inline">
+          <span>{t('fw_src_port')}</span>
+          <input
+            className="mono"
+            type="number"
+            min={1}
+            max={65535}
+            value={srcPort}
+            placeholder="8080"
+            onChange={(e) => setSrcPort(e.target.value)}
+          />
+        </label>
+        <label className="field inline">
+          <span>{t('fw_col_iface')}</span>
+          <select value={iface} onChange={(e) => setIface(e.target.value)}>
+            <option value="">{t('fw_all_ifaces')}</option>
+            {ifaceOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field inline">
+          <span>{t('fw_dst_ip')}</span>
+          <input className="mono" value={dstIP} placeholder="10.0.0.1" onChange={(e) => setDstIP(e.target.value)} />
+        </label>
+        <label className="field inline">
+          <span>{t('fw_dst_port')}</span>
+          <input
+            className="mono"
+            type="number"
+            min={1}
+            max={65535}
+            value={dstPort}
+            placeholder="80"
+            onChange={(e) => setDstPort(e.target.value)}
+          />
+        </label>
+        <label className="field inline">
+          <span>{t('fw_col_note')}</span>
+          <input
+            value={comment}
+            maxLength={128}
+            placeholder={t('fw_comment_ph')}
+            title={t('fw_comment_hint')}
+            onChange={(e) => setComment(e.target.value)}
+          />
+        </label>
+        <button type="button" className="btn primary" disabled={busy || !formValid} onClick={() => void submit()}>
+          {editing ? t('fw_save') : t('fw_add')}
+        </button>
+        {editing && (
+          <button type="button" className="btn" disabled={busy} onClick={() => resetForm()}>
+            {t('fw_cancel_edit')}
+          </button>
+        )}
+        <button type="button" className="btn" disabled={busy} onClick={() => void refresh()}>
+          {t('fw_refresh')}
+        </button>
+      </div>
+
+      {status && status.reported_at > 0 && status.supported && (
+        <span className="hint">
+          {t('fw_reported_at', { time: fmtTime(status.reported_at) })}
+          {!onlineNow ? ' · ' + t('offline') : ''}
+        </span>
+      )}
+      {(status?.warnings ?? []).map((w) => {
+        // The agent reports advisory codes; the ones the panel knows get a real
+        // explanation (the rest stay as the raw token, prefix and all).
+        const key = 'fw_warning_' + w.split(':')[0].trim();
+        const text = t(key);
+        return (
+          <span key={w} className={text === key ? 'hint' : 'form-error'}>
+            {text === key ? (
+              <>
+                {t('fw_warn')}: <span className="mono">{w}</span>
+              </>
+            ) : (
+              text
+            )}
+          </span>
+        );
+      })}
       {msg && <span className="form-ok">{msg}</span>}
       {err && <span className="form-error">{err}</span>}
     </div>

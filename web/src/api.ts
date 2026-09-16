@@ -9,6 +9,8 @@ import type {
   BlacklistRow,
   CommandRow,
   FeishuQRStatus,
+  ForwardsStatus,
+  ForwardRuleInput,
   NotifyTestResult,
   GeoIPStatus,
   GeoIPUpdateAccepted,
@@ -620,6 +622,31 @@ export function singboxSetPort(id: string, port: number): Promise<{ ok: boolean;
     method: 'PUT',
     body: { port },
   });
+}
+
+// --- nftables port forwarding (design §21) ----------------------------------
+
+/**
+ * The probe's port forwards. Without `live` this reads the server's last
+ * snapshot (instant, works while the probe is offline); with it, the probe is
+ * asked and the answer replaces the snapshot — the way to see rules an external
+ * script (nfpf.sh) added a moment ago.
+ */
+export function nodeForwards(id: string, live = false): Promise<ForwardsStatus> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/forwards${live ? '?live=1' : ''}`);
+}
+
+export function addNodeForward(id: string, rule: ForwardRuleInput): Promise<ForwardsStatus> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/forwards`, { method: 'POST', body: { rule } });
+}
+
+/** Replace one rule. `old` must carry the handle of the rule it replaces. */
+export function updateNodeForward(id: string, old: ForwardRuleInput, rule: ForwardRuleInput): Promise<ForwardsStatus> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/forwards`, { method: 'PUT', body: { old, rule } });
+}
+
+export function deleteNodeForward(id: string, rule: ForwardRuleInput): Promise<ForwardsStatus> {
+  return request(`/api/nodes/${encodeURIComponent(id)}/forwards`, { method: 'DELETE', body: { rule } });
 }
 
 // --- server artifact cache + one-click batch update (design §9.2) -------------

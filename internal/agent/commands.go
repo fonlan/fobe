@@ -94,6 +94,26 @@ func (s *agentSession) runCommand(id, kind string, payload json.RawMessage) prot
 			}
 			_ = json.Unmarshal(payload, &p) // bad/empty payload → default lines
 			res.Stdout = collect.TailSingboxLogs(service.Detect().String(), p.Lines)
+		case protocol.CmdKindNftForwards:
+			// §21: nftables port forwarding. The answer is a JSON
+			// protocol.ForwardsResult in stdout — the panel needs structured
+			// data (the resulting ruleset + a stable error token), and stdout is
+			// the only result channel a command has.
+			out, code := runForwardsCommand(s.fwdEnv, payload)
+			if code != "" {
+				res.Error = code
+				return
+			}
+			// Report the observed truth on the state channel as well: the panel
+			// HTTP call may have timed out or never happened (offline queue),
+			// and the state frame is what keeps the server's snapshot correct.
+			s.setForwards(out.State)
+			blob, err := json.Marshal(out)
+			if err != nil {
+				res.Error = "encode_result"
+				return
+			}
+			res.Stdout = string(blob)
 		default:
 			res.Error = "unsupported command kind: " + kind
 		}

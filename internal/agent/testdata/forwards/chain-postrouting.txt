@@ -1,0 +1,8 @@
+table ip nat {
+	chain postrouting { # handle 2
+		type nat hook postrouting priority srcnat; policy accept;
+		ip daddr 10.0.0.1 tcp dport 80 masquerade # handle 10
+		ip daddr 10.0.0.2 udp dport 5353 masquerade # handle 11
+		ip daddr 10.0.0.9 tcp dport 9000 masquerade # handle 12
+	}
+}

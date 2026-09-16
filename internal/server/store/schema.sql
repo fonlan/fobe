@@ -319,3 +319,35 @@ CREATE TABLE IF NOT EXISTS alerts (
     recovered_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
+
+-- §21 nftables port forwarding. node_forwards is a *snapshot* of what the probe
+-- reported (the ruleset is the source of truth, not this table): it exists so
+-- the panel can render the list instantly and offline, and so an external edit
+-- (nfpf.sh) is still visible after the fact. The (node_id, handle) pair is not
+-- unique-by-design — a ruleset reload renumbers handles and two rules may share
+-- a full tuple — hence the surrogate id.
+CREATE TABLE IF NOT EXISTS node_forwards (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id     TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    handle      INTEGER NOT NULL DEFAULT 0,
+    proto       TEXT NOT NULL DEFAULT '',
+    src_port    INTEGER NOT NULL DEFAULT 0,
+    iface       TEXT NOT NULL DEFAULT '',
+    dst_ip      TEXT NOT NULL DEFAULT '',
+    dst_port    INTEGER NOT NULL DEFAULT 0,
+    comment     TEXT NOT NULL DEFAULT '',
+    extra_match INTEGER NOT NULL DEFAULT 0           -- panel shows it, refuses to edit it
+);
+CREATE INDEX IF NOT EXISTS idx_node_forwards_node ON node_forwards(node_id);
+
+-- Capability/status half of the same report. A missing row means "this agent
+-- has never reported forwards" — the panel's cue that the probe needs a newer
+-- agent, as opposed to "the probe has no forwards".
+CREATE TABLE IF NOT EXISTS node_forward_status (
+    node_id     TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+    supported   INTEGER NOT NULL DEFAULT 0,
+    initialized INTEGER NOT NULL DEFAULT 0,
+    code        TEXT NOT NULL DEFAULT '',
+    message     TEXT NOT NULL DEFAULT '',
+    reported_at INTEGER NOT NULL DEFAULT 0
+);

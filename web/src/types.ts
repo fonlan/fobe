@@ -339,6 +339,64 @@ export interface SingboxStatus {
   updated_at: number;
 }
 
+// --- nftables port forwarding (design §21) ---
+
+/**
+ * One port forward as it exists on the probe, in github.com/fonlan/nfpf's
+ * layout (`ip nat prerouting` DNAT + `ip nat postrouting` masquerade). Rules
+ * added by nfpf.sh or by hand show up here identically — the probe's ruleset is
+ * the source of truth, not this panel.
+ */
+export interface ForwardRule {
+  proto: string; // tcp | udp
+  src_port: number;
+  /** Inbound interface; '' = all interfaces. */
+  iface: string;
+  dst_ip: string;
+  dst_port: number;
+  /**
+   * Free-form label written onto the DNAT rule the way nfpf.sh does it. A
+   * double quote cannot be represented in an nft string literal at all, so the
+   * server rejects it.
+   */
+  comment: string;
+  /** nft rule handle, sent back on edit/delete to target that exact rule. */
+  handle: number;
+  /** The rule carries match terms the panel does not model: show, never edit. */
+  extra_match: boolean;
+}
+
+export interface ForwardRuleInput {
+  proto: string;
+  src_port: number;
+  iface: string;
+  dst_ip: string;
+  dst_port: number;
+  comment?: string;
+  handle?: number;
+}
+
+export interface ForwardsStatus {
+  /** The probe can manage forwards at all (nft present, agent root). */
+  supported: boolean;
+  /** `table ip nat` + both chains exist; the first add creates them. */
+  initialized: boolean;
+  /** Why not supported: nft_missing | need_root | no_permission | chain_mismatch | … */
+  code: string;
+  /** Raw nft output for the hint line. */
+  message: string;
+  /** Last report time (unix seconds); 0 = this probe never reported. */
+  reported_at: number;
+  /** The probe's agent knows §21 — false means it needs an update. */
+  agent_supported: boolean;
+  forwards: ForwardRule[];
+  /** This payload came from a probe round trip, not the stored snapshot. */
+  live: boolean;
+  /** The command is queued (probe offline or slow); TTL 10 minutes. */
+  queued: boolean;
+  warnings?: string[];
+}
+
 // --- server-side artifact cache + one-click batch update (design §9.2) ---
 
 /** GET /api/singbox/cache — one cached release on the server's disk. */

@@ -1,0 +1,12 @@
+table ip nat {
+	chain prerouting { # handle 1
+		type nat hook prerouting priority dstnat; policy accept;
+		iifname "eth0" tcp dport 8080 dnat to 10.0.0.1:80 comment "web 前端" # handle 3
+		udp dport 5353 dnat to 10.0.0.2:5353 # handle 4
+		ip saddr 1.2.3.4 tcp dport 9000 dnat to 10.0.0.9:9000 # handle 5
+		tcp dport 7000 counter packets 0 bytes 0 dnat to 10.0.0.5:7000 # handle 6
+		tcp dport 100-200 dnat to 10.0.0.6:8080 # handle 7
+		tcp dport 22 counter packets 0 bytes 0 comment "ssh" # handle 8
+		tcp dport 444 dnat to 10.0.0.4 # handle 9
+	}
+}

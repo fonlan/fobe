@@ -165,6 +165,10 @@ type State struct {
 	Interfaces []NetworkInterface `json:"interfaces"`
 	BootID     string             `json:"boot_id"`
 	Singbox    *SingboxState      `json:"singbox,omitempty"`
+	// Forwards is the nftables port-forward inventory (§21). A nil pointer
+	// means "this agent predates the feature" — the server then keeps the last
+	// known rows instead of wiping them, exactly like Interfaces above.
+	Forwards *ForwardsState `json:"forwards,omitempty"`
 }
 
 // SingboxState is what the agent actually observes locally. Optional fields
@@ -303,6 +307,84 @@ type Cmd struct {
 	ID      string          `json:"id"`
 	Kind    string          `json:"kind"` // run_shell | restart_singbox | ...
 	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// --- nftables port forwarding (design §21) ---
+
+// CmdKindNftForwards is the §21 command kind: the payload is a
+// ForwardsRequest, and the agent answers with a ForwardsResult encoded as JSON
+// in CmdResult.Stdout (the same carrier tail_logs uses for text).
+//
+// A command — not desired state — is the right shape here: the ruleset is
+// shared with other tools (nfpf.sh, hand-written nft), so the panel must not
+// declare "the complete set". Each edit is one targeted transaction, and the
+// agent reports the resulting ruleset in `state` right after it.
+const CmdKindNftForwards = "nft_forwards"
+
+// Forwards actions carried by ForwardsRequest.Action.
+const (
+	ForwardsList   = "list"
+	ForwardsAdd    = "add"
+	ForwardsUpdate = "update"
+	ForwardsDelete = "delete"
+)
+
+// ForwardRule is one IPv4 port forward as it exists on the probe, in the
+// layout github.com/fonlan/nfpf (`nfpf.sh`) uses: a DNAT rule in
+// `ip nat prerouting` plus a masquerade rule in `ip nat postrouting`.
+//
+// Handle is the nft rule handle of the DNAT rule. It is advisory — a ruleset
+// reload renumbers handles — so the agent validates it against the rest of the
+// rule before acting on it.
+type ForwardRule struct {
+	Proto   string `json:"proto"` // tcp | udp
+	SrcPort int    `json:"src_port"`
+	// Iface is the inbound interface (`iifname`); empty = all interfaces.
+	Iface string `json:"iface,omitempty"`
+	DstIP string `json:"dst_ip"`
+	// DstPort is the rewritten port. nfpf also accepts a bare
+	// `dnat to <ip>` (port unchanged); the agent normalizes that to
+	// DstPort == SrcPort so the panel always shows both.
+	DstPort int    `json:"dst_port"`
+	Comment string `json:"comment,omitempty"`
+	Handle  int    `json:"handle,omitempty"`
+	// ExtraMatch marks a DNAT rule carrying match terms the panel does not
+	// model (source address, port ranges, counters, …). It is listed so the
+	// operator can see — and delete — it, but editing it would silently drop
+	// those terms, so the panel refuses.
+	ExtraMatch bool `json:"extra_match,omitempty"`
+}
+
+// ForwardsState is the probe's own view of the port-forward set (§21).
+// Supported=false means the probe cannot manage forwards at all; Code explains
+// why with a snake_case token ("nft_missing", "need_root", …) and Message
+// carries the raw nft output for the panel's hint text.
+type ForwardsState struct {
+	Supported   bool          `json:"supported"`
+	Initialized bool          `json:"initialized"`
+	Code        string        `json:"code,omitempty"`
+	Message     string        `json:"message,omitempty"`
+	Rules       []ForwardRule `json:"rules"`
+}
+
+// ForwardsRequest is the payload of CmdKindNftForwards. Old is the rule to
+// replace/delete (ForwardsUpdate / ForwardsDelete); Rule is the new state.
+type ForwardsRequest struct {
+	Action string       `json:"action"`
+	Rule   *ForwardRule `json:"rule,omitempty"`
+	Old    *ForwardRule `json:"old,omitempty"`
+}
+
+// ForwardsResult is the JSON body the agent writes into CmdResult.Stdout.
+// Error is a snake_case token the server maps onto its own error codes; State
+// always carries the post-action ruleset so the panel updates without a
+// second round trip.
+type ForwardsResult struct {
+	OK       bool          `json:"ok"`
+	Error    string        `json:"error,omitempty"`
+	Message  string        `json:"message,omitempty"`
+	Warnings []string      `json:"warnings,omitempty"`
+	State    ForwardsState `json:"state"`
 }
 
 // Terminal frames (design §11). Server→agent open/input/resize/close;

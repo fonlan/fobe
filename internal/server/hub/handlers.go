@@ -243,6 +243,36 @@ func (h *Hub) onState(nodeID string, st *protocol.State) {
 	if st.Singbox != nil {
 		h.recordSingboxState(nodeID, st.Singbox)
 	}
+	// nil (not empty) means the agent predates §21: keep the last known
+	// inventory instead of wiping rows for rules that are still on the probe.
+	if st.Forwards != nil {
+		h.RecordForwardState(nodeID, st.Forwards)
+	}
+}
+
+// RecordForwardState stores the probe's nftables port-forward snapshot (§21).
+// It is exported because the panel's own §21 command answers carry the same
+// payload: persisting them here keeps one code path for "what the panel sees".
+// The probe's ruleset is the source of truth, so this is a wholesale replace: a
+// rule missing from the report is one an external tool (nfpf.sh) removed.
+func (h *Hub) RecordForwardState(nodeID string, f *protocol.ForwardsState) {
+	rows := make([]store.NodeForward, 0, len(f.Rules))
+	for _, r := range f.Rules {
+		rows = append(rows, store.NodeForward{
+			Handle: r.Handle, Proto: r.Proto, SrcPort: r.SrcPort, Iface: r.Iface,
+			DstIP: r.DstIP, DstPort: r.DstPort, Comment: r.Comment, ExtraMatch: r.ExtraMatch,
+		})
+	}
+	status := store.NodeForwardStatus{
+		Supported:   f.Supported,
+		Initialized: f.Initialized,
+		Code:        f.Code,
+		Message:     f.Message,
+		ReportedAt:  protocol.Now(),
+	}
+	if err := h.store.ReplaceNodeForwards(nodeID, status, rows); err != nil {
+		h.log.Warn("replace node forwards", "node", nodeID, "err", err)
+	}
 }
 
 func (h *Hub) replaceInterfaces(nodeID string, interfaces []protocol.NetworkInterface) {

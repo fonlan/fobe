@@ -27,8 +27,13 @@ const (
 	reportEvery       = 60 * time.Second // metrics + traffic cadence
 	probeMetricsEvery = 5 * time.Second  // §16 high-frequency stream while a detail page is open
 	stateEvery        = 5 * time.Minute  // IP-set change detection (§14)
-	backoffStart      = 1 * time.Second  // §7 reconnect: 1s → 5min, jittered
-	backoffMax        = 5 * time.Minute
+	// forwardsEvery is faster than stateEvery on purpose: nftables port
+	// forwards are also edited outside the panel (nfpf.sh, hand-written nft),
+	// so the panel's list would otherwise be up to five minutes stale. One
+	// `nft list` a minute costs nothing.
+	forwardsEvery = 1 * time.Minute
+	backoffStart  = 1 * time.Second // §7 reconnect: 1s → 5min, jittered
+	backoffMax    = 5 * time.Minute
 )
 
 // Version is the agent build version, injected via
@@ -196,12 +201,14 @@ func connectAndServe(cfg *Config, configPath string, coll *collect.Collector, sb
 	defer session.shutdown("agent websocket disconnected")
 	session.hello()
 	session.reportOnce() // fresh nodes appear immediately
+	session.refreshForwards()
 	session.sendState()
 
 	go session.writeLoop()
 	go session.reportLoop(metricsEvery)
 	go session.latencyLoop()
 	go session.stateChangeLoop()
+	go session.forwardsLoop()
 
 	return session.readLoop()
 }
@@ -229,6 +236,13 @@ type agentSession struct {
 	latencyMu       sync.RWMutex
 	targets         []protocol.TargetSpec
 	execMu          chan struct{} // one command at a time; also serves as idempotency guard
+
+	// §21 nftables port forwarding: the last inventory read from this probe.
+	// Cached rather than read inside sendState so a slow/hanging nft can never
+	// stall the state cadence (forwardsLoop owns the refresh).
+	fwdEnv   nftEnv
+	fwdMu    sync.Mutex
+	forwards *protocol.ForwardsState
 }
 
 func newSession(cfg *Config, configPath string, coll *collect.Collector, ws *websocket.Conn, sbx *singboxManager, updater *selfUpdater, log *slog.Logger) *agentSession {
@@ -250,6 +264,7 @@ func newSession(cfg *Config, configPath string, coll *collect.Collector, ws *web
 	s.sbx = sbx
 	s.updater = updater
 	s.term = newTerminalManager(s)
+	s.fwdEnv = defaultNftEnv()
 	return s
 }
 
@@ -425,7 +440,70 @@ func (s *agentSession) sendState() {
 		Interfaces: collect.NetworkInterfaces(),
 		BootID:     collect.BootID(),
 		Singbox:    s.sbx.Snapshot(), // nil while sing-box is unmanaged (§9)
+		// nil until the first read; a nil field keeps an older server from
+		// wiping what it knows about this node (§21).
+		Forwards: s.forwardsCache(),
 	}))
+}
+
+// forwardsLoop re-reads the port-forward inventory and reports it when it
+// changed (§21). External edits (nfpf.sh, manual nft) are the reason this is a
+// loop and not just a post-command refresh.
+func (s *agentSession) forwardsLoop() {
+	t := time.NewTicker(forwardsEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-t.C:
+			if s.refreshForwards() {
+				s.sendState()
+			}
+		}
+	}
+}
+
+// refreshForwards re-reads the probe's ruleset and reports whether the result
+// differs from what was last reported.
+func (s *agentSession) refreshForwards() bool {
+	st := readForwardState(s.fwdEnv)
+	s.fwdMu.Lock()
+	defer s.fwdMu.Unlock()
+	if s.forwards != nil && sameForwardsState(*s.forwards, st) {
+		return false
+	}
+	s.forwards = &st
+	return true
+}
+
+// setForwards adopts the state a forward command just observed and reports it.
+func (s *agentSession) setForwards(st protocol.ForwardsState) {
+	s.fwdMu.Lock()
+	s.forwards = &st
+	s.fwdMu.Unlock()
+	s.sendState()
+}
+
+func (s *agentSession) forwardsCache() *protocol.ForwardsState {
+	s.fwdMu.Lock()
+	defer s.fwdMu.Unlock()
+	return s.forwards
+}
+
+// sameForwardsState compares the fields a state frame carries, so the 60s loop
+// stops reporting identical inventories.
+func sameForwardsState(a, b protocol.ForwardsState) bool {
+	if a.Supported != b.Supported || a.Initialized != b.Initialized ||
+		a.Code != b.Code || a.Message != b.Message || len(a.Rules) != len(b.Rules) {
+		return false
+	}
+	for i := range a.Rules {
+		if a.Rules[i] != b.Rules[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *agentSession) readLoop() error {

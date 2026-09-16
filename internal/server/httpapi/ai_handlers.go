@@ -965,10 +965,18 @@ func (s *Server) runAITailLogs(r *http.Request, session *store.AISession, payloa
 // never blocks past aiTailLogsWait or the request context (§12.1: 等待要
 // 防阻塞死).
 func (s *Server) waitAICommand(ctx context.Context, commandID string) (*store.Command, bool) {
-	deadline := time.Now().Add(aiTailLogsWait)
+	return s.waitCommandResult(ctx, commandID, aiTailLogsWait)
+}
+
+// waitCommandResult polls the commands table until the command reaches a
+// terminal status, the wait elapses, or the caller goes away. Shared by the AI
+// tail_logs path (§12.1) and the §21 port-forward panel actions, which differ
+// only in how long they are willing to block.
+func (s *Server) waitCommandResult(ctx context.Context, commandID string, wait time.Duration) (*store.Command, bool) {
+	deadline := time.Now().Add(wait)
 	for {
 		command, err := s.Store.GetCommand(commandID)
-		if err == nil && (command.Status == "ok" || command.Status == "failed") {
+		if err == nil && (command.Status == "ok" || command.Status == "failed" || command.Status == "timeout") {
 			return command, true
 		}
 		if time.Now().After(deadline) {

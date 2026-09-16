@@ -197,6 +197,13 @@ func (s *Server) Handler() http.Handler {
 	// §14 manual primary IP + §16 detail-page 5s probe stream
 	mux.HandleFunc("PUT /api/nodes/{id}/primary-ip", s.requireSession(s.handleSetPrimaryIP))
 	mux.HandleFunc("POST /api/nodes/{id}/probe", s.requireSession(s.handleNodeProbe))
+	// §21 nftables port forwarding (nfpf.sh-compatible). GET reads the stored
+	// snapshot; ?live=1 asks the probe. Mutations are one-shot commands because
+	// the ruleset is shared with external tools.
+	mux.HandleFunc("GET /api/nodes/{id}/forwards", s.requireSession(s.handleListNodeForwards))
+	mux.HandleFunc("POST /api/nodes/{id}/forwards", s.requireSession(s.handleAddNodeForward))
+	mux.HandleFunc("PUT /api/nodes/{id}/forwards", s.requireSession(s.handleUpdateNodeForward))
+	mux.HandleFunc("DELETE /api/nodes/{id}/forwards", s.requireSession(s.handleDeleteNodeForward))
 
 	// subscriptions & templates (§10)
 	mux.HandleFunc("GET /api/subscriptions", s.requireSession(s.handleListSubscriptions))
