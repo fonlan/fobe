@@ -441,6 +441,11 @@ section.card { margin-bottom: 0; }
 .chip.cost-chip {
   color: var(--accent);
   border-color: var(--accent);
+  /* Sits in the card head between the name and the distro badge: allowed to
+     shrink (min-width:0 beats the flex-item auto floor) so a long cost string
+     ellipsises instead of pushing the badge out of the row. */
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
