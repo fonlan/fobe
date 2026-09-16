@@ -8,8 +8,9 @@ import (
 	"github.com/fobe-panel/fobe/internal/protocol"
 )
 
-// hasRawSocket lives in the per-platform ICMP files: it probes whether raw
-// ICMP is possible (root / CAP_NET_RAW). Missing capability → ICMP disabled,
+// hasRawSocket/hasPingSocket live in the per-platform ICMP files: they probe
+// whether raw ICMP is possible (root / CAP_NET_RAW) or the kernel ping socket
+// is open to us (ping_group_range). Neither available → ICMP disabled,
 // TCP-only latency (design §5.1).
 
 const (
@@ -19,8 +20,9 @@ const (
 )
 
 // latencyLoop implements design §13: probe each target at the panel-selected
-// cadence and report a 60s batch. TCP handshake RTT plus raw-socket ICMP echo
-// on linux (agent is root; missing CAP_NET_RAW degrades to TCP-only).
+// cadence and report a 60s batch. TCP handshake RTT plus ICMP echo on linux
+// (raw socket as root/CAP_NET_RAW, kernel ping socket under ping_group_range,
+// otherwise TCP-only).
 func (s *agentSession) latencyLoop() {
 	local := time.NewTicker(s.latencyEvery())
 	defer local.Stop()
@@ -55,7 +57,7 @@ func (s *agentSession) latencyLoop() {
 					} else {
 						sm.Loss = 1
 					}
-				} else if t.Kind == "icmp" && hasRawSocket() {
+				} else if t.Kind == "icmp" && icmpAvailable() {
 					if ms, err := icmpEchoMs(t.Host, latencyProbeTimeout); err == nil {
 						sm.ICMPMs = ms
 					} else {

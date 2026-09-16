@@ -13,11 +13,14 @@ DEFAULT_TOKEN="{{.DefaultToken}}"
 
 TOKEN=""
 SERVER=""
+UNPRIV=""
 BIN_DIR="/usr/local/bin"
+AGENT_USER="root"
 while [ $# -gt 0 ]; do
     case "$1" in
         --token)  TOKEN="$2";  shift 2 ;;
         --server) SERVER="$2"; shift 2 ;;
+        --unprivileged) UNPRIV=1; shift ;;
         --token=*)  TOKEN="${1#*=}";  shift ;;
         --server=*) SERVER="${1#*=}"; shift ;;
         *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -65,10 +68,30 @@ else
     INIT=fallback
 fi
 
+# --unprivileged (§5.3 实现修订 2026-09-16): one-time root bootstrap, then the
+# agent runs unprivileged for good — a dedicated system user owns everything
+# under $BIN_DIR (config, machine-id, update-state, one-sing/), and the unit
+# drops privileges with AmbientCapabilities instead of User=root. Only systemd
+# qualifies: procd has no ambient capabilities or non-root services, and the
+# fallback branch has no supervisor worth the name.
+CONFIG_PATH="/etc/fobe-agent/config.json"
+if [ -n "$UNPRIV" ]; then
+    [ "$INIT" = "systemd" ] || { echo "fobe: --unprivileged requires systemd" >&2; exit 1; }
+    AGENT_USER=fobe-agent
+    BIN_DIR=/opt/fobe-agent
+    CONFIG_PATH="$BIN_DIR/config.json"
+    if ! id "$AGENT_USER" >/dev/null 2>&1; then
+        $SUDO useradd --system --user-group --home-dir "$BIN_DIR" --no-create-home \
+            --shell /usr/sbin/nologin "$AGENT_USER"
+    fi
+fi
+
 echo "fobe: server=$SERVER init=$INIT"
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# REGDIR is created only by --unprivileged registration; expand it defensively
+# so a failed registration does not leave its token-bearing helper behind.
+trap 'rm -rf "$TMP" "${REGDIR:-}"' EXIT
 
 # 3. download + sha256 verify (checksum comes from the server's manifest)
 DL="$SERVER/dl/agent/latest/linux-amd64"
@@ -94,19 +117,72 @@ else
     exit 1
 fi
 
+# 3.5 place the binary (the state directory doubles as BIN_DIR in
+# --unprivileged mode, so it must exist before the copy — and 0750 keeps the
+# layout private while the agent user keeps full ownership of it).
+$SUDO mkdir -p "$BIN_DIR"
 put_file 0755 "$TMP/fobe-agent" "$BIN_DIR/fobe-agent"
+if [ -n "$UNPRIV" ]; then
+    $SUDO chown -R "$AGENT_USER:$AGENT_USER" "$BIN_DIR"
+    $SUDO chmod 0750 "$BIN_DIR"
+fi
 
 # 4-5. register (reuses prior credentials on reinstall, §4.2)
-$SUDO mkdir -p /etc/fobe-agent
-if ! $SUDO "$BIN_DIR/fobe-agent" -register -token "$TOKEN" -server "$SERVER"; then
-    echo "fobe: registration failed" >&2
-    exit 1
+$SUDO mkdir -p "$(dirname "$CONFIG_PATH")"
+if [ -n "$UNPRIV" ]; then
+    # Keep a root-mode installation on the same node when it is deliberately
+    # converted: config.json carries the old credentials and machine-id keeps
+    # the node identity. Never overwrite an existing unprivileged state dir.
+    if [ ! -e "$CONFIG_PATH" ]; then
+        for STATE in config.json machine-id update-state.json; do
+            if [ -f "/etc/fobe-agent/$STATE" ]; then
+                $SUDO cp "/etc/fobe-agent/$STATE" "$BIN_DIR/$STATE"
+            fi
+        done
+        $SUDO chown "$AGENT_USER:$AGENT_USER" "$BIN_DIR"/* 2>/dev/null || true
+    fi
+    # Registration runs as the agent user so config.json/machine-id are born
+    # with the right owner (a root registration would leave 0600 root files
+    # the agent could never read).
+    # The register helper carries the token, so it lives in its own directory:
+    # world-traversable, file itself 0700 agent-owned — and the token stays
+    # out of `ps` (a `su -c "...$TOKEN..."` command line would flash it).
+    REGDIR="$(mktemp -d)"
+    cat > "$REGDIR/register.sh" <<REG
+#!/bin/sh
+exec "$BIN_DIR/fobe-agent" -register -token "$TOKEN" -server "$SERVER"
+REG
+    $SUDO chown "$AGENT_USER:$AGENT_USER" "$REGDIR/register.sh"
+    $SUDO chmod 0700 "$REGDIR/register.sh"
+    $SUDO chmod 0711 "$REGDIR"
+    if ! $SUDO su -s /bin/sh -c "$REGDIR/register.sh" "$AGENT_USER"; then
+        echo "fobe: registration failed" >&2
+        exit 1
+    fi
+    $SUDO rm -rf "$REGDIR"
+else
+    if ! $SUDO "$BIN_DIR/fobe-agent" -register -token "$TOKEN" -server "$SERVER"; then
+        echo "fobe: registration failed" >&2
+        exit 1
+    fi
 fi
 
 # 6. install + start the service (files are staged in $TMP and installed via
 #    put_file, so redirects never need a root shell)
 case "$INIT" in
     systemd)
+        EXTRA_SERVICE=""
+        if [ -n "$UNPRIV" ]; then
+            # 降权 unit（§5.3 实现修订 2026-09-16）：AmbientCapabilities 让非 root
+            # 进程持 CAP_NET_RAW（ICMP raw socket）。票证挂在 unit 上而不是文件
+            # xattr 上，所以自更新的 rename+exec 永不掉权限；BoundingSet 把授权
+            # 面收到只有这一张。
+            EXTRA_SERVICE="User=$AGENT_USER
+Group=$AGENT_USER
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true"
+        fi
         cat > "$TMP/fobe-agent.service" <<UNIT
 [Unit]
 Description=fobe probe agent
@@ -114,15 +190,21 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=$BIN_DIR/fobe-agent -config /etc/fobe-agent/config.json -run
+ExecStart=$BIN_DIR/fobe-agent -config $CONFIG_PATH -run
 Restart=always
 RestartSec=5
-User=root
+$EXTRA_SERVICE
 
 [Install]
 WantedBy=multi-user.target
 UNIT
         put_file 0644 "$TMP/fobe-agent.service" /etc/systemd/system/fobe-agent.service
+        if [ -n "$UNPRIV" ]; then
+            # A prior root-mode installation owns sing-box in a separate unit.
+            # The unprivileged agent instead owns its fallback child; leave the
+            # old unit up and both will race for the same panel-assigned port.
+            $SUDO systemctl disable --now fobe-singbox.service >/dev/null 2>&1 || true
+        fi
         $SUDO systemctl daemon-reload
         # restart, NOT `enable --now`: this script is also the panel's
         # "reinstall command" (§5.5), which runs on a node whose agent is
@@ -145,7 +227,7 @@ START=99
 
 start_service() {
 	procd_open_instance
-	procd_set_param command $BIN_DIR/fobe-agent -config /etc/fobe-agent/config.json -run
+	procd_set_param command $BIN_DIR/fobe-agent -config $CONFIG_PATH -run
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 0
 	procd_set_param stderr 0
@@ -169,14 +251,14 @@ INITD
         ;;
     fallback)
         echo "fobe: no service manager found; start the agent manually:"
-        echo "  $BIN_DIR/fobe-agent -config /etc/fobe-agent/config.json -run"
+        echo "  $BIN_DIR/fobe-agent -config $CONFIG_PATH -run"
         $SUDO mkdir -p /var/log
         # Reinstalling with no supervisor used to leave the previous nohup'd
         # agent alive on the replaced inode, so two agents fought over one node
         # credential (the hub closes whichever connected first). Stop it first;
         # the path anchor keeps the pattern from matching this install script.
         $SUDO pkill -f "^$BIN_DIR/fobe-agent" 2>/dev/null || true
-        $SUDO sh -c "nohup $BIN_DIR/fobe-agent -config /etc/fobe-agent/config.json -run >/var/log/fobe-agent.log 2>&1 &"
+        $SUDO sh -c "nohup $BIN_DIR/fobe-agent -config $CONFIG_PATH -run >/var/log/fobe-agent.log 2>&1 &"
         ;;
 esac
 

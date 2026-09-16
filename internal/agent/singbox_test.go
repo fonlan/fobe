@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/fobe-panel/fobe/internal/agent/service"
 	"github.com/fobe-panel/fobe/internal/protocol"
 )
 
@@ -58,6 +60,32 @@ func TestNormalizeAndCompareVersions(t *testing.T) {
 		if got := compareVersions(c.a, c.b); got != c.want {
 			t.Fatalf("compareVersions(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+func TestSingboxKindForcesFallbackWithoutRoot(t *testing.T) {
+	original := privileged
+	privileged = func() bool { return false }
+	t.Cleanup(func() { privileged = original })
+
+	if got := singboxKind(); got != service.KindFallback {
+		t.Fatalf("singboxKind() = %s, want fallback for an unprivileged agent", got)
+	}
+}
+
+func TestRelocateConfigRemapsDefaultLayout(t *testing.T) {
+	dir := t.TempDir()
+	service.SetWorkDir(dir)
+	t.Cleanup(func() { service.SetWorkDir(service.SingboxWorkDir) })
+
+	config := `{"inbounds":[{"tls":{"certificate_path":"/etc/one-sing/cert/cert.crt","key_path":"/etc/one-sing/cert/private.key"}}]}`
+	got := relocateConfig(config)
+	if strings.Contains(got, service.SingboxWorkDir) {
+		t.Fatalf("relocateConfig left the default layout behind: %s", got)
+	}
+	if !strings.Contains(got, filepath.Join(dir, "cert", "cert.crt")) ||
+		!strings.Contains(got, filepath.Join(dir, "cert", "private.key")) {
+		t.Fatalf("relocateConfig did not map certificate paths: %s", got)
 	}
 }
 

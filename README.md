@@ -21,7 +21,7 @@
 | 组件 | 说明 |
 |---|---|
 | `server` | Go 单二进制：API + WebSocket + 指标调度 + 订阅渲染 + AI 代理 + admin CLI。SQLite(WAL) 落在容器外的挂载目录。 |
-| `agent` | Go 静态二进制（`CGO_ENABLED=0`，linux/amd64，musl 兼容）。装在探针上跑，root 权限，托管 sing-box、采集指标、跑延迟测量、提供终端通道。**镜像内自带 agent 产物**：探针安装与自更新都从面板的 `/dl/` 拉取。 |
+| `agent` | Go 静态二进制（`CGO_ENABLED=0`，linux/amd64，musl 兼容）。默认以 root 安装；systemd 主机可选「一次性 root 引导、日常非 root」模式。托管 sing-box、采集指标、跑延迟测量、提供终端通道。**镜像内自带 agent 产物**：探针安装与自更新都从面板的 `/dl/` 拉取。 |
 | `web` | React + TypeScript + Vite 前端。**编译产物在镜像构建阶段打进镜像**（`/srv/web`），由 `server` 直出；不嵌入 Go 二进制。 |
 
 ```
@@ -71,6 +71,18 @@ docker compose exec server fobe-server admin reset-password
 > 预构建镜像首次发布后默认是 GHCR 的**私有包**：在 GitHub → Packages → fobe 里改成 Public 一次即可匿名拉取；保持私有则先 `docker login ghcr.io` 再 `up`。
 >
 > `sudo` 不需要也不应写在安装命令里：root VPS 直接执行即可；非 root 用户且机器安装了 sudo 时，安装脚本会自行提权。
+
+### 可选：日常以非 root 身份运行 agent
+
+默认安装保持 root 模式；想把 agent 的日常执行面降到专用系统用户，给面板生成的命令追加 `--unprivileged`：
+
+```sh
+curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> --server https://panel.example.com --unprivileged
+```
+
+这个模式仍需要一次 root/sudo 引导（创建 `fobe-agent` 系统用户、写 systemd unit），之后 daemon 以 `fobe-agent` 身份运行：状态与 sing-box 文件在 `/opt/fobe-agent/`（`config.json`、`machine-id`、`update-state.json`、`one-sing/`），可用 `FOBE_SINGBOX_HOME` 改 sing-box 目录。ICMP raw socket 只由 unit 受限授予 `CAP_NET_RAW`；sing-box 永远走 agent 自己的 spawn/watchdog 分支，不向 systemd 请求管理权限。面板入站端口固定在 10000–60000，因此此模式不需要低端口能力。
+
+仅支持常规 **systemd** Linux；OpenWrt/procd 与无 supervisor 的 fallback 会明确拒绝。把既有 root 安装改为此模式时，脚本会迁移已有配置、machine-id 和更新状态以保留同一节点，并停掉旧的 `fobe-singbox.service`；不要手工保留一个同端口的 one-sing.service。
 
 ## 更新
 
@@ -289,9 +301,9 @@ data/                    # 单一数据目录（容器内挂载为 /data）
 - **前提是「服务端有个像版本号的版本」**：CI 发布的镜像注入 tag 号（去掉 `v` 前缀）；`scripts/dev.sh` 会自己造一个（内容寻址的 `dev-<哈希>`，见「本地开发」一节），本地 `--build` 镜像同样（内容寻址的 `compose-<哈希>`，改了 agent 代码重新 build 就换号）。只有手工 `go run ./cmd/server`（没有 `-ldflags`，版本是裸 `dev`）这种**非发布形态**才不下发目标（面板会写明原因）。
 - **版本号就是"该配哪一版 agent"**：两端由构建时同一个 `$VERSION` 注入。判据是**两端版本号是否相等**（不是谁更新），所以"随便打个号"或"两个不同的二进制用同一个号"都会直接改变全网探针的行为——发版前想清楚这个数字。
 - **什么时候会动**：探针每次连上服务端握手时，服务端告诉它「该跑哪一版」，不一致就切换。服务端一重启，全部探针会同时确认一次，所以服务端会给每台排一个 **0–5 分钟内的错峰时刻**（否则就是几十台一起拉同一个 10MB 文件）；面板上能看到每台的「计划时刻」。
-- **换的过程**：下载到二进制所在目录的临时文件 → 校验 sha256 → 先用 `-selfcheck` 跑一次新二进制（连上服务端完成握手、且**自己报告的版本号**与目标一致才算通过）→ 原子替换 → 主动退出，由 systemd / procd 拉起新版。**自检不通过就完全不碰线上二进制。**
+- **换的过程**：下载到二进制所在目录的临时文件 → 校验 sha256 → 先用 `-selfcheck` 跑一次新二进制（连上服务端完成握手、且**自己报告的版本号**与目标一致才算通过）→ 原子替换 → `exec` 原地换入新版（PID 不变；systemd/procd 若存在只负责崩溃恢复）。因此即使 fallback/nohup 形态，只要二进制目录可写也能跟随。**自检不通过就完全不碰线上二进制。**
 - **不保留旧版本**（省下 OpenWrt overlay 上的十几 MB）：因此**没有本地回滚**。自检把坏产物挡在提交之前，但"自检能过、正式启动却起不来"这种残余情形只能 SSH 上去用面板给的重装命令重装。
-- **什么时候不会动**：① 服务端版本不是发布形态（`go run ./cmd/server` 的版本是裸 `dev`；dev.sh 与本地 `--build` 都会自造内容寻址号，正常部署不落在这一条）；② `data/dl/agent/<版本>/` 里没有二进制或 `.sha256`（容器首次启动会从 `/srv/agent-seed` 播种，`scripts/dev.sh` 也会产，所以正常部署第 ① ② 条都不成立）；③ 面板里关掉了自动更新；④ **Kill Switch 打开时**（冻结优先于跟随）；⑤ 探针上既没有 systemd 也没有 procd（`nohup` 兜底模式没有 supervisor，"重启自己"无处落地），面板会把这类节点标出来。
+- **什么时候不会动**：① 服务端版本不是发布形态（`go run ./cmd/server` 的版本是裸 `dev`；dev.sh 与本地 `--build` 都会自造内容寻址号，正常部署不落在这一条）；② `data/dl/agent/<版本>/` 里没有二进制或 `.sha256`（容器首次启动会从 `/srv/agent-seed` 播种，`scripts/dev.sh` 也会产，所以正常部署第 ① ② 条都不成立）；③ 面板里关掉了自动更新；④ **Kill Switch 打开时**（冻结优先于跟随）；⑤ agent 二进制所在目录不可写，或自身路径无法解析（面板会显示明确原因）。
 - **失败怎么办**：产物类失败（sha256 不符 / 跑不起来 / 版本号对不上）让这台探针**停止重试**并立即告警；环境类失败（连不上服务端、`/dl` 404、磁盘空间不足）退避重试（1 分钟 → 1 小时）。同一个目标版本连续失败 3 次即熔断，在面板上点**重试**解锁。分发 15 分钟后仍未生效的节点会汇总成一条告警。
 - **老探针要人工重装一次**：这条功能上线前装的 agent 二进制里没有自更新代码。面板会把它们标成「**需人工重装（不支持自更新）**」并给出一条重装命令（**设置 → 服务器 → 编辑 → Agent 更新**，点「重装命令」生成）——在那台机器上重跑一次即可，它会重绑到同一个节点（凭据与 machine-id 都还在）。这是正常的，不是故障。
 - **看与操作的地方**：「**设置 → 基础设置 → Agent 更新**」是总开关与全局状态（服务端版本、几台待更新、未生效时的原因）；「**设置 → 服务器 → 编辑 → Agent 更新**」是单台视图（当前/期望版本、计划时刻、状态、失败次数与原因）+「重试更新」（熔断或人工干预后解锁，会给在线探针立刻推送一次）。服务器列表里版本号后面出现 `→ x.y.z` 就表示这台还没跟上。
@@ -389,14 +401,14 @@ export default defineConfig({
 | **升级容器后 sing-box 没了**（设置页版本列表空、节点更新失败） | `data/` 没挂载（产物留在了旧容器可写层）。核对 `docker compose config` 里有 `./data:/data`，以及设置页/日志里的 `singbox.dl_mount_ok=false` 警告；恢复做法是重新下载（设置页「重试」）或手动把产物放回 `data/dl/singbox/<version>/` |
 | **探针版本一直没跟上服务端**（节点页显示期望版本 ≠ 当前版本） | ① 看期望版本旁边的原因：没下发（服务端版本是 `dev`、或 `data/dl/agent/<版本>/` 里缺二进制/`.sha256`）/ 已关闭开关 / Kill Switch 开着；② 看是否熔断（连续失败 3 次会停手，点「重试」解锁）；③ 产物缺失时确认容器里 `ls /data/dl/agent/` 有该版本目录——挂载卷会遮蔽镜像内置产物，服务端启动时会补进卷，补不上就会有日志 |
 | **节点页标着「需人工重装」** | 该探针的 agent 是这条功能上线前装的，二进制里没有自更新代码。用面板给的重装命令在那台机器上重装一次即可（之后它才会自动跟随） |
-| **重装过了、版本还是旧的**（箭头 `旧 → 新` 不消失，但 `strings /usr/local/bin/fobe-agent \| grep -c selfcheck` 已经是新二进制） | 装的是文件、跑的还是旧进程：`systemctl status fobe-agent` 看 `Active ... since` 是不是刚才（不是 = 服务没被重启）。旧版 `install.sh` 的 `enable --now` 对已运行的服务是 no-op（已修：改用 `restart`）。立刻恢复：`sudo systemctl restart fobe-agent`；OpenWrt 用 `/etc/init.d/fobe-agent restart` |
+| **重装过了、版本还是旧的**（箭头 `旧 → 新` 不消失，但 `strings /usr/local/bin/fobe-agent \| grep -c selfcheck` 已经是新二进制） | 装的是文件、跑的还是旧进程：`systemctl status fobe-agent` 看 `Active ... since` 是不是刚才（不是 = 服务没被重启）。旧版 `install.sh` 的 `enable --now` 对已运行的服务是 no-op（已修：改用 `restart`）。立刻恢复：`sudo systemctl restart fobe-agent`；OpenWrt 用 `/etc/init.d/fobe-agent restart`。非 root 模式的二进制路径是 `/opt/fobe-agent/fobe-agent` |
 | **OpenWrt 安装脚本报 `install: not found` / `Command failed: Not found`** | 前者：旧镜像的脚本用了部分 busybox（实测 Kwrt）没编的 `install` applet（已修：改 `rm`+`cp`+`chmod`）；后者：首装收尾 `restart` 时 procd 对没见过的服务做 stop 的化妆性 ubus 噪音（退出码 0，agent 实际已装好上线，已修：stop 静音 + start）。更新服务端镜像（`docker compose up -d --build`）后重跑安装命令即可；单独出现后者时节点多半已在线，先看面板 |
 | **某台探针 agent 反复重启、版本没变** | 属于熔断保护的对象：先看 `journalctl -u fobe-agent`（OpenWrt 用 `logread`）里的自检/替换错误，确认二进制落点与权限；连续失败到 3 次会停手，不再反复重启 |
 | **拉不到 GitHub / 自动下载失败**（设置页显示失败原因） | 服务端出网受限。三选一：① 配镜像源 `FOBE_SINGBOX_API_BASE` + `FOBE_SINGBOX_DOWNLOAD_BASE`（GitHub 兼容即可）后点「重试」；② 手动把 `linux-amd64` 与 `linux-amd64.sha256` 放进 `data/dl/singbox/<version>/`；③ 用 `FOBE_SINGBOX_AUTO_DOWNLOAD=0` 关掉自动下载，完全手动管理。注意**校验失败会拒绝安装**（fail-closed），不会留半成品 |
 | **GeoIP 库自动更新失败 / 国别显示为空** | 三个免密钥镜像都不通（内网出网受限）。做法：设置 → GeoIP 看失败原因，① 用 `FOBE_GEOIP_URL` 或设置页「自定义下载源」钉一个可达的镜像；② 手动下载 `GeoLite2-Country.mmdb` 后点「上传 MMDB」；③ 用 `FOBE_GEOIP_AUTO_UPDATE=0` 关掉自动更新，只留手动。上传/下载的都是 `FOBE_GEOIP_MMDB` 指向的同一个文件，校验失败会拒绝替换（旧库继续用） |
 | **节点详情磁盘占用率恒 0 / 每日流量为空** | 两个旧版 bug（磁盘的挂载点/文件系统字段解析错位、没有 `node_network` 行时整条流量上报被丢弃），已修复。**服务端与探针 agent 都要升级**：磁盘在 agent 侧采集，旧 agent 上报的磁盘恒空；升级后新样本才有值（历史样本仍是 0） |
 | 一键更新后个别节点没生效 | 离线节点要等重连后由 `hello_ack` 自动收敛（结果表里是"离线待生效"）；15 分钟后仍未收敛会发一条 `singbox_update_stale` 告警，逐台查 `journalctl -u fobe-agent` / agent 侧的 sing-box 日志 |
-| **探针上 sing-box 装在哪 / 升级后路径变了** | agent 侧统一用 `/etc/one-sing/`：`sing-box`（二进制）、`config.json`、`cert/{cert.crt,private.key}`（与 one-sing.sh 同一套路径，便于互相接管）。从旧版本升级的探针会在 agent 启动时自动搬迁旧路径（`/usr/local/bin/sing-box`、`/etc/sing-box/…`）并删掉空目录，日志里是 `sing-box layout migrated`。机器上原本有 one-sing.sh 的 `one-sing.service` 时，agent 首次收敛前会**停掉并 disable** 它（两个 supervisor 抢同一个进程只会互相重启）。注意 `config.json` 由面板独占：继续用 one-sing.sh 加协议会互相覆盖，要共存请改路径 |
+| **探针上 sing-box 装在哪 / 升级后路径变了** | root 模式统一用 `/etc/one-sing/`：`sing-box`（二进制）、`config.json`、`cert/{cert.crt,private.key}`（与 one-sing.sh 同一套路径，便于互相接管）。从旧版本升级的探针会自动搬迁旧路径（`/usr/local/bin/sing-box`、`/etc/sing-box/…`）并删掉空目录，日志里是 `sing-box layout migrated`；已有 one-sing.sh 的 `one-sing.service` 会在首次收敛前被停掉并 disable。**非 root 模式**改用 `/opt/fobe-agent/one-sing/`（`FOBE_SINGBOX_HOME` 可覆盖），不迁移也不接管 root 的 one-sing.service；若后者占同一端口，面板会报告收敛失败。`config.json` 始终由面板独占，要共存请改路径 |
 
 ## 许可
 

@@ -123,7 +123,7 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 - 之后 agent 用 `node_id + node_secret` 建立 WSS，服务端按 `machine_id` 去重：
   - 已有同一 `machine_id` 且凭证校验通过 → **复用节点**，更新 IP/版本，不产生垃圾节点；
   - 已存在但凭证不符 → 拒绝注册，面板显示"疑似重复安装"，由你手动选择接管。
-- agent 侧落盘：`/etc/fobe-agent/{config.json,machine-id}`（0600，root）。OpenWrt 上 `/etc` 是 overlay，重启保留。
+- agent 侧默认落盘：`/etc/fobe-agent/{config.json,machine-id,update-state.json}`（0600，root）。OpenWrt 上 `/etc` 是 overlay，重启保留。**实现修订 2026-09-16（非特权模式）**：`machine-id` 与 `update-state.json` 一律从 `-config` 所在目录派生；因此 `--unprivileged` 的 `/opt/fobe-agent/config.json` 会把全部探针本地状态收进同一个用户可写目录。
 
 ### 4.3 登录失败黑名单
 
@@ -149,7 +149,7 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 
 - 单个静态二进制（`CGO_ENABLED=0`，`linux/amd64`，musl 兼容）——**OpenWrt 与常规发行版同一份产物**。
 - **不调用外部命令做采集**：CPU/内存/磁盘/网络全部读 `/proc`、`/sys`、`statfs`。原因：OpenWrt 是 busybox，字段与工具集都可能缺。
-- 需要 root（安装 systemd unit/procd 服务、写 `/etc`、ICMP raw socket）。缺少 `CAP_NET_RAW` 时 ICMP 降级为 TCP-only 并上报能力位。
+- 默认 root 安装（安装 systemd unit/procd 服务、写 `/etc`、ICMP raw socket）；常规 systemd Linux 可选「一次性 root 引导、日常非 root」模式（§5.3）。ICMP 依次尝试 raw socket（root / `CAP_NET_RAW`）与内核 ping socket（`SOCK_DGRAM`，受 `ping_group_range` 控制）；两者皆不可用时才降级 TCP-only，并上报能力位。
 
 ### 5.2 安装流程
 
@@ -171,6 +171,8 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 6. 安装并启动系统服务；
 7. 立即上报一次完整信息（IP、系统、CPU 核数、版本）。
 
+`--unprivileged` 是可选的 systemd-only 分支：引导阶段仍需 root/sudo，脚本创建 `fobe-agent` 系统用户、将二进制与本地状态装入 `/opt/fobe-agent/`（0750，用户所有），生成 `User=fobe-agent` 且仅带 `CAP_NET_RAW` ambient capability 的 `fobe-agent.service`。已有 root 安装切换时复制 config/machine-id/update-state 以保留同一节点，并停用旧 `fobe-singbox.service`，避免它和非特权 fallback child 抢端口；procd/fallback 明确拒绝此模式。
+
 > **实现修订 2026-09-16（OpenWrt 实机首装暴露，三处）**：① 落盘一律走 `put_file`（`rm -f` + `cp` + `chmod`）而不是 `install -m`——实测 Kwrt 的 busybox 没编 `install` applet，首装在第 3 步直接 `sh: install: not found`；先 unlink 还避开重装时的 `ETXTBSY`（`cp` 原地写正在运行的二进制会被内核拒绝；unlink 让活进程留在旧 inode，由随后的服务 restart 换入新二进制，与上文 enable/restart 陷阱同一语义）。② procd 分支曾把**二进制**误装到 `/etc/init.d/fobe-agent`（`$TMP/fobe-agent` 手误，写出来的 initd 脚本是死代码）——真机后果是拿 ELF 覆盖 init 脚本、`enable`/`restart` 变成带怪参数跑 agent、procd 服务管理整体失效。已改为安装 `$TMP/fobe-agent.initd`，heredoc 去引号让 initd 里的 agent 路径跟随 `$BIN_DIR` 探测结果，不再可能与它分叉。③ procd 分支收尾 `restart` 在**首装**时会打印 `Command failed: Not found`——rc.common 的 restart 就是 stop+start，而 procd 从没见过这个服务，stop 步骤的 `ubus call service delete` 回 `NOT_FOUND`（退出码仍是 0，纯化妆性噪音，agent 实际正常上线）。改为 `stop >/dev/null 2>&1 || true` + `start`：首装输出干净，start 的真实错误仍然可见，重装时依旧真的停掉旧进程。三分支已在 busybox 容器（stub procd/systemd/fallback）里做过首装+重装实跑验证。
 
 ### 5.3 服务管理抽象
@@ -184,11 +186,13 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 `sing-box` 的服务文件由 agent 自己写（面板只下发期望状态），这样才能保证不同平台一致。
 
 > **实现修订 2026-09-15（检测谓词用错，systemd 全被误判为 fallback）**：`service.Detect()` 用 `fileExists("/run/systemd/system")` 检测第一行，而同一个包里的 `fileExists` 语义是"存在**且不是目录**"（它对 unit 文件/二进制/配置是对的）——`/run/systemd/system` 恰恰是 systemd 自己建的**目录**，于是**每一台 systemd 机器（所有常规 Debian/Ubuntu VPS）都返回 `KindFallback`**。这不是"这台没有 supervisor"，是压根没检测到 supervisor，症状分散在三处、互相看起来无关：
-> - `hello.Caps` 报 `systemd=false / fallback=true` ⇒ `self_update=false`（§5.5）⇒ 面板把这台"其实一直跑在 systemd 下"的探针标成"不支持自更新 / no service manager to restart the agent"；
+> - 当时的 `hello.Caps` 报 `systemd=false / fallback=true`，旧版 §5.5 又把自更新错误绑定到 supervisor，于是 `self_update=false`，面板把这台"其实一直跑在 systemd 下"的探针标成"不支持自更新 / no service manager to restart the agent"；2026-09-16 改为 `exec` 后能力位已只看 Linux、可解析自身路径和二进制目录可写；
 > - sing-box 落到 **spawn 兜底分支**（agent 自己 fork + reap）而不是自己写的 `fobe-singbox.service`，于是它不受 systemd 管、开机不自动起；
 > - 面板的 sing-box 启停/重启（`commands.go` 与 §9.x 动作）一律回 `no service manager detected`。
 >
 > 修法：检测存在性用新加的 `pathExists()`（`os.Stat` 成功即可，文件或目录都算），`fileExists()` 保持"文件"语义并只用于它该用的地方；`Detect()` 拆出 `detectAt(root)` 以便用假根目录单测（`internal/agent/service/detect_test.go` 钉住"目录必须算存在"）。**同批修掉被这次修正才第一次走到的 native 分支的两个潜伏问题**：① `singboxManager.start` 改用 `restart`（`systemctl start` 对已在跑的服务是 no-op，改了 config 也不会重载，而闸门③只看到"端口有人应答"；这与 §5.5 里 install.sh 的 `enable --now` 陷阱是同一类）；② 迁移到 native 前用 `dropOrphan()` 清掉 fallback 分支遗留的孤儿 sing-box——它被 reparent 到 init 后仍占着入站端口，会让新 unit 起不来、`Restart=always` 反复重启，闸门③却去怪新版本。另外 `InstallSingbox` 补上 `systemctl enable`：unit 文件里的 `WantedBy` 不会自己创建 `multi-user.target.wants` 符号链接。
+>
+> **实现修订 2026-09-16（非特权运行）**：`euid != 0` 的 agent 不能写 `/etc/systemd/system`，也不能经 system bus 管理 unit（会被 polkit 拒绝），因此 sing-box **显式强制**走既有 fallback 分支（agent `spawn` + watchdog），而不是把宿主的 `caps.systemd=true` 错当成自己可用的管理权限。面板端口本来就限制为 10000–60000（§9.3），非 root 可直接绑定；工作目录从 `-config` 同级的 `one-sing/` 派生，`FOBE_SINGBOX_HOME` 可显式覆盖，服务端下发 JSON 里的 `/etc/one-sing` 证书前缀在 agent 写盘、哈希比对时同步重定位。root 的 legacy 布局迁移与 `one-sing.service` 接管跳过：前者只会产生 EACCES，后者无权执行；已有 root 服务占端口时由闸门③如实失败上报。`install.sh --unprivileged` 是此形态的唯一受支持引导路径（§5.2）。
 
 ### 5.4 OpenWrt 专项
 
@@ -209,14 +213,14 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
   1. 下载到**目标二进制所在目录**里的临时文件（同目录才能 `rename`，跨文件系统会 `EXDEV`）；目标路径由 `os.Executable()` 解析（跟随符号链接）——不猜 `BIN_DIR`，systemd 装的是 `/usr/local/bin`、OpenWrt 是 `/usr/bin`；
   2. 与 `linux-amd64.sha256` 比对 sha256，不符即 `terminal` 失败；
   3. 以 `-selfcheck` 跑一次**新二进制自己**：用同一份 config 连服务端，`hello` 带 `selfcheck:true`，hub 只回 `hello_ack` 后立即关闭——**不注册、不落库、不顶掉线上连接**（`hub.go` 的重复注册会 `old.close()`：天真地握手会把正在跑的 agent 踢下线，还会让面板显示一个并没生效的版本号）。自检还必须校验 `hello_ack.agent_target_version`：非空且不等于自己的 `Version` 即失败，挡住"目录名与二进制内版本错位"这类产物错放（对方为空说明服务端此刻已不再下发 target，那是环境变化而不是这个产物的问题，不作为失败）；超时 60s；
-  4. 自检通过 → `rename` 覆盖目标二进制 → **主动 `exit`**，由 supervisor（systemd `Restart=always` / procd `respawn`）拉起新版本。**不保留 `.prev`**：不留就没有本地回滚，代价是"自检过但 `-run` 起不来"这种残余情形只能 SSH 重装（§20）；换来的是 OpenWrt overlay 上少 10MB 常驻占用；
+  4. 自检通过 → `rename` 覆盖目标二进制 → **`exec` 原地换入**新版本。PID 不变，systemd/procd 若存在只负责崩溃恢复；Go 默认 CLOEXEC 关闭旧 socket，`main()` 重新初始化连接与状态。**不保留 `.prev`**：不留就没有本地回滚，代价是"自检过但 `-run` 起不来"这种残余情形只能 SSH 重装（§20）；换来的是 OpenWrt overlay 上少 10MB 常驻占用；
   5. 自检或下载失败 → 线上二进制**一动不动**。
-- **fallback 不参与**：`install.sh` 的 fallback 分支用 `nohup` 起 agent，没有 supervisor，"重启自己"无处落地；这类节点上报 `self_update=false`，面板只显示需人工处理。
-  ⚠️ **`unsupported` 是能力判定，不是失败（实现修订 2026-09-15）**：它 `attempts=0`、什么都没试过，所以服务端**不为它建失败告警**（并顺手 recover 掉该节点既有的失败/环境告警，否则一条永远无法自愈的 high 风险告警会长期挂在面板上），`audit_logs` 的 risk 记 `low`；面板把它渲染成中性提示（`agent_update_reason`）而不是红字"上次错误"，并按"没有 supervisor"（本例）与"旧二进制"给出不同的重装提示文案。**判定"这台的探针是不是没 supervisor"必须看探针自己报的原因**，不能只看 `caps.fallback`：§5.3 那次检测 bug 期间，一台好好的 systemd 机器也会自报 fallback。
-- **失败分类（两本账）**：
+- **fallback 也参与**（实现修订 2026-09-16）：`exec` 不依赖 supervisor，`nohup`/容器 fallback 只要二进制所在目录可写就能跟随；若 exec 真失败（ENOEXEC/权限），才回退旧语义 `exit(0)`，交给可能存在的 supervisor。
+  ⚠️ **`unsupported` 是能力判定，不是失败（实现修订 2026-09-15）**：它 `attempts=0`、什么都没试过，所以服务端**不为它建失败告警**（并顺手 recover 掉该节点既有的失败/环境告警，否则一条永远无法自愈的 high 风险告警会长期挂在面板上），`audit_logs` 的 risk 记 `low`；面板把它渲染成中性提示（`agent_update_reason`）而不是红字"上次错误"，并按「目录不可写/无法解析自身路径」与「旧二进制未上报能力位」给出不同的重装提示文案。`caps.fallback` 仅描述宿主的服务管理环境，不再决定自更新能力。
+- **能力位与失败分类（两本账）**（实现修订 2026-09-16）：`hello.Caps.self_update` 不再判「是否发现 supervisor」，而是判「linux + 可解析自身二进制 + 该目录可写」（`rename` 看目录权限，不看二进制文件自身 mode）；`unsupported` 原因如实报告「无法定位自身二进制 / 目录不可写」。
   - `terminal`（不再重试，等 target 变更或人工重试）：sha256 不符 / 无法 exec / 自检报版本不符；
   - `transient`（退避 1m → 1h 封顶，不计入熔断）：连不上服务端、`/dl` 404/5xx、同目录剩余空间 < 2×产物、目标不可写。
-- **熔断双记账**：agent 本地 `/etc/fobe-agent/update-state.json` 记 `target / attempts / last_error / class`（跨重启有效），**同一 target 连续 3 次 `terminal`** 就停手并上报；服务端 `nodes` 表同样记一份（面板可见 + 人工解锁），target 变化时两边计数清零。本地那份是唯一能在"替换无效、反复重启"时救命的账，服务端那份负责可见性——**只留一边都会在某个场景下失效**。
+- **熔断双记账**：agent 本地 `update-state.json`（默认 `/etc/fobe-agent/`，非特权模式与 `-config` 同目录）记 `target / attempts / last_error / class`（跨 re-exec 有效），**同一 target 连续 3 次 `terminal`** 就停手并上报；服务端 `nodes` 表同样记一份（面板可见 + 人工解锁），target 变化时两边计数清零。本地那份是唯一能在"替换无效、反复重启"时救命的账，服务端那份负责可见性——**只留一边都会在某个场景下失效**。
 - **状态与面板**：`nodes` 增 `agent_target_version / agent_update_state / agent_update_attempts / agent_update_error / agent_update_planned_at / agent_update_done_at`（`migrateAdditive`，幂等）；节点页显示 当前版本 / 期望版本 / 计划时刻 / 上次结果与原因；`POST /api/nodes/{id}/agent/retry` 清计数（人工解锁）。每次尝试写 `audit_logs`（`actor=system`）。
 - **告警三档**：`terminal` 立即；`transient` 连续 3 次；分发后 15 分钟仍未收敛的节点**汇总一条**（与 §9.5 同一口径与去重窗口）。
 - **存量探针只能人工重装一次**：今天已装的 agent 二进制里没有这段代码，服务端下发 target 它也不认识（Go 忽略未知 JSON 字段，它会照常跑）。判定靠**能力位而非版本号猜测**：新 agent 在 `hello.Caps` 里报 `self_update=true`，不报的一律在面板标"需人工重装（不支持自更新）"并给出重装命令。**不许假装它会自动跟上。**
@@ -378,7 +382,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 - 版本**必须显式指定**（面板展示可选版本，来自服务端 release 清单），不追 latest。一键批量更新里的 `latest` 只在**点击那一刻**解析成具体版本号并固化后下发，不变量不被破坏（见 §9.5）。
 - 产物来源：优先面板 `/dl/singbox/<version>/linux-amd64`（服务端缓存，规避国内拉 GitHub 的问题），失败回退官方地址。**缓存由服务端进程自己填充**（启动时/手动重试，见 §9.5）——agent 侧只拉面板、不补官方回退。
-- agent 自更新**不走**这条链路（实现修订 2026-09-15）：agent 没有 `check` 与 30s 观察期可用，改用"旁路自检 + 原子提交 + 主动 exit 交给 supervisor"，且**不保留 `.prev`**——详见 **§5.5**。
+- agent 自更新**不走**这条链路（实现修订 2026-09-16）：agent 没有 `check` 与 30s 观察期可用，改用「旁路自检 + 原子提交 + `exec` 原地换入」，且**不保留 `.prev`**——详见 **§5.5**。
 - 每次变更写 `audit_logs`，并在面板节点页显示"当前版本 / 期望版本 / 上次操作结果"。
 
 > **实现修订 2026-09-15（服务端产物缓存 + 一键批量更新）**：本节原本假定"版本清单里总是有货"，但从没有一条链路负责**把货取回来**——服务端只直出 `/dl` 目录里已有的文件，agent 也只会从面板拉取。本次补齐这条链路，并且**不新增任何安装路径**：
@@ -390,11 +394,13 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 ### 9.3 anytls 与自签证书
 
 > **实现修订 2026-09-15（探针侧布局与服务管理对齐 one-sing.sh）**：入站配置与服务管理参考 `one-sing.sh`（同类需求的成熟实现），落地三件事，**协议与订阅语义不变**：
-> - **目录/证书布局**：探针上统一为 `/etc/one-sing/{sing-box,config.json,cert/{cert.crt,private.key}}`（原 `/usr/local/bin/sing-box`、`/etc/sing-box/{config.json,cert/{cert.pem,key.pem}}`）。同名同路径意味着**已经用 one-sing.sh 管起来的机器可以直接被接管**，不必重下二进制或重签证书。证书文件名由服务端写进 `config.json`，两侧必须一致，`internal/server/singbox` 有一条跨包测试盯着（`TestCertPathsMatchAgentLayout`）。
+> - **目录/证书布局（root 模式）**：探针上统一为 `/etc/one-sing/{sing-box,config.json,cert/{cert.crt,private.key}}`（原 `/usr/local/bin/sing-box`、`/etc/sing-box/{config.json,cert/{cert.pem,key.pem}}`）。同名同路径意味着**已经用 one-sing.sh 管起来的机器可以直接被接管**，不必重下二进制或重签证书。证书文件名由服务端写进 `config.json`，两侧必须一致，`internal/server/singbox` 有一条跨包测试盯着（`TestCertPathsMatchAgentLayout`）。
 > - **anytls `padding_scheme`**：采用 one-sing.sh 的方案（`stop=6` / `0=30-30` / `1=80-120` / `2=350-550,c` / `3=900-1400` / `4=250-600` / `5=250-600`），不再用 sing-box 默认值。它进 `config.json`，因此**改这一项等于改 `config_hash`，会在下一次收敛时把全部节点重新下发一遍**——有意的、一次性的代价。
 > - **systemd 单元对齐**：`fobe-singbox.service` 补上 `CapabilityBoundingSet` / `AmbientCapabilities`、`ExecReload=/bin/kill -HUP $MAINPID`、`LimitNOFILE=infinity`、`RestartSec=10s`（保留 `User=root`、`NoNewPrivileges=true`）。**单元名仍是 fobe 自己的**：写 `one-sing.service` 会与 one-sing.sh 抢同一个进程，卸载 fobe 时还会删掉别人的单元；作为补偿，agent 首次收敛前会把已存在的 `one-sing.service` **停掉并 disable**（`AdoptForeignSingboxService`，只认 systemd）——两个 supervisor 抢一个进程只会反复重启，而面板的启停会作用在一个它并不拥有的进程上。
 > - **迁移是幂等的**：agent 启动时 `MigrateSingboxLayout` 只在「目标不存在且源存在」时搬文件（二进制连同 `.prev`/`.download`、配置连同 `.prev`、证书改名 `cert.pem→cert.crt`、`key.pem→private.key`），搬完删空的旧目录；搬不动只记 WARN，收敛循环照样能把缺的东西重新下载回来。
 > - **`config.json` 是 fobe 独占的**：同一台机器上又跑 one-sing.sh 又由 fobe 托管，两边会互相覆盖同一份 `config.json`（one-sing.sh 加的协议会消失）。要共存就改路径，别只改服务名。
+
+> **实现修订 2026-09-16（非特权目录重定位）**：`--unprivileged` 不可写 `/etc`，故布局为 `dirname(-config)/one-sing/`（安装路径即 `/opt/fobe-agent/one-sing/`，`FOBE_SINGBOX_HOME` 优先）。服务端仍生成 root 布局的绝对证书路径，agent 在写盘与 config hash 比对时同步替换前缀；否则每次 60 秒收敛都会误判配置变化并重启。非特权模式不迁移 root 的旧布局，也不接管 `one-sing.service`。
 
 - **私钥永不离开探针**：首次启用时由 agent 用 Go 标准库 `crypto/x509` 现场生成自签证书（不依赖 openssl——OpenWrt 常常没有），存 `/etc/one-sing/cert/{cert.crt,private.key}`（0600）。密钥算法保持 ECDSA P-256（而非 one-sing.sh 的 RSA-4096）：探针是小机器、密钥在设备上现场生成，而客户端是按 SHA256 指纹 pinning 的，算法对客户端不可见。
 - agent 上报**证书 PEM + SHA256 指纹 + 有效期**给面板（不含私钥）。
@@ -582,7 +588,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 ## 13. 延迟测量
 
 - 目标（面板配置，可复用）：`name` + `kind` + `host` + `port`。
-  - `icmp`：ICMP echo RTT（需要 root 或 `CAP_NET_RAW`，缺失则跳过并标记）。
+  - `icmp`：ICMP echo RTT。优先 raw socket（root 或 `CAP_NET_RAW`）；其次 Linux 内核 ping socket（`SOCK_DGRAM`，仅当 `net.ipv4.ping_group_range` 放行当前组）；两者皆不可用才跳过并标记（实现修订 2026-09-16）。
   - `tcp`：TCP 三次握手 RTT（连接目标 host:port 后立即关闭）。
 - 每台探针选择自己用哪些目标（多选）。
 - 采集：**探针本地按全局设置 `latency.interval_seconds` 测量，默认每 5s 一次**（允许 1–3600 秒），本地保留 60s 窗口并**每 60s 批量上报**。设置变更立即推送给在线探针，离线探针会在下一次 `hello_ack` 收到；不是逐点上报，否则 10 探针会出现 2 次/秒的常驻写入，且网络抖动会污染测量本身。

@@ -125,18 +125,41 @@ start_service() {
 // one-sing.service would fight a one-sing.sh installation over the same
 // process, and uninstalling fobe would then remove someone else's unit.
 const (
-	// SingboxWorkDir is the one-sing-compatible working directory.
+	// SingboxWorkDir is the one-sing-compatible working directory — the
+	// *default* layout root. An unprivileged deployment moves it at startup
+	// via SetWorkDir (§5.3 实现修订 2026-09-16); EffectiveWorkDir reports what
+	// is actually in effect.
 	SingboxWorkDir = "/etc/one-sing"
 	// SingboxCertFile / SingboxKeyFile are the certificate names inside the
 	// cert directory. The server's generated config.json refers to these
-	// paths, so the two must agree (see internal/server/singbox/config.go).
+	// paths, so the two must agree (see internal/server/singbox/config.go);
+	// a relocated layout remaps the prefix agent-side (relocateConfig).
 	SingboxCertFile = "cert.crt"
 	SingboxKeyFile  = "private.key"
+)
 
+// The layout paths are package state rather than consts so SetWorkDir can
+// relocate them. They are written once at agent startup, before the sing-box
+// manager goroutine exists, and read-only afterwards — no locking on purpose.
+var (
+	singboxWorkDir    = SingboxWorkDir
 	singboxBinPath    = SingboxWorkDir + "/sing-box"
 	singboxConfigPath = SingboxWorkDir + "/config.json"
 	singboxCertDir    = SingboxWorkDir + "/cert"
 )
+
+// SetWorkDir redirects the one-sing layout root. Call it once at startup,
+// before the first SingboxPaths()/MigrateSingboxLayout() use. Passing the
+// default restores it (tests rely on that to clean up).
+func SetWorkDir(dir string) {
+	singboxWorkDir = dir
+	singboxBinPath = filepath.Join(dir, "sing-box")
+	singboxConfigPath = filepath.Join(dir, "config.json")
+	singboxCertDir = filepath.Join(dir, "cert")
+}
+
+// EffectiveWorkDir is the layout root actually in effect.
+func EffectiveWorkDir() string { return singboxWorkDir }
 
 // legacySingbox holds the pre-revision locations, so an installed probe
 // upgrades in place instead of re-downloading its binary.

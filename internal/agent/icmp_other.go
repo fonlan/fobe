@@ -18,6 +18,10 @@ func hasRawSocket() bool {
 	return true
 }
 
+// icmpAvailable is the Caps.ICMP bit. Off-linux there is no echo transport
+// yet: the latency loop marks such samples as loss (design §5.1).
+func icmpAvailable() bool { return false }
+
 // icmpEchoMs stays unimplemented off-linux: the agent targets x86 Linux and
 // OpenWrt (design §5.1). The latency loop marks such samples as loss.
 func icmpEchoMs(string, time.Duration) (float64, error) {

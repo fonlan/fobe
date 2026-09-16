@@ -78,6 +78,34 @@ func newSingboxManager(cfg *Config, log *slog.Logger) *singboxManager {
 	return m
 }
 
+// singboxKind is the service-manager kind the sing-box lifecycle actually
+// drives. An unprivileged agent cannot write /etc/systemd/system units nor
+// talk to the system bus (polkit refuses), so it always owns the process
+// itself — the fallback spawn branch, which is a complete implementation
+// (spawn + watchdog + orphan cleanup). The inbound port is panel-assigned in
+// 10000–60000 (§9.3), so no bind privilege is needed (§5.3 实现修订
+// 2026-09-16).
+func singboxKind() service.Kind {
+	if !privileged() {
+		return service.KindFallback
+	}
+	return service.Detect()
+}
+
+// relocateConfig remaps the absolute paths the server bakes into the desired
+// config onto the effective layout. BuildNodeConfig (§9.3) declares the
+// certificate pair under the default /etc/one-sing; a probe whose sing-box
+// home moved (unprivileged mode, FOBE_SINGBOX_HOME) rewrites that prefix so
+// sing-box reads the agent-owned copies. Write and hash-compare must both use
+// the relocated form, or every 60s tick would see a mismatch and restart
+// sing-box forever.
+func relocateConfig(configJSON string) string {
+	if service.EffectiveWorkDir() == service.SingboxWorkDir {
+		return configJSON
+	}
+	return strings.ReplaceAll(configJSON, service.SingboxWorkDir, service.EffectiveWorkDir())
+}
+
 // SetDesired records the latest declaration and nudges convergence. A nil
 // (or empty-Version) desired means "not managed": the manager reports
 // nothing and never touches a running sing-box (§9 版本显式).
@@ -251,12 +279,15 @@ func (m *singboxManager) apply(bin, configPath string, d *protocol.SingboxDesire
 	}
 
 	if d.ConfigJSON != "" {
-		// config lands before `sing-box check`: the gate needs the new file
+		// config lands before `sing-box check`: the gate needs the new file.
+		// Written in the relocated form (§5.3 实现修订 2026-09-16) so the
+		// certificate paths match the effective layout.
+		cfgJSON := relocateConfig(d.ConfigJSON)
 		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 			return fmt.Errorf("create config dir: %w", err)
 		}
-		backupPrevConfig(configPath, d.ConfigJSON)
-		if err := writeFileAtomic(configPath, []byte(d.ConfigJSON), 0o600); err != nil {
+		backupPrevConfig(configPath, cfgJSON)
+		if err := writeFileAtomic(configPath, []byte(cfgJSON), 0o600); err != nil {
 			return fmt.Errorf("write config: %w", err)
 		}
 	}
@@ -555,6 +586,12 @@ type singboxActual struct {
 // address a process it does not own). Failure is a WARN — the change path
 // below still runs, and the operator sees the flapping in the logs.
 func (m *singboxManager) adoptForeignUnit() {
+	if !privileged() {
+		// 非特权模式不可能 systemctl disable——若机器上有 root 的
+		// one-sing.service，端口冲突会在闸门③暴露并如实上报，而不是在这里
+		// 收获一串 polkit 拒绝（§5.3 实现修订 2026-09-16）。
+		return
+	}
 	m.mu.Lock()
 	done := m.adoptedUnit
 	m.adoptedUnit = true
@@ -582,7 +619,7 @@ func (m *singboxManager) observe(bin string, d *protocol.SingboxDesired) singbox
 	if d.ConfigJSON != "" {
 		_, configPath, _ := service.SingboxPaths()
 		if raw, err := os.ReadFile(configPath); err == nil {
-			act.configHashMatch = sha256Hex(raw) == sha256Hex([]byte(d.ConfigJSON))
+			act.configHashMatch = sha256Hex(raw) == sha256Hex([]byte(relocateConfig(d.ConfigJSON)))
 		}
 	}
 	act.running = m.processAlive(bin)
@@ -590,7 +627,7 @@ func (m *singboxManager) observe(bin string, d *protocol.SingboxDesired) singbox
 }
 
 func (m *singboxManager) processAlive(bin string) bool {
-	switch service.Detect() {
+	switch singboxKind() {
 	case service.KindFallback:
 		m.mu.Lock()
 		p := m.proc
@@ -616,7 +653,7 @@ func (m *singboxManager) processAlive(bin string) bool {
 // that is not actually serving. `restart` also starts a stopped unit, so the
 // fresh-install case is covered by the same call (design §5.5 同一处修订).
 func (m *singboxManager) start(bin, configPath string) error {
-	switch service.Detect() {
+	switch singboxKind() {
 	case service.KindSystemd:
 		m.dropOrphan(bin)
 		if err := service.InstallSingbox(bin, configPath); err != nil {
@@ -657,7 +694,7 @@ func (m *singboxManager) dropOrphan(bin string) {
 }
 
 func (m *singboxManager) stop(bin string) error {
-	switch service.Detect() {
+	switch singboxKind() {
 	case service.KindSystemd, service.KindProcd:
 		return service.StopSingbox()
 	default:

@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fobe-panel/fobe/internal/agent/service"
 	"github.com/fobe-panel/fobe/internal/protocol"
 	"github.com/gorilla/websocket"
 )
@@ -32,13 +31,15 @@ import (
 //   - Nothing is committed until a bypass self-check proves the new binary can
 //     talk to this server *and* agrees that it is the requested build. The
 //     running binary is only touched after that.
-//   - The attempt budget lives on disk (/etc/fobe-agent/update-state.json), not
-//     in memory: the dangerous loop is "replace → restart → still old → replace
-//     again", and only a file survives that restart.
+//   - The attempt budget lives on disk (update-state.json, beside the config),
+//     not in memory: the dangerous loop is "replace → restart → still old →
+//     replace again", and only a file survives that restart.
 //   - .prev is deliberately absent (design §20.6): no local rollback, in
 //     exchange for not doubling the probe's disk footprint.
 const (
-	// DefaultUpdateStatePath is the probe-local bookkeeping file (§5.5).
+	// DefaultUpdateStatePath is the probe-local bookkeeping file (§5.5) for the
+	// default config location; newSelfUpdater derives the real one from the
+	// -config directory so a relocated deployment keeps its state with it.
 	DefaultUpdateStatePath = "/etc/fobe-agent/update-state.json"
 
 	// selfCheckTimeout bounds the bypass handshake; the server side closes its
@@ -138,26 +139,52 @@ func decide(in updateInput) (updateAction, time.Duration) {
 	return actUpdate, 0
 }
 
-// selfUpdateSupported reports the capability bit (§5.5): without a supervisor
-// there is nothing to restart the agent after it exits, so a fallback probe
-// must never replace its own binary — and says so, which is how the panel
-// avoids claiming it will follow.
-func selfUpdateSupported() bool {
+// selfUpdateCapBit is the Hello.Caps form of the §5.5 verdict (§5.5): linux,
+// a resolvable executable, and a binary directory the current user can rename
+// within. It resolves the executable itself because the hello may be built
+// before the updater exists. Since the exec replace (实现修订 2026-09-16) a
+// supervisor is no longer part of the question, which is what lets the
+// nohup/fallback branch legitimately follow the server.
+func selfUpdateCapBit() bool {
 	if runtime.GOOS != "linux" {
 		return false
 	}
-	return service.Detect() != service.KindFallback
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return exeDirWritable(exe)
 }
 
-// selfUpdateBlockReason explains selfUpdateSupported() == false in words the
-// panel shows verbatim. Saying "no service manager" on a build that simply is
-// not linux is a wrong diagnosis sent to the operator, which is worse than no
-// message: it points at the host instead of at the platform.
-func selfUpdateBlockReason() string {
+// supported is the per-attempt form of the same verdict, evaluated against the
+// updater's own resolved executable path.
+func (u *selfUpdater) supported() bool {
+	return runtime.GOOS == "linux" && exeDirWritable(u.exePath)
+}
+
+// exeDirWritable: rename-onto needs write permission on the directory, not on
+// the file — a root-owned 0755 binary in a user-owned directory is replaceable.
+func exeDirWritable(exePath string) bool {
+	if exePath == "" {
+		return false
+	}
+	return dirWritable(filepath.Dir(exePath))
+}
+
+// unsupportedReason explains supported() == false in words the panel shows
+// verbatim. A wrong diagnosis sent to the operator is worse than no message:
+// it points at the host instead of at the actual blocker.
+func (u *selfUpdater) unsupportedReason() string {
 	if runtime.GOOS != "linux" {
 		return fmt.Sprintf("self-update is only implemented on linux (this is %s)", runtime.GOOS)
 	}
-	return "no service manager to restart the agent"
+	if u.exePath == "" {
+		return "cannot resolve own executable"
+	}
+	return fmt.Sprintf("cannot write %s (the directory holding the agent binary)", filepath.Dir(u.exePath))
 }
 
 // reanchor folds a freshly received plan into the local bookkeeping. The server
@@ -205,6 +232,10 @@ type selfUpdater struct {
 	// exit is os.Exit in production; tests replace it so the replacement chain
 	// can be asserted without killing the test process.
 	exit func(int)
+	// execSelf is syscall.Exec in production (re-exec into the committed
+	// binary, §5.5 实现修订 2026-09-16); tests stub it to choose between the
+	// happy path and the exec-failure fallback.
+	execSelf func(self string, argv, env []string) error
 }
 
 // newSelfUpdater loads the probe-local bookkeeping. statePath is derived from
@@ -226,6 +257,7 @@ func newSelfUpdater(cfg *Config, configPath string, log *slog.Logger) *selfUpdat
 	u.execPath = os.Executable
 	u.execCheck = func(path string) error { return runSelfCheck(path, configPath) }
 	u.exit = os.Exit
+	u.execSelf = execSelfDefault
 	u.state = loadUpdateState(statePath, log)
 	if exe, err := u.execPath(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
@@ -260,7 +292,7 @@ func (u *selfUpdater) report(target, phase, class string, attempts int, errMsg s
 // Consider is called on every handshake (hello_ack) and on every desired push.
 // It never blocks: waiting and updating both happen in the background.
 func (u *selfUpdater) Consider(target string, after int64) {
-	supported := selfUpdateSupported()
+	supported := u.supported()
 	u.mu.Lock()
 	cur := Version
 	if target == cur {
@@ -308,7 +340,7 @@ func (u *selfUpdater) Consider(target string, after int64) {
 		u.mu.Unlock()
 	case actUnsupported:
 		u.mu.Unlock()
-		reason := selfUpdateBlockReason()
+		reason := u.unsupportedReason()
 		u.log.Info("self-update not available on this host", "target", target, "reason", reason)
 		u.report(target, protocol.UpdateUnsupported, "", 0, reason)
 	case actSuppressed:
@@ -340,7 +372,8 @@ func (u *selfUpdater) Consider(target string, after int64) {
 }
 
 // perform runs the §5.5 chain: download → sha256 → self-check → atomic replace
-// → exit (the supervisor starts the new build).
+// → re-exec into the new build (the supervisor, if any, never notices beyond
+// the reconnect).
 func (u *selfUpdater) perform(target string) {
 	defer func() {
 		u.mu.Lock()
@@ -401,11 +434,36 @@ func (u *selfUpdater) perform(target string) {
 	u.persistLocked()
 	u.mu.Unlock()
 	u.report(target, protocol.UpdateCommitted, "", 0, "")
-	u.log.Info("self-update committed; exiting so the supervisor starts the new build",
+	u.log.Info("self-update committed; re-executing into the new build",
 		"target", target, "path", u.exePath)
-	// Give the frame a moment to leave the socket before this process dies.
+	// Give the frame a moment to leave the socket before the image is replaced.
 	time.Sleep(250 * time.Millisecond)
-	u.exit(0)
+	u.reexec()
+}
+
+// reexec replaces the process image with the committed binary. No supervisor
+// is needed: the PID survives (systemd keeps tracking the same MainPID), Go's
+// CLOEXEC fds close the old sockets, and a fallback-mode sing-box child keeps
+// running — exec does not touch children, whereas the old exit flow let a
+// systemd unit kill the whole cgroup (实现修订 2026-09-16).
+func (u *selfUpdater) reexec() {
+	execSelf := u.execSelf
+	if execSelf == nil {
+		execSelf = execSelfDefault
+	}
+	if err := execSelf(u.exePath, os.Args, os.Environ()); err != nil {
+		// exec 的失败面很小（ENOEXEC/权限）；回退旧语义：退出，交给可能存在
+		// 的 supervisor。没有 supervisor 的部署会掉线——supported() 的目录
+		// 可写性探测就是要在事前挡住这种场景。
+		if u.log != nil {
+			u.log.Warn("re-exec failed; exiting for the supervisor instead", "err", err)
+		}
+		exit := u.exit
+		if exit == nil {
+			exit = os.Exit
+		}
+		exit(0)
+	}
 }
 
 // recordResult writes the outcome to the state file and reports it. Terminal

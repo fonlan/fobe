@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -38,7 +39,7 @@ var Version = "dev"
 // When the config already holds node credentials (reinstall), they travel
 // along so the server can rebind the same machine (design §4.2).
 func Register(cfg *Config, configPath, regToken string) error {
-	machineID, err := LoadOrCreateMachineID(DefaultMachineIDPath)
+	machineID, err := LoadOrCreateMachineID(MachineIDPathFor(configPath))
 	if err != nil {
 		return err
 	}
@@ -87,6 +88,20 @@ func Register(cfg *Config, configPath, regToken string) error {
 	return SaveConfig(configPath, cfg)
 }
 
+// singboxHome resolves the sing-box layout root (§9.3): FOBE_SINGBOX_HOME is
+// the explicit override; an unprivileged agent derives the layout from the
+// config directory it already owns (the unprivileged install is defined by
+// owning that directory); root keeps /etc/one-sing untouched.
+func singboxHome(configPath string) string {
+	if v := strings.TrimSpace(os.Getenv("FOBE_SINGBOX_HOME")); v != "" {
+		return v
+	}
+	if !privileged() {
+		return filepath.Join(filepath.Dir(configPath), "one-sing")
+	}
+	return service.SingboxWorkDir
+}
+
 // Run maintains the WSS connection forever: reconnect with jittered
 // exponential backoff, hello on connect, periodic reporting, command serving.
 // The sing-box manager (§9) outlives individual sessions so fallback-mode
@@ -94,15 +109,25 @@ func Register(cfg *Config, configPath, regToken string) error {
 func Run(cfg *Config, configPath string, log *slog.Logger) error {
 	coll := collect.New()
 
+	// sing-box layout root: FOBE_SINGBOX_HOME wins explicitly; an unprivileged
+	// agent derives it from the config directory it already owns; root keeps
+	// the one-sing-compatible /etc/one-sing (§9.3). Runs before the manager
+	// starts so every SingboxPaths() read sees the final layout.
+	service.SetWorkDir(singboxHome(configPath))
+
 	// Adopt an installation left by an older agent before the first
 	// convergence: the layout moved to the one-sing paths (§9.3 实现修订), and
 	// re-downloading a 30 MB artifact on every upgraded probe (or losing the
-	// rollback copy) would be a self-inflicted regression.
-	if notes, err := service.MigrateSingboxLayout(); err != nil {
-		log.Warn("sing-box layout migration incomplete", "err", err)
-	} else {
-		for _, n := range notes {
-			log.Info("sing-box layout migrated", "move", n)
+	// rollback copy) would be a self-inflicted regression. The legacy tree is
+	// root-owned /etc, so an unprivileged agent skips the walk instead of
+	// harvesting EACCES warnings.
+	if privileged() {
+		if notes, err := service.MigrateSingboxLayout(); err != nil {
+			log.Warn("sing-box layout migration incomplete", "err", err)
+		} else {
+			for _, n := range notes {
+				log.Info("sing-box layout migrated", "move", n)
+			}
 		}
 	}
 
@@ -230,13 +255,15 @@ func (s *agentSession) hello() {
 		DistroID:      distroID,
 		DistroVersion: distroVersion,
 		Caps: protocol.Caps{
-			ICMP:     hasRawSocket(),
+			ICMP:     icmpAvailable(),
 			Systemd:  detect == service.KindSystemd,
 			Procd:    detect == service.KindProcd,
 			Fallback: detect == service.KindFallback,
 			// §5.5: agents built before this never send the bit, which is how
-			// the panel tells "will follow" from "needs a reinstall".
-			SelfUpdate: selfUpdateSupported(),
+			// the panel tells "will follow" from "needs a reinstall". Since the
+			// exec replace (实现修订 2026-09-16) the verdict is "may rename in
+			// the binary's directory", not "a supervisor exists".
+			SelfUpdate: selfUpdateCapBit(),
 		},
 		IPs:        LocalIPs(),
 		Interfaces: collect.NetworkInterfaces(),

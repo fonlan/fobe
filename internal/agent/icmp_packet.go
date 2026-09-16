@@ -2,10 +2,11 @@ package agent
 
 import "encoding/binary"
 
-// ICMP echo wire format (design §13): raw IPv4 ICMP, id = pid & 0xffff,
-// sequence auto-increment, payload carries the send timestamp so replies can
-// be matched and validated. Pure helpers live here so every platform can
-// test them; the raw socket itself is icmp_linux.go.
+// ICMP echo wire format (design §13): the raw transport uses pid & 0xffff as
+// its id, while Linux ping sockets use their kernel-assigned id. Sequence
+// auto-increments and the payload carries the send timestamp so replies can
+// be matched and validated. Pure helpers live here so every platform can test
+// them; the socket transports themselves are in icmp_linux.go.
 const (
 	icmpTypeEchoRequest = 8
 	icmpTypeEchoReply   = 0

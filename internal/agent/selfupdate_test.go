@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -163,11 +164,12 @@ func TestTransientBackoffGrowsAndCaps(t *testing.T) {
 // updateFixture wires an updater against a temp "installation" and a stub
 // artifact server.
 type updateFixture struct {
-	updater *selfUpdater
-	exe     string
-	exited  chan int
-	reports []string
-	mu      sync.Mutex
+	updater  *selfUpdater
+	exe      string
+	exited   chan int
+	reexeced chan string
+	reports  []string
+	mu       sync.Mutex
 }
 
 func newUpdateFixture(t *testing.T, version, body string, checksumOverride, selfCheckErr string) *updateFixture {
@@ -195,7 +197,11 @@ func newUpdateFixture(t *testing.T, version, body string, checksumOverride, self
 	}))
 	t.Cleanup(srv.Close)
 
-	f := &updateFixture{exe: exe, exited: make(chan int, 1)}
+	f := &updateFixture{
+		exe:      exe,
+		exited:   make(chan int, 1),
+		reexeced: make(chan string, 1),
+	}
 	f.updater = &selfUpdater{
 		cfg:       &Config{ServerURL: srv.URL},
 		log:       quietLog(),
@@ -203,6 +209,10 @@ func newUpdateFixture(t *testing.T, version, body string, checksumOverride, self
 		exePath:   exe,
 		now:       func() int64 { return time.Now().Unix() },
 		exit:      func(code int) { f.exited <- code },
+		execSelf: func(path string, _ []string, _ []string) error {
+			f.reexeced <- path
+			return nil
+		},
 		execCheck: func(string) error {
 			if selfCheckErr != "" {
 				return fmt.Errorf("%s", selfCheckErr)
@@ -226,10 +236,9 @@ func (f *updateFixture) phases() []string {
 }
 
 // The happy path is a real file replacement in a temp directory: download →
-// sha256 → self-check → rename, then exit so the supervisor starts the new
-// build. This is the closest a unit test gets to "the probe followed the
-// server" without a service manager.
-func TestPerformReplacesTheBinaryAndExits(t *testing.T) {
+// sha256 → self-check → rename, then re-exec in place. This is the closest a
+// unit test gets to "the probe followed the server" without a service manager.
+func TestPerformReplacesTheBinaryAndReexecs(t *testing.T) {
 	f := newUpdateFixture(t, "v2", "new-binary-payload", "", "")
 	f.updater.perform("v2")
 
@@ -244,12 +253,17 @@ func TestPerformReplacesTheBinaryAndExits(t *testing.T) {
 		t.Fatalf("replaced binary is not executable: %v %v", st, err)
 	}
 	select {
-	case code := <-f.exited:
-		if code != 0 {
-			t.Fatalf("exit code = %d, want 0", code)
+	case path := <-f.reexeced:
+		if path != f.exe {
+			t.Fatalf("re-exec path = %q, want %q", path, f.exe)
 		}
 	default:
-		t.Fatal("the updater did not exit: nothing would restart the new build")
+		t.Fatal("the updater did not re-exec into the committed binary")
+	}
+	select {
+	case code := <-f.exited:
+		t.Fatalf("successful re-exec must not exit first (code %d)", code)
+	default:
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(f.exe), ".fobe-agent.tmp")); !os.IsNotExist(err) {
 		t.Fatal("download temp file left behind after a successful replacement")
@@ -260,6 +274,28 @@ func TestPerformReplacesTheBinaryAndExits(t *testing.T) {
 	want := []string{"downloading", "verifying", "committed"}
 	if got := f.phases(); len(got) != len(want) {
 		t.Fatalf("phases = %v, want %v", got, want)
+	}
+}
+
+func TestPerformFallsBackToExitWhenReexecFails(t *testing.T) {
+	f := newUpdateFixture(t, "v2", "new-binary-payload", "", "")
+	f.updater.execSelf = func(string, []string, []string) error {
+		return errors.New("exec format error")
+	}
+	f.updater.perform("v2")
+
+	select {
+	case code := <-f.exited:
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+	default:
+		t.Fatal("failed re-exec must fall back to supervisor exit")
+	}
+	select {
+	case path := <-f.reexeced:
+		t.Fatalf("failed re-exec unexpectedly reported successful re-exec to %q", path)
+	default:
 	}
 }
 
@@ -316,19 +352,28 @@ func TestDownloadRefusesWithoutDiskSpace(t *testing.T) {
 	}
 }
 
-func TestSelfUpdateSupportedNeedsASupervisor(t *testing.T) {
-	// The detector reports what this host is; the invariant under test is the
-	// coupling: fallback mode (nohup) must never claim self-update support.
-	got := selfUpdateSupported()
-	if runtime.GOOS == "linux" && !got {
-		t.Skip("host has no service manager: the assertion below is vacuous here")
+func TestSelfUpdateCapabilityRequiresWritableBinaryDir(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "fobe-agent")
+	if err := os.WriteFile(exe, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if runtime.GOOS == "linux" && got {
-		// fine: a supervisor was found
-		return
+	if !exeDirWritable(exe) {
+		t.Fatal("a temp binary directory must be writable")
 	}
-	if got {
-		t.Fatal("non-linux builds must not report self-update support")
+	if exeDirWritable(filepath.Join(dir, "missing", "fobe-agent")) {
+		t.Fatal("a missing binary directory must not be writable")
+	}
+
+	u := &selfUpdater{exePath: exe}
+	if runtime.GOOS == "linux" && !u.supported() {
+		t.Fatal("a Linux agent with a writable binary directory must support self-update")
+	}
+	if runtime.GOOS != "linux" && u.supported() {
+		t.Fatal("non-Linux builds must not report self-update support")
+	}
+	if runtime.GOOS != "linux" && selfUpdateCapBit() {
+		t.Fatal("non-Linux hello caps must not claim self-update support")
 	}
 }
 

@@ -11,12 +11,21 @@ import (
 	"path/filepath"
 )
 
-// DefaultConfigPath matches the install layout (design §4.2/§5.4):
-// /etc/fobe-agent/config.json, 0600, root-owned.
-const (
-	DefaultConfigPath    = "/etc/fobe-agent/config.json"
-	DefaultMachineIDPath = "/etc/fobe-agent/machine-id"
-)
+// DefaultConfigPath matches the root install layout (design §4.2/§5.4):
+// /etc/fobe-agent/config.json, 0600, root-owned. Every other probe-local state
+// file derives from the config's directory (MachineIDPathFor, newSelfUpdater),
+// so a -config elsewhere — the unprivileged install of §5.3 实现修订
+// 2026-09-16 — carries its whole state with it.
+const DefaultConfigPath = "/etc/fobe-agent/config.json"
+
+// MachineIDPathFor derives the machine-id location from the config path. The
+// default config path yields the documented /etc/fobe-agent/machine-id.
+func MachineIDPathFor(configPath string) string {
+	if configPath == "" {
+		configPath = DefaultConfigPath
+	}
+	return filepath.Join(filepath.Dir(configPath), "machine-id")
+}
 
 // Config is the agent's persisted state. node_id/node_secret arrive from
 // registration; machine_id is stable across reinstalls.
