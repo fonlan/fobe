@@ -271,8 +271,7 @@ section.card { margin-bottom: 0; }
 .field.inline { flex-direction: row; align-items: center; gap: 8px; margin-bottom: 0; }
 
 .field input,
-.field select,
-.cmd-input-row input {
+.field select {
   appearance: none;
   box-sizing: border-box;
   height: 38px;
@@ -287,8 +286,7 @@ section.card { margin-bottom: 0; }
 }
 
 .field input:focus,
-.field select:focus,
-.cmd-input-row input:focus {
+.field select:focus {
   outline: 2px solid var(--accent-weak);
   border-color: var(--accent);
 }
@@ -448,9 +446,6 @@ section.card { margin-bottom: 0; }
 .row-muted td { opacity: 0.55; }
 .ua-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
 .detail-cell { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12.5px; }
-.cmd-code { display: block; margin-bottom: 4px; }
-.cmd-input-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.cmd-input-row input { flex: 1; }
 
 /* --- node detail ---------------------------------------------------------------- */
 
@@ -473,6 +468,8 @@ section.card { margin-bottom: 0; }
    break opportunity, so without it the text paints outside the tile box. */
 .tile-value { font-size: 16px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
 .tile-sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Distro tile: badge logo inline with the "Debian 13" style label. */
+.distro-value { display: inline-flex; align-items: center; gap: 7px; }
 
 .quota-row { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 

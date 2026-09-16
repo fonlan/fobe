@@ -19,6 +19,9 @@ export interface NodeView {
   country_code: string;
   agent_version: string;
   tz: string;
+  /** Linux distribution detected by the agent from /etc/os-release (§16). */
+  distro_id: string;
+  distro_version: string;
   last_seen?: number | null;
   cpu: number;
   mem_used: number;

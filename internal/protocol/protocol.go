@@ -65,17 +65,22 @@ var Now = func() int64 { return time.Now().Unix() }
 
 // Hello is the first frame after the WSS handshake authenticates the node.
 type Hello struct {
-	MachineID  string             `json:"machine_id"`
-	Hostname   string             `json:"hostname"`
-	Version    string             `json:"version"`
-	OS         string             `json:"os"`
-	Arch       string             `json:"arch"`
-	Kernel     string             `json:"kernel"`
-	CPUCores   int                `json:"cpu_cores"`
-	TZ         string             `json:"tz"` // IANA name, e.g. Asia/Shanghai
-	Caps       Caps               `json:"caps"`
-	IPs        []IPInfo           `json:"ips"`
-	Interfaces []NetworkInterface `json:"interfaces"`
+	MachineID string `json:"machine_id"`
+	Hostname  string `json:"hostname"`
+	Version   string `json:"version"`
+	OS        string `json:"os"`
+	Arch      string `json:"arch"`
+	Kernel    string `json:"kernel"`
+	CPUCores  int    `json:"cpu_cores"`
+	TZ        string `json:"tz"` // IANA name, e.g. Asia/Shanghai
+	// Linux distribution from the agent's /etc/os-release read (§16 basic
+	// info): "debian" + "13", "ubuntu" + "24.04". Empty on non-Linux probes
+	// and on agents older than the field (omitempty keeps the wire compatible).
+	DistroID      string             `json:"distro_id,omitempty"`
+	DistroVersion string             `json:"distro_version,omitempty"`
+	Caps          Caps               `json:"caps"`
+	IPs           []IPInfo           `json:"ips"`
+	Interfaces    []NetworkInterface `json:"interfaces"`
 	// SelfCheck marks the bypass handshake of a freshly downloaded binary
 	// (§5.5). The server answers hello_ack and closes without registering the
 	// connection or touching last_seen/agent_version — a plain handshake would

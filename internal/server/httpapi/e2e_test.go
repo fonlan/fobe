@@ -72,7 +72,7 @@ func postJSON(t *testing.T, client *http.Client, url string, body any) (*http.Re
 }
 
 func TestFullAgentPath(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, api := newTestServer(t)
 	client := &http.Client{}
 
 	// 1. login
@@ -139,6 +139,7 @@ func TestFullAgentPath(t *testing.T) {
 	_, reg := postJSON(t, client, srv.URL+"/api/agent/register", map[string]any{
 		"token": tokenResp.Token, "machine_id": "m-test-1", "hostname": "testhost",
 		"os": "linux", "arch": "amd64", "version": "dev", "tz": "Asia/Shanghai", "cpu_cores": 4,
+		"distro_id": "debian", "distro_version": "12",
 	})
 	nodeID, _ := reg["node_id"].(string)
 	nodeSecret, _ := reg["node_secret"].(string)
@@ -211,6 +212,8 @@ func TestFullAgentPath(t *testing.T) {
 	sendPayload(protocol.TypeHello, "", protocol.Hello{
 		MachineID: "m-test-1", Hostname: "testhost", Version: "dev",
 		OS: "linux", Arch: "amd64", CPUCores: 4, TZ: "Asia/Shanghai",
+		// hello 之后的上报覆盖注册时的初值：发行版随系统升级变化走同一条路
+		DistroID: "debian", DistroVersion: "13",
 		IPs: []protocol.IPInfo{{IP: "203.0.113.10", Family: 4, Scope: "public", IsPrimary: true}},
 		Interfaces: []protocol.NetworkInterface{
 			{Name: "eth0", Default: true},
@@ -219,17 +222,35 @@ func TestFullAgentPath(t *testing.T) {
 	})
 	readType(protocol.TypeHelloAck)
 
-	// 5. node shows online
-	req2, _ := http.NewRequest("GET", srv.URL+"/api/nodes", nil)
-	req2.Header.Set("Cookie", cookie)
-	lr, _ := authClient.Do(req2)
-	var listResp struct {
-		Nodes []map[string]any `json:"nodes"`
+	// 5. node shows online, and the distro reported via hello reached the view.
+	// The hub answers hello_ack *before* pumping frames, so the hello may not
+	// be persisted yet at this instant — poll briefly for it to win over the
+	// value registration wrote.
+	nodeDistro := func() (any, any, bool) {
+		req2, _ := http.NewRequest("GET", srv.URL+"/api/nodes", nil)
+		req2.Header.Set("Cookie", cookie)
+		lr, _ := authClient.Do(req2)
+		var listResp struct {
+			Nodes []map[string]any `json:"nodes"`
+		}
+		_ = json.NewDecoder(lr.Body).Decode(&listResp)
+		lr.Body.Close()
+		if len(listResp.Nodes) != 1 || listResp.Nodes[0]["status"] != "online" {
+			t.Fatalf("node not online: %+v", listResp)
+		}
+		n := listResp.Nodes[0]
+		return n["distro_id"], n["distro_version"], n["distro_id"] == "debian" && n["distro_version"] == "13"
 	}
-	_ = json.NewDecoder(lr.Body).Decode(&listResp)
-	lr.Body.Close()
-	if len(listResp.Nodes) != 1 || listResp.Nodes[0]["status"] != "online" {
-		t.Fatalf("node not online: %+v", listResp)
+	if id, v, ok := nodeDistro(); !ok {
+		for limit := time.Now().Add(2 * time.Second); ; {
+			if time.Now().After(limit) {
+				t.Fatalf("distro not reported: id=%v version=%v", id, v)
+			}
+			time.Sleep(20 * time.Millisecond)
+			if _, _, ok := nodeDistro(); ok {
+				break
+			}
+		}
 	}
 
 	// 6. traffic accounting — configure the interface FIRST so reports land
@@ -346,15 +367,17 @@ func TestFullAgentPath(t *testing.T) {
 	sendPayload(protocol.TypePing, "", nil)
 	readType("pong")
 
-	// 8. command round-trip: enqueue via API, agent executes, result recorded
-	cmdRaw, _ := http.NewRequest("POST", srv.URL+"/api/nodes/"+nodeID+"/commands",
-		bytes.NewReader([]byte(`{"kind":"run_shell","payload":{"command":"echo hello-fobe"},"risky":false}`)))
-	cmdRaw.Header.Set("Cookie", cookie)
-	cr, err := authClient.Do(cmdRaw)
-	if err != nil || cr.StatusCode != 200 {
-		t.Fatalf("enqueue: %v %d", err, statusCode(cr))
+	// 8. command round-trip: enqueue the way the AI path does (the panel's
+	// POST /commands endpoint was removed with the detail-page commands card),
+	// agent executes, result recorded
+	if _, err := api.enqueueCommand(commandEnqueue{
+		NodeID:  nodeID,
+		Kind:    "run_shell",
+		Payload: `{"command":"echo hello-fobe"}`,
+		Audit:   store.AuditEntry{Actor: "ai"},
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
 	}
-	cr.Body.Close()
 
 	// agent receives the cmd and answers
 	cmdEnv := readType(protocol.TypeCmd)

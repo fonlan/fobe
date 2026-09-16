@@ -4,8 +4,9 @@ import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
 import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtTime, fmtTimeShort, fmtDate } from '../format';
-import type { CommandRow, LatencySample, LatencyTarget, MetricsSample, NodeDetailData, TrafficResp } from '../types';
+import type { LatencySample, LatencyTarget, MetricsSample, NodeDetailData, TrafficResp } from '../types';
 import Flag from '../components/Flag';
+import DistroLogo, { distroName } from '../components/DistroLogo';
 import LineChart, { type ChartPoint, type ChartSeries } from '../components/LineChart';
 import ProgressBar from '../components/ProgressBar';
 import Tile from '../components/Tile';
@@ -19,9 +20,16 @@ const C_TX = 'var(--green)';
 // targets than palette entries (CSS vars only — no hardcoded colors).
 const LATENCY_PALETTE = ['var(--accent)', 'var(--green)', 'var(--amber)', 'var(--red)'];
 
+// "Debian 13" / "Ubuntu 24.04"; version is omitted when the distro does not
+// report one (rolling releases).
+function distroLabel(id: string, version?: string): string {
+  const name = distroName(id);
+  return version ? `${name} ${version}` : name;
+}
+
 /**
- * Node detail = monitoring only: live tiles, charts, traffic, latency history
- * and commands. Everything configurable (node settings, latency endpoints, IP
+ * Node detail = monitoring only: live tiles, charts, traffic and latency
+ * history. Everything configurable (node settings, latency endpoints, IP
  * list, sing-box server) lives in Settings → 服务器 → 编辑 (design §16).
  */
 export default function NodeDetail() {
@@ -193,6 +201,19 @@ export default function NodeDetail() {
           <Tile label={t('tx')} value={fmtRate(node.net_tx_rate)} />
           <Tile label={t('hostname')} value={node.hostname || '-'} sub={node.primary_ip} />
           <Tile label={t('os_arch')} value={`${node.os || '?'} / ${node.arch || '?'}`} sub={t('agent_v', { v: node.agent_version || '?' })} />
+          <Tile
+            label={t('distro')}
+            value={
+              node.distro_id ? (
+                <span className="distro-value">
+                  <DistroLogo id={node.distro_id} />
+                  {distroLabel(node.distro_id, node.distro_version)}
+                </span>
+              ) : (
+                '-'
+              )
+            }
+          />
           <Tile label={t('uptime')} value={last ? fmtDuration(last.uptime) : '-'} sub={t('last_seen', { time: fmtTime(node.last_seen) })} />
         </div>
         {node.quota_bytes != null && (
@@ -233,11 +254,6 @@ export default function NodeDetail() {
       <section className="card">
         <h3>{t('sec_latency')}</h3>
         <LatencyPanel nodeId={id} nodeTargets={data.latency_targets ?? []} />
-      </section>
-
-      <section className="card">
-        <h3>{t('sec_commands')}</h3>
-        <CommandsPanel nodeId={id} />
       </section>
     </div>
   );
@@ -326,114 +342,6 @@ function LatencyPanel({ nodeId, nodeTargets }: { nodeId: string; nodeTargets: La
         </span>
       </div>
       <LineChart series={series} fmtY={(v) => `${Math.round(v)}ms`} fmtX={fmtTimeShort} emptyText={t('no_chart_data')} />
-    </div>
-  );
-}
-
-// --- commands -----------------------------------------------------------------
-
-function CommandsPanel({ nodeId }: { nodeId: string }) {
-  const { t } = useI18n();
-  const [commands, setCommands] = useState<CommandRow[]>([]);
-  const [input, setInput] = useState('');
-  const [risky, setRisky] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      setCommands(await api.listCommandsNormalized(nodeId));
-      setErr(null);
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    }
-  }, [nodeId, t]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const send = async () => {
-    const cmd = input.trim();
-    if (!cmd || busy) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await api.enqueueCommand(nodeId, 'run_shell', { command: cmd }, risky);
-      setInput('');
-      window.setTimeout(() => void load(), 1200);
-      window.setTimeout(() => void load(), 4000);
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const payloadCommand = (payload: string): string => {
-    try {
-      const j = JSON.parse(payload) as { command?: string };
-      if (typeof j.command === 'string') return j.command;
-    } catch {
-      // not JSON; show raw
-    }
-    return payload;
-  };
-
-  return (
-    <div className="stack">
-      <div className="cmd-input-row">
-        <input
-          className="mono"
-          value={input}
-          placeholder={t('command_placeholder')}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') void send();
-          }}
-        />
-        <label className="check-chip">
-          <input type="checkbox" checked={risky} onChange={(e) => setRisky(e.target.checked)} />
-          {t('command_risky')}
-        </label>
-        <button type="button" className="btn primary" disabled={busy || input.trim() === ''} onClick={() => void send()}>
-          {t('command_send')}
-        </button>
-      </div>
-      {err && <div className="form-error">{err}</div>}
-
-      {commands.length === 0 ? (
-        <div className="hint">{t('command_empty')}</div>
-      ) : (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>{t('audit_time')}</th>
-              <th>{t('cmd_result')}</th>
-              <th>{t('status')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {commands.map((c) => (
-              <tr key={c.id}>
-                <td className="mono nowrap">{fmtTime(c.created_at)}</td>
-                <td>
-                  <code className="mono cmd-code">{payloadCommand(c.payload)}</code>
-                  {c.result && (
-                    <details>
-                      <summary className="hint">{t('cmd_result')}</summary>
-                      <pre className="code-block small">{c.result}</pre>
-                    </details>
-                  )}
-                </td>
-                <td>
-                  <span className={`chip status-${c.status}`}>{t('cmd_status_' + c.status)}</span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
     </div>
   );
 }

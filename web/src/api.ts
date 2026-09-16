@@ -259,21 +259,11 @@ export function agentReinstallCommand(id: string): Promise<{ install_command: st
 }
 
 // --- commands ---------------------------------------------------------------
+// Read-only: the panel can no longer enqueue shell commands (the detail-page
+// commands card was removed). This list feeds the AI panel's result polling.
 
 export function listCommands(id: string): Promise<{ commands: CommandRow[] }> {
   return request(`/api/nodes/${encodeURIComponent(id)}/commands`);
-}
-
-export function enqueueCommand(
-  id: string,
-  kind: string,
-  payload: unknown,
-  risky: boolean,
-): Promise<{ id: string }> {
-  return request(`/api/nodes/${encodeURIComponent(id)}/commands`, {
-    method: 'POST',
-    body: { kind, payload, risky },
-  });
 }
 
 // The commands table rows currently serialize without json tags (PascalCase

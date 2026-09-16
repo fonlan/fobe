@@ -44,18 +44,21 @@ func Register(cfg *Config, configPath, regToken string) error {
 	}
 	cfg.MachineID = machineID
 
+	distroID, distroVersion := collect.Distro()
 	body, _ := json.Marshal(map[string]any{
-		"token":       regToken,
-		"machine_id":  cfg.MachineID,
-		"hostname":    hostname(),
-		"os":          runtime.GOOS,
-		"arch":        runtime.GOARCH,
-		"kernel":      collect.Kernel(),
-		"version":     Version,
-		"tz":          localTZ(),
-		"cpu_cores":   collect.CPUCores(),
-		"node_id":     cfg.NodeID,
-		"node_secret": cfg.NodeSecret,
+		"token":          regToken,
+		"machine_id":     cfg.MachineID,
+		"hostname":       hostname(),
+		"os":             runtime.GOOS,
+		"arch":           runtime.GOARCH,
+		"kernel":         collect.Kernel(),
+		"version":        Version,
+		"tz":             localTZ(),
+		"cpu_cores":      collect.CPUCores(),
+		"distro_id":      distroID,
+		"distro_version": distroVersion,
+		"node_id":        cfg.NodeID,
+		"node_secret":    cfg.NodeSecret,
 	})
 	resp, err := http.Post(cfg.ServerURL+"/api/agent/register", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -213,6 +216,7 @@ func newSession(cfg *Config, configPath string, coll *collect.Collector, ws *web
 
 func (s *agentSession) hello() {
 	detect := service.Detect()
+	distroID, distroVersion := collect.Distro()
 	hello := protocol.Hello{
 		MachineID: s.cfg.MachineID,
 		Hostname:  hostname(),
@@ -222,6 +226,9 @@ func (s *agentSession) hello() {
 		Kernel:    collect.Kernel(),
 		CPUCores:  collect.CPUCores(),
 		TZ:        localTZ(),
+		// §16 基本信息: the panel shows "Debian 13"-style + a distro badge.
+		DistroID:      distroID,
+		DistroVersion: distroVersion,
 		Caps: protocol.Caps{
 			ICMP:     hasRawSocket(),
 			Systemd:  detect == service.KindSystemd,

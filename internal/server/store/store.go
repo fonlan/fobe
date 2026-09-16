@@ -24,7 +24,7 @@ var schemaFS embed.FS
 // and idempotent, so forgetting a bump only loses the backup-on-change
 // guarantee, never correctness. Upgrade and downgrade semantics: §6 "schema
 // 兼容策略" in design.md.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // Store is the database handle. Safe for concurrent use.
 type Store struct {
@@ -218,6 +218,9 @@ func (s *Store) migrateAdditive() error {
 		{"nodes", "agent_update_done_at", `ALTER TABLE nodes ADD COLUMN agent_update_done_at INTEGER NOT NULL DEFAULT 0`},
 		{"node_network", "cycle_type", `ALTER TABLE node_network ADD COLUMN cycle_type TEXT NOT NULL DEFAULT 'none'`},
 		{"node_network", "next_reset_at", `ALTER TABLE node_network ADD COLUMN next_reset_at INTEGER`},
+		// §16 基本信息: distro detected by the agent from /etc/os-release.
+		{"nodes", "distro_id", `ALTER TABLE nodes ADD COLUMN distro_id TEXT NOT NULL DEFAULT ''`},
+		{"nodes", "distro_version", `ALTER TABLE nodes ADD COLUMN distro_version TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, m := range migrations {
 		if s.columnExists(m.table, m.column) {

@@ -121,7 +121,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/nodes/{id}/traffic", s.requireSession(s.handleNodeTraffic))
 	mux.HandleFunc("GET /api/nodes/{id}/latency", s.requireSession(s.handleNodeLatency))
 	mux.HandleFunc("GET /api/nodes/{id}/commands", s.requireSession(s.handleListCommands))
-	mux.HandleFunc("POST /api/nodes/{id}/commands", s.requireSession(s.handleEnqueueCommand))
 	// §5.5 agent self-update: cluster status, operator retry, reinstall command.
 	mux.HandleFunc("GET /api/agent/update", s.requireSession(s.handleAgentUpdateStatus))
 	mux.HandleFunc("POST /api/nodes/{id}/agent/retry", s.requireSession(s.handleAgentUpdateRetry))

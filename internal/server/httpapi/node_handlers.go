@@ -16,27 +16,30 @@ import (
 
 // nodeView is the list/card shape the frontend renders (design §16).
 type nodeView struct {
-	ID           string  `json:"id"`
-	Name         string  `json:"name"`
-	Status       string  `json:"status"`
-	Online       bool    `json:"online"`
-	Note         string  `json:"note"`
-	OS           string  `json:"os"`
-	Arch         string  `json:"arch"`
-	Hostname     string  `json:"hostname"`
-	CPUCores     int     `json:"cpu_cores"`
-	PrimaryIP    string  `json:"primary_ip"`
-	CountryCode  string  `json:"country_code"`
-	AgentVersion string  `json:"agent_version"`
-	TZ           string  `json:"tz"`
-	LastSeen     *int64  `json:"last_seen,omitempty"`
-	CPU          float64 `json:"cpu"`
-	MemUsed      int64   `json:"mem_used"`
-	MemTotal     int64   `json:"mem_total"`
-	DiskUsed     int64   `json:"disk_used"`
-	DiskTotal    int64   `json:"disk_total"`
-	NetRxRate    float64 `json:"net_rx_rate"`
-	NetTxRate    float64 `json:"net_tx_rate"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	Online       bool   `json:"online"`
+	Note         string `json:"note"`
+	OS           string `json:"os"`
+	Arch         string `json:"arch"`
+	Hostname     string `json:"hostname"`
+	CPUCores     int    `json:"cpu_cores"`
+	PrimaryIP    string `json:"primary_ip"`
+	CountryCode  string `json:"country_code"`
+	AgentVersion string `json:"agent_version"`
+	TZ           string `json:"tz"`
+	// Linux distribution the agent detected from /etc/os-release (§16 基本信息).
+	DistroID      string  `json:"distro_id"`
+	DistroVersion string  `json:"distro_version"`
+	LastSeen      *int64  `json:"last_seen,omitempty"`
+	CPU           float64 `json:"cpu"`
+	MemUsed       int64   `json:"mem_used"`
+	MemTotal      int64   `json:"mem_total"`
+	DiskUsed      int64   `json:"disk_used"`
+	DiskTotal     int64   `json:"disk_total"`
+	NetRxRate     float64 `json:"net_rx_rate"`
+	NetTxRate     float64 `json:"net_tx_rate"`
 	// traffic per selected mode
 	Iface             string  `json:"iface"`
 	Mode              string  `json:"mode"`
@@ -86,7 +89,8 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 		CPUCores: n.CPUCores, PrimaryIP: n.PrimaryIP, CountryCode: n.CountryCode,
 		AgentVersion: n.AgentVersion,
 		TZ:           n.TZ,
-		PeriodPct:    -1,
+		DistroID:     n.DistroID, DistroVersion: n.DistroVersion,
+		PeriodPct: -1,
 
 		AgentTargetVersion:  n.AgentTargetVersion,
 		AgentUpdateState:    n.AgentUpdateState,
@@ -480,13 +484,6 @@ func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"commands": out})
 }
 
-type enqueueReq struct {
-	Kind    string          `json:"kind"`
-	Payload json.RawMessage `json:"payload"`
-	Risky   bool            `json:"risky"`
-	Reason  string          `json:"reason"`
-}
-
 type commandEnqueue struct {
 	NodeID  string
 	Kind    string
@@ -495,6 +492,11 @@ type commandEnqueue struct {
 	Audit   store.AuditEntry
 }
 
+// enqueueCommand queues a node command and writes the audit line. The panel's
+// arbitrary-shell entry point (POST /api/nodes/{id}/commands) was removed with
+// the detail-page commands card; the remaining callers are panel actions
+// (sing-box restart) and the AI execution path (design §12), which set their
+// own actor/risk on the audit entry.
 func (s *Server) enqueueCommand(req commandEnqueue) (string, error) {
 	if req.TTL <= 0 {
 		req.TTL = 600
@@ -522,48 +524,6 @@ func (s *Server) enqueueCommand(req commandEnqueue) (string, error) {
 	}
 	s.Hub.NotifyCommand(req.NodeID)
 	return cmdID, nil
-}
-
-// handleEnqueueCommand queues a command for the node (panel actions now;
-// the AI path reuses this with actor=ai, design §12).
-func (s *Server) handleEnqueueCommand(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	var req enqueueReq
-	if err := decodeJSON(r, &req); err != nil || req.Kind == "" {
-		writeErr(w, http.StatusBadRequest, "bad_request")
-		return
-	}
-	payload := string(req.Payload)
-	if payload == "" {
-		payload = "{}"
-	}
-	cmdID, err := s.enqueueCommand(commandEnqueue{
-		NodeID:  id,
-		Kind:    req.Kind,
-		Payload: payload,
-		Audit: store.AuditEntry{
-			Actor:    "panel",
-			Risk:     riskLabel(req.Risky),
-			Reason:   req.Reason,
-			SourceIP: s.Trust.RealIP(r),
-		},
-	})
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": cmdID})
-}
-
-func riskLabel(risky bool) string {
-	if risky {
-		return "risky"
-	}
-	return "normal"
 }
 
 // --- primary IP pinning (design §14 手动主 IP) ---

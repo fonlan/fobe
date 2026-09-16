@@ -112,6 +112,9 @@ type agentRegisterReq struct {
 	Version   string `json:"version"`
 	TZ        string `json:"tz"`
 	CPUCores  int    `json:"cpu_cores"`
+	// os-release distro (§16 基本信息); empty from agents older than the field.
+	DistroID      string `json:"distro_id"`
+	DistroVersion string `json:"distro_version"`
 	// present when reinstalling an already-configured probe (§4.2 reuse path)
 	NodeID     string `json:"node_id,omitempty"`
 	NodeSecret string `json:"node_secret,omitempty"`
@@ -195,7 +198,8 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		// 回退 hostname / node-xxxxxx
 		ID: id, Name: defaultNodeName(tokenName, req.Hostname, id), MachineID: req.MachineID,
 		Note: note, AgentVersion: req.Version, OS: req.OS, Arch: req.Arch,
-		Kernel: req.Kernel, Hostname: req.Hostname, CPUCores: req.CPUCores,
+		Kernel: req.Kernel, DistroID: req.DistroID, DistroVersion: req.DistroVersion,
+		Hostname: req.Hostname, CPUCores: req.CPUCores,
 		TZ: tzOrDefault(req.TZ),
 	}
 	if err := s.Store.CreateNode(n, hash); err != nil {

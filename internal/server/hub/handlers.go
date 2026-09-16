@@ -22,6 +22,7 @@ func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 		h.log.Warn("touch node", "node", c.nodeID, "err", err)
 	}
 	if err := h.store.UpdateNodeInfo(c.nodeID, hello.OS, hello.Arch, hello.Kernel,
+		hello.DistroID, hello.DistroVersion,
 		hello.Hostname, agentTZ(hello.TZ), hello.CPUCores); err != nil {
 		h.log.Warn("update node info", "node", c.nodeID, "err", err)
 	}

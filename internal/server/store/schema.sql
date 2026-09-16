@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     os              TEXT NOT NULL DEFAULT '',
     arch            TEXT NOT NULL DEFAULT '',
     kernel          TEXT NOT NULL DEFAULT '',
+    distro_id       TEXT NOT NULL DEFAULT '',       -- os-release ID, e.g. "debian" (§16 基本信息)
+    distro_version  TEXT NOT NULL DEFAULT '',       -- os-release VERSION_ID, e.g. "13" / "24.04"
     hostname        TEXT NOT NULL DEFAULT '',
     cpu_cores       INTEGER NOT NULL DEFAULT 0,
     primary_ip      TEXT NOT NULL DEFAULT '',

@@ -123,23 +123,25 @@ func (s *Store) ListRegTokens(activeOnly bool) ([]RegToken, error) {
 // --- nodes ---
 
 type Node struct {
-	ID           string
-	Name         string
-	MachineID    string
-	Status       string
-	Note         string
-	CreatedAt    int64
-	LastSeen     sql.NullInt64
-	AgentVersion string
-	OS           string
-	Arch         string
-	Kernel       string
-	Hostname     string
-	CPUCores     int
-	PrimaryIP    string
-	CountryCode  string
-	TZ           string
-	Caps         json.RawMessage
+	ID            string
+	Name          string
+	MachineID     string
+	Status        string
+	Note          string
+	CreatedAt     int64
+	LastSeen      sql.NullInt64
+	AgentVersion  string
+	OS            string
+	Arch          string
+	Kernel        string
+	DistroID      string
+	DistroVersion string
+	Hostname      string
+	CPUCores      int
+	PrimaryIP     string
+	CountryCode   string
+	TZ            string
+	Caps          json.RawMessage
 	// Agent self-update bookkeeping (design §5.5).
 	AgentTargetVersion   string
 	AgentUpdateState     string
@@ -153,17 +155,18 @@ type Node struct {
 // column in one place and forgetting the others used to be the easy mistake
 // (scanNode would then fail at runtime, not at compile time).
 const nodeColumns = `id, name, machine_id, status, note, created_at, last_seen, agent_version,
-	        os, arch, kernel, hostname, cpu_cores, primary_ip, country_code, tz, caps,
-	        agent_target_version, agent_update_state, agent_update_attempts, agent_update_error,
-	        agent_update_planned_at, agent_update_done_at`
+		        os, arch, kernel, distro_id, distro_version, hostname, cpu_cores, primary_ip, country_code, tz, caps,
+		        agent_target_version, agent_update_state, agent_update_attempts, agent_update_error,
+		        agent_update_planned_at, agent_update_done_at`
 
 func (s *Store) CreateNode(n *Node, secretHash string) error {
 	_, err := s.db.Exec(
 		`INSERT INTO nodes (id, name, machine_id, node_secret_hash, status, note, created_at,
-		 agent_version, os, arch, kernel, hostname, cpu_cores, primary_ip, tz, caps)
-		 VALUES (?, ?, ?, ?, 'offline', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 agent_version, os, arch, kernel, distro_id, distro_version, hostname, cpu_cores, primary_ip, tz, caps)
+		 VALUES (?, ?, ?, ?, 'offline', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		n.ID, n.Name, n.MachineID, secretHash, n.Note, now(),
-		n.AgentVersion, n.OS, n.Arch, n.Kernel, n.Hostname, n.CPUCores, n.PrimaryIP, n.TZ, "{}",
+		n.AgentVersion, n.OS, n.Arch, n.Kernel, n.DistroID, n.DistroVersion,
+		n.Hostname, n.CPUCores, n.PrimaryIP, n.TZ, "{}",
 	)
 	if err != nil {
 		return fmt.Errorf("create node: %w", err)
@@ -207,7 +210,7 @@ func (s *Store) scanNode(rs rowScanner) (*Node, error) {
 	n := &Node{}
 	var caps string
 	err := rs.Scan(&n.ID, &n.Name, &n.MachineID, &n.Status, &n.Note, &n.CreatedAt, &n.LastSeen,
-		&n.AgentVersion, &n.OS, &n.Arch, &n.Kernel, &n.Hostname, &n.CPUCores,
+		&n.AgentVersion, &n.OS, &n.Arch, &n.Kernel, &n.DistroID, &n.DistroVersion, &n.Hostname, &n.CPUCores,
 		&n.PrimaryIP, &n.CountryCode, &n.TZ, &caps,
 		&n.AgentTargetVersion, &n.AgentUpdateState, &n.AgentUpdateAttempts, &n.AgentUpdateError,
 		&n.AgentUpdatePlannedAt, &n.AgentUpdateDoneAt)
@@ -319,10 +322,11 @@ func (s *Store) MarkNodeOffline(id string) error {
 	return err
 }
 
-func (s *Store) UpdateNodeInfo(id string, os, arch, kernel, hostname, tz string, cpuCores int) error {
+func (s *Store) UpdateNodeInfo(id string, os, arch, kernel, distroID, distroVersion, hostname, tz string, cpuCores int) error {
 	_, err := s.db.Exec(
-		`UPDATE nodes SET os = ?, arch = ?, kernel = ?, hostname = ?, cpu_cores = ?, tz = ? WHERE id = ?`,
-		os, arch, kernel, hostname, cpuCores, tz, id,
+		`UPDATE nodes SET os = ?, arch = ?, kernel = ?, distro_id = ?, distro_version = ?,
+		   hostname = ?, cpu_cores = ?, tz = ? WHERE id = ?`,
+		os, arch, kernel, distroID, distroVersion, hostname, cpuCores, tz, id,
 	)
 	return err
 }

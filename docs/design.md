@@ -245,7 +245,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `ip_blacklist` | ip, reason, fail_count, created_at, expires_at | 持久化 |
 | `settings` | key, value, encrypted | 全局 anytls 密码、AI 配置、Telegram、保留期、延迟测量频率（`latency.interval_seconds`，默认 5）等 |
 | `reg_tokens` | token_hash, note, expires_at, used_at | 单次 |
-| `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, cpu_cores, primary_ip, country_code, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表；`tz` 由 agent 自动探测上报，只读 |
+| `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, distro_id, distro_version, cpu_cores, primary_ip, country_code, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表；`tz` 与发行版（os-release 自动探测，§16）由 agent 上报，只读 |
 | `node_ips` | node_id, ip, family, scope, is_primary, manual_primary | 多 IP 全量上报 |
 | `node_interfaces` | node_id, name, is_default, updated_at | agent 上报的可选网卡清单与默认路由标记 |
 | `node_network` | node_id, iface, mode(in/out/both/max), quota_bytes, cycle_type(none/month/year), next_reset_at | 流量口径、配额与独立流量周期；空 `iface` 表示 agent 自动选择默认路由 |
@@ -289,7 +289,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 | 方向 | type | 说明 |
 |---|---|---|
-| agent → server | `hello` | machine_id、版本、os/arch、时区、网卡清单与能力位（含 `self_update`，§5.5） |
+| agent → server | `hello` | machine_id、版本、os/arch、时区、发行版（os-release 的 `distro_id`/`distro_version`，2026-09-16）、网卡清单与能力位（含 `self_update`，§5.5） |
 | | `agent_update` | 自更新逐次上报：phase / class(terminal\|transient) / error / attempts（§5.5） |
 | | `metrics` | 60s 一次；面板打开详情页时服务端可请求 5s 实时流 |
 | | `traffic` | 60s 一次：选定网卡的累计计数 + 日增量 |
@@ -327,6 +327,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | 网络速率 | 累计值差分 / 时间差 |
 | 运行时长 | `/proc/uptime` |
 | 重启检测 | `/proc/sys/kernel/random/boot_id` + 累计计数回绕双重判定 |
+| 发行版 | `/etc/os-release`（回退 `/usr/lib/os-release`）的 `ID` + `VERSION_ID`；`ID_LIKE` 含 `openwrt` 或存在 `/etc/openwrt_release` 时归入 openwrt 家族（iStoreOS/ImmortalWrt 等衍生版改写 `ID`，靠这两处识别）（2026-09-16，§16） |
 
 网卡通过 `/proc/net/dev` 与 `/proc/net/route` 探测；agent 将完整可选清单及默认路由出口随 `hello`/`state` 上报。面板的「自动」不猜网卡，始终由 agent 选择默认路由；人工选择只允许该探针已上报的网卡，并以 `desired` 即时下发到 agent。时区同样由 agent 自动上报到 `nodes.tz`，面板只读显示，不允许人工覆盖。
 
@@ -637,8 +638,10 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - 技术：**React + TypeScript + Vite**；构建产物输出到 `web/dist`。**生产镜像在构建阶段把产物烤进镜像**（`/srv/web`），由 server 直出（`FOBE_WEB_DIR`）——不嵌入 Go 二进制（避免体积膨胀），也不再依赖宿主机挂载前端目录。若想让外部 nginx 直接吐静态文件，见 §3 末尾的替代做法。
 - **本地开发不走容器**：前端 `npm run dev`（Vite dev server，把 `/api`、`/ws`、`/sub`、`/install.sh`、`/dl` 代理到 `http://127.0.0.1:8080`，**WebSocket 代理必须开 `ws: true`**），后端 `go run ./cmd/server`。此时把 `FOBE_WEB_DIR` 留空 → server 进 **API-only 模式**：`/` 返回一句"请访问 Vite dev server"的提示（不 404、不白屏），其余接口行为与生产一致。
 - **`scripts/dev.sh` 与自更新（2026-09-15 修订）**：dev.sh 现在除 server 外还交叉编译 linux/amd64 的 agent 产物，并给两端注入同一个内容寻址版本号 `dev-<哈希>`（§5.5 实现修订），所以本机 dev 也能真跑"探针跟随服务端"；`go run ./cmd/server` 没有 `-ldflags`、版本仍是 `dev`，不会下发目标。降级演练用 `FOBE_VERSION=<旧号> scripts/dev.sh`；改后端必须重启 dev.sh 这条老规矩不变，但版本号只在 agent 源码真的变了才变——重启本身不再惊动探针。
-- 页面：登录 / 概览（卡片墙）/ 节点详情（**只读监控**：指标 + 图表 + 流量 + 延迟历史 + 命令）/ 订阅与模板 / 延迟目标 / 告警 / 终端（全屏）/ AI 助手（侧栏）/ 设置（AI、通知、GeoIP、保留期、主密钥状态、**服务器**）。（2026-09-15 修订）
+- 页面：登录 / 概览（卡片墙）/ 节点详情（**只读监控**：指标 + 图表 + 流量 + 延迟历史）/ 订阅与模板 / 延迟目标 / 告警 / 终端（全屏）/ AI 助手（侧栏）/ 设置（AI、通知、GeoIP、保留期、主密钥状态、**服务器**）。（2026-09-15 修订；2026-09-16 修订：详情页「命令」卡片移除，见下）
 - **配置入口收敛（2026-09-15；2026-09-16 列完善）**：设置里新增「服务器」页，表格列出已接入的服务器，明确显示文字状态、主 IP、过期时间、版本，行尾为编辑/删除图标按钮；未配置缴费周期时过期时间留空，已配置时显示距离 `next_due_at` 的剩余或逾期时间。「编辑服务器」页集中承载该服务器的全部配置：节点设置（名称/备注/agent 上报的网卡下拉/统计模式/配额/只读时区）、**独立的流量周期**（无/按月/按年与秒级下次重置时间）、缴费周期、延迟测量端点选择、IP 列表（含手动主 IP）、sing-box 服务端配置（版本/启停/端口）。节点详情页不再承载配置表单与删除按钮——监控与配置分离，删除服务器统一走设置页（带确认）。
+- **详情页「命令」卡片移除（实现修订 2026-09-16）**：面板不再提供对探针的任意 shell 下发入口——前端命令卡片与 `POST /api/nodes/{id}/commands` 路由一并删除。指令队列本体（`commands` 表、`enqueueCommand`、离线排队与幂等）保留：AI 执行（§12）与面板动作（sing-box 启停/重启）仍走同一条队列与审计；`GET /api/nodes/{id}/commands` 保留，供 AI 面板轮询执行结果。取舍：普通面板用户少一个"顺手敲 shell"的危险面，命令执行的入口收敛到 AI 确认流（§12.3）。
+- **基本信息新增「发行版」（2026-09-16）**：agent 读 `/etc/os-release`（回退 `/usr/lib/os-release`，仍只做文件读取，遵守不调外部命令的约定）取 `ID` + `VERSION_ID`，随 `hello` 与注册请求上报，落 `nodes.distro_id / distro_version`（增量迁移，`SchemaVersion=2`）；详情页基本信息显示「Debian 13」式标签与自绘发行版徽标（内联 SVG、自托管，不引 CDN）。OpenWrt 衍生系统（iStoreOS、ImmortalWrt 等）改写 `ID` 但保留 `ID_LIKE="lede openwrt"`，按 `ID_LIKE` 归一化为 openwrt，并在 os-release 缺失时回退 `/etc/openwrt_release`。没有 `VERSION_ID` 的滚动发行版（如 Arch）只显示名称；未知 ID 回退首字母徽标，旧 agent 未上报时显示 `-`。
 - 实时（2026-09-15 修订）：`/ws/events` 只覆盖状态类变化（节点增删改、sing-box、订阅、设置、GeoIP）——**常规指标上报不产生任何事件**，所以数据新鲜度必须靠「轮询 + 高频上报」两条腿：
   - **概览**：挂载且标签页可见期间，对每个在线节点打开 §16 的 5s 探测流，并 5s 拉一次列表。打开探测流是必要的：不打开就只能等 60s 基线节奏，卡片墙看起来像「不自动更新」。
   - **详情**：5s 拉节点快照（与探测流对齐），30s 拉图表 / 流量 / 延迟曲线（重查询）。
