@@ -8,14 +8,17 @@ import type { LatencySample, LatencyTarget, MetricsSample, NodeDetailData, Traff
 import Flag from '../components/Flag';
 import DistroLogo, { distroName } from '../components/DistroLogo';
 import LineChart, { type ChartPoint, type ChartSeries } from '../components/LineChart';
+import BarChart from '../components/BarChart';
 import ProgressBar from '../components/ProgressBar';
 import Tile from '../components/Tile';
 
 const C_CPU = 'var(--accent)';
 const C_MEM = 'var(--accent)';
 const C_DISK = 'var(--amber)';
+// rx/tx reuse the mem/disk pair (accent vs amber): blue-on-green was too hard
+// to tell apart on the net chart, and one shared palette keeps colors meaningful.
 const C_RX = 'var(--accent)';
-const C_TX = 'var(--green)';
+const C_TX = 'var(--amber)';
 // One distinct color per enabled latency target, cycling when there are more
 // targets than palette entries (CSS vars only — no hardcoded colors).
 const LATENCY_PALETTE = ['var(--accent)', 'var(--green)', 'var(--amber)', 'var(--red)'];
@@ -141,14 +144,16 @@ export default function NodeDetail() {
     ],
     [metrics, t],
   );
-  const trafficSeries = useMemo<ChartSeries[]>(() => {
+  // Daily traffic as one stacked bar per day (rx at the bottom, tx on top).
+  const trafficBars = useMemo(() => {
     const daily = traffic?.daily ?? [];
-    const pts = daily.map((d) => ({ x: Date.parse(d.date + 'T00:00:00Z') / 1000, y: d.rx_bytes }));
-    const tps = daily.map((d) => ({ x: Date.parse(d.date + 'T00:00:00Z') / 1000, y: d.tx_bytes }));
-    return [
-      { name: t('rx'), color: C_RX, points: pts, area: true },
-      { name: t('tx'), color: C_TX, points: tps },
-    ];
+    return {
+      barLabels: daily.map((d) => fmtDate(d.date)),
+      stacks: [
+        { name: t('rx'), color: C_RX, values: daily.map((d) => d.rx_bytes) },
+        { name: t('tx'), color: C_TX, values: daily.map((d) => d.tx_bytes) },
+      ],
+    };
   }, [traffic, t]);
 
   if (err) {
@@ -167,7 +172,6 @@ export default function NodeDetail() {
   const diskPct = node.disk_total > 0 ? (node.disk_used / node.disk_total) * 100 : 0;
   const last = metrics.length > 0 ? metrics[metrics.length - 1] : null;
   const fmtXTime = (x: number) => fmtTimeShort(x);
-  const fmtXTraffic = (x: number) => fmtDate(new Date(x * 1000).toISOString());
   const fmtYPct = (v: number) => `${Math.round(v)}%`;
   const fmtYBytes = (v: number) => fmtBytes(v);
 
@@ -248,7 +252,7 @@ export default function NodeDetail() {
             </span>
           )}
         </div>
-        <LineChart series={trafficSeries} fmtY={fmtYBytes} fmtX={fmtXTraffic} emptyText={t('no_chart_data')} />
+        <BarChart barLabels={trafficBars.barLabels} stacks={trafficBars.stacks} fmtY={fmtYBytes} emptyText={t('no_chart_data')} />
       </section>
 
       <section className="card">

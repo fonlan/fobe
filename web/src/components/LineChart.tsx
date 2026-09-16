@@ -47,7 +47,7 @@ export function downsample(points: ChartPoint[], maxPoints: number = MAX_POINTS)
   return out;
 }
 
-function niceTicks(max: number, count = 4): number[] {
+export function niceTicks(max: number, count = 4): number[] {
   if (max <= 0 || !isFinite(max)) return [0, 1];
   const raw = max / count;
   const mag = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -220,16 +220,6 @@ export default function LineChart({
             {fmtY(tv)}
           </span>
         ))}
-        {xTicks.map((xv, i) => (
-          <span
-            key={'xl' + i}
-            className={`chart-label chart-label-x mono${i === 1 ? ' center' : i === 2 ? ' right' : ''}`}
-            style={{ left: `${(sx(xv) / W) * 100}%` }}
-          >
-            {fmtX(xv)}
-          </span>
-        ))}
-
         {hover && (
           <>
             <span className="chart-crosshair" style={{ left: `${hover.leftPct}%` }} />
@@ -245,6 +235,17 @@ export default function LineChart({
             </div>
           </>
         )}
+      </div>
+      <div className="chart-xaxis">
+        {xTicks.map((xv, i) => (
+          <span
+            key={'xl' + i}
+            className={`chart-label chart-label-x mono${i === 1 ? ' center' : i === 2 ? ' right' : ' left'}`}
+            style={{ left: `${(sx(xv) / W) * 100}%` }}
+          >
+            {fmtX(xv)}
+          </span>
+        ))}
       </div>
     </div>
   );
