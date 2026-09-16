@@ -44,6 +44,8 @@ export interface NodeView {
   today_tx: number;
   billing_configured: boolean;
   next_due_at?: number | null;
+  /** Operator-entered 费用 (node_billing.note); '' = unset, no card tag. */
+  billing_note?: string;
   // Agent self-update state (design §5.5): what the panel needs to answer
   // "why did this probe not follow the server?".
   agent_target_version: string;

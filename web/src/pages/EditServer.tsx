@@ -367,6 +367,11 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
           <span>{t('note')}</span>
           <input value={note} onChange={(e) => setNote(e.target.value)} />
         </label>
+        <label className="field">
+          <span>{t('tz')}</span>
+          <input value={node.tz || 'UTC'} readOnly />
+          <small className="hint">{t('tz_agent_readonly')}</small>
+        </label>
       </div>
 
       <h4>{t('traffic_cycle')}</h4>
@@ -399,11 +404,6 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
         <label className="field">
           <span>{t('quota_gb')}</span>
           <input type="number" min="0" step="any" value={quotaGb} onChange={(e) => setQuotaGb(e.target.value)} />
-        </label>
-        <label className="field">
-          <span>{t('tz')}</span>
-          <input value={node.tz || 'UTC'} readOnly />
-          <small className="hint">{t('tz_agent_readonly')}</small>
         </label>
         <label className="field">
           <span>{t('traffic_cycle_type')}</span>

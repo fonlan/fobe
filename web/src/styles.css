@@ -434,6 +434,19 @@ section.card { margin-bottom: 0; }
   font-size: 12px;
 }
 
+/* 费用 tag on the overview card: operator-entered data, so it takes the accent
+   colour instead of a status colour (amber = due, red = offline). Qualified
+   with .chip on purpose — this rule sits above the .chip block, and equal
+   specificity would let the later shorthand border/color win. */
+.chip.cost-chip {
+  color: var(--accent);
+  border-color: var(--accent);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .flag { font-size: 20px; line-height: 1; }
 .flag-none {
   width: 20px;

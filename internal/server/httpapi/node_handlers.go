@@ -58,6 +58,10 @@ type nodeView struct {
 	TodayTx           int64   `json:"today_tx"`
 	BillingConfigured bool    `json:"billing_configured"`
 	NextDueAt         *int64  `json:"next_due_at,omitempty"`
+	// BillingNote is the operator's free-text 费用 label (node_billing.note).
+	// It rides in the list response so the overview card can tag it without a
+	// per-node detail fetch.
+	BillingNote string `json:"billing_note,omitempty"`
 
 	// Agent self-update state (design §5.5): what the panel needs to answer
 	// "why did this probe not follow the server?".
@@ -188,6 +192,7 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 	if b, err := s.Store.GetNodeBilling(n.ID); err == nil {
 		v.BillingConfigured = b.CycleType != "" && b.CycleType != "none" && b.CycleDays != nil && *b.CycleDays > 0
 		v.NextDueAt = b.NextDueAt
+		v.BillingNote = b.Note
 	}
 	return v
 }

@@ -104,7 +104,7 @@ func TestNodeListExposesBillingConfiguredAndDueTime(t *testing.T) {
 	due := time.Now().Add(48 * time.Hour).Unix()
 
 	if err := api.Store.UpsertNodeBilling(&store.NodeBilling{
-		NodeID: nodeID, CycleType: "none", NextDueAt: &due,
+		NodeID: nodeID, CycleType: "none", NextDueAt: &due, Note: "¥30/月",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +113,11 @@ func TestNodeListExposesBillingConfiguredAndDueTime(t *testing.T) {
 	node := nodes[0].(map[string]any)
 	if node["billing_configured"] != false {
 		t.Fatalf("cycle none should be unconfigured: %#v", node)
+	}
+	// 费用 is independent of the cycle type: the overview card tags it whenever
+	// the operator filled it in, even when the cycle is "none".
+	if node["billing_note"] != "¥30/月" {
+		t.Fatalf("billing note missing from node list: %#v", node)
 	}
 
 	if err := api.Store.UpsertNodeBilling(&store.NodeBilling{

@@ -12,6 +12,14 @@ export default function NodeCard({ node }: { node: NodeView }) {
   const diskPct = node.disk_total > 0 ? (node.disk_used / node.disk_total) * 100 : 0;
   const hasQuota = node.period_pct >= 0 && node.quota_bytes != null;
 
+  // 费用 (§16): the operator's free-text cost label, shown as a tag. It is not
+  // parsed — "¥30/月", "30 CNY", "300/yr" are all equally valid to the panel.
+  const costChip = node.billing_note ? (
+    <span className="chip cost-chip" title={t('billing_note')}>
+      {node.billing_note}
+    </span>
+  ) : null;
+
   const dueChip = (() => {
     if (node.next_due_at == null || node.next_due_at <= 0) return null;
     const days = Math.ceil((node.next_due_at * 1000 - Date.now()) / 86400000);
@@ -76,6 +84,7 @@ export default function NodeCard({ node }: { node: NodeView }) {
       <div className="node-card-foot">
         <span>{t('cores', { n: node.cpu_cores })}</span>
         <span>{t('agent_v', { v: node.agent_version || '?' })}</span>
+        {costChip}
         {dueChip}
       </div>
     </Link>
