@@ -776,144 +776,148 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
           {!cfg?.reported ? (
             <span className="hint">{t('sb_local_no_config')}</span>
           ) : (
-            <table className="sb-inbound-table">
-              <thead>
-                <tr>
-                  <th />
-                  <th>{t('sb_col_type')}</th>
-                  <th>{t('sb_col_port')}</th>
-                  <th>{t('sb_col_tag')}</th>
-                  <th>{t('sb_col_cred')}</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {cfg.inbounds.map((ib) => {
-                  const edit = { ...ib, ...edits[ib.number] };
-                  const dirty = !!edits[ib.number];
-                  const locked = ib.port === sb?.port || ib.port === Number(port);
-                  return (
-                    <tr key={ib.number}>
-                      <td>
-                        {ib.editable ? (
+            <div className="table-wrap">
+              <table className="sb-inbound-table">
+                <thead>
+                  <tr>
+                    <th />
+                    <th>{t('sb_col_type')}</th>
+                    <th>{t('sb_col_port')}</th>
+                    <th>{t('sb_col_tag')}</th>
+                    <th>{t('sb_col_cred')}</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {cfg.inbounds.map((ib) => {
+                    const edit = { ...ib, ...edits[ib.number] };
+                    const dirty = !!edits[ib.number];
+                    const locked = ib.port === sb?.port || ib.port === Number(port);
+                    return (
+                      <tr key={ib.number}>
+                        <td>
+                          {ib.editable ? (
+                            <input
+                              type="checkbox"
+                              title={t('sb_inbound_select')}
+                              checked={!!picked[ib.number]}
+                              onChange={(e) =>
+                                setPicked((cur) => ({ ...cur, [ib.number]: e.target.checked }))
+                              }
+                            />
+                          ) : null}
+                        </td>
+                        <td className="mono">{ib.type}</td>
+                        <td>
                           <input
-                            type="checkbox"
-                            title={t('sb_inbound_select')}
-                            checked={!!picked[ib.number]}
+                            className="mono sb-num"
+                            type="number"
+                            min={10000}
+                            max={60000}
+                            value={edit.port ?? ''}
+                            disabled={!ib.editable}
                             onChange={(e) =>
-                              setPicked((cur) => ({ ...cur, [ib.number]: e.target.checked }))
+                              setEdits((cur) => ({
+                                ...cur,
+                                [ib.number]: { ...cur[ib.number], port: Number(e.target.value) },
+                              }))
                             }
                           />
-                        ) : null}
-                      </td>
-                      <td className="mono">{ib.type}</td>
-                      <td>
-                        <input
-                          className="mono sb-num"
-                          type="number"
-                          min={10000}
-                          max={60000}
-                          value={edit.port ?? ''}
-                          disabled={!ib.editable}
-                          onChange={(e) =>
-                            setEdits((cur) => ({
-                              ...cur,
-                              [ib.number]: { ...cur[ib.number], port: Number(e.target.value) },
-                            }))
-                          }
-                        />
-                      </td>
-                      <td>
-                        <input
-                          className="mono"
-                          value={edit.tag ?? ''}
-                          disabled={!ib.editable}
-                          onChange={(e) =>
-                            setEdits((cur) => ({
-                              ...cur,
-                              [ib.number]: { ...cur[ib.number], tag: e.target.value },
-                            }))
-                          }
-                        />
-                      </td>
-                      <td>
-                        <input
-                          className="mono"
-                          type="text"
-                          value={edit.credential ?? ''}
-                          disabled={!ib.editable}
-                          placeholder={t('sb_cred_keep')}
-                          onChange={(e) =>
-                            setEdits((cur) => ({
-                              ...cur,
-                              [ib.number]: { ...cur[ib.number], credential: e.target.value },
-                            }))
-                          }
-                        />
-                      </td>
-                      <td className="row-wrap">
-                        {dirty && (
-                          <button
-                            type="button"
-                            className="btn primary"
-                            disabled={busy}
-                            title={t('sb_save_inbound')}
-                            onClick={() =>
-                              void run(async () => {
-                                await api.singboxConfigEdit(nodeId, {
-                                  reported_hash: cfgHash,
-                                  update: [
-                                    {
-                                      number: ib.number,
-                                      type: edit.type,
-                                      tag: edit.tag,
-                                      port: Number(edit.port),
-                                      credential: edit.credential || undefined,
-                                      server_name: edit.server_name,
-                                      flow: edit.flow,
-                                      username: edit.username,
-                                    },
-                                  ],
-                                });
-                                setEdits((cur) => {
-                                  const next = { ...cur };
-                                  delete next[ib.number];
-                                  return next;
-                                });
-                              }, t('sb_inbound_saved'))
+                        </td>
+                        <td>
+                          <input
+                            className="mono sb-text"
+                            value={edit.tag ?? ''}
+                            disabled={!ib.editable}
+                            onChange={(e) =>
+                              setEdits((cur) => ({
+                                ...cur,
+                                [ib.number]: { ...cur[ib.number], tag: e.target.value },
+                              }))
                             }
-                          >
-                            {t('save')}
-                          </button>
-                        )}
-                        {ib.editable && (
-                          <button
-                            type="button"
-                            className="btn danger"
-                            disabled={busy || locked || cfg.inbounds.length <= 1}
-                            title={locked ? t('sb_inbound_locked') : t('sb_inbound_delete')}
-                            onClick={() => {
-                              if (!window.confirm(t('sb_inbound_delete_confirm', { port: String(ib.port) })))
-                                return;
-                              void run(
-                                () =>
-                                  api.singboxConfigEdit(nodeId, {
-                                    reported_hash: cfgHash,
-                                    delete: [ib.number],
-                                  }),
-                                t('sb_inbound_deleted'),
-                              );
-                            }}
-                          >
-                            {t('delete')}
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                          />
+                        </td>
+                        <td>
+                          <input
+                            className="mono sb-text"
+                            type="text"
+                            value={edit.credential ?? ''}
+                            disabled={!ib.editable}
+                            placeholder={t('sb_cred_keep')}
+                            onChange={(e) =>
+                              setEdits((cur) => ({
+                                ...cur,
+                                [ib.number]: { ...cur[ib.number], credential: e.target.value },
+                              }))
+                            }
+                          />
+                        </td>
+                        <td>
+                          <div className="row-actions">
+                            {dirty && (
+                              <button
+                                type="button"
+                                className="btn primary"
+                                disabled={busy}
+                                title={t('sb_save_inbound')}
+                                onClick={() =>
+                                  void run(async () => {
+                                    await api.singboxConfigEdit(nodeId, {
+                                      reported_hash: cfgHash,
+                                      update: [
+                                        {
+                                          number: ib.number,
+                                          type: edit.type,
+                                          tag: edit.tag,
+                                          port: Number(edit.port),
+                                          credential: edit.credential || undefined,
+                                          server_name: edit.server_name,
+                                          flow: edit.flow,
+                                          username: edit.username,
+                                        },
+                                      ],
+                                    });
+                                    setEdits((cur) => {
+                                      const next = { ...cur };
+                                      delete next[ib.number];
+                                      return next;
+                                    });
+                                  }, t('sb_inbound_saved'))
+                                }
+                              >
+                                {t('save')}
+                              </button>
+                            )}
+                            {ib.editable && (
+                              <button
+                                type="button"
+                                className="btn danger"
+                                disabled={busy || locked || cfg.inbounds.length <= 1}
+                                title={locked ? t('sb_inbound_locked') : t('sb_inbound_delete')}
+                                onClick={() => {
+                                  if (!window.confirm(t('sb_inbound_delete_confirm', { port: String(ib.port) })))
+                                    return;
+                                  void run(
+                                    () =>
+                                      api.singboxConfigEdit(nodeId, {
+                                        reported_hash: cfgHash,
+                                        delete: [ib.number],
+                                      }),
+                                    t('sb_inbound_deleted'),
+                                  );
+                                }}
+                              >
+                                {t('delete')}
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
 
           <div className="row-wrap">
@@ -1392,10 +1396,12 @@ function ForwardsCard({
             <tbody>
               {rows.map((r) => (
                 <tr key={`${r.proto}/${r.src_port}/${r.iface}/${r.handle}`}>
-                  <td>{r.proto.toUpperCase()}</td>
-                  <td className="mono">{r.src_port || t('fw_any')}</td>
-                  <td className="mono">{r.iface || t('fw_all_ifaces')}</td>
-                  <td className="mono break-anywhere">
+                  {/* 短字段一律 nowrap:表格宽度超出时由 .table-wrap 横向滚动接住,
+                      而不是把每个字段折行 —— 折行会让每条规则都变成两三行高。 */}
+                  <td className="nowrap">{r.proto.toUpperCase()}</td>
+                  <td className="mono nowrap">{r.src_port || t('fw_any')}</td>
+                  <td className="mono nowrap">{r.iface || t('fw_all_ifaces')}</td>
+                  <td className="mono nowrap">
                     {r.dst_ip}:{r.dst_port}
                     {r.extra_match && (
                       <span className="chip chip-muted" title={t('fw_tip_extra_match')}>
@@ -1403,11 +1409,12 @@ function ForwardsCard({
                       </span>
                     )}
                   </td>
-                  <td className="break-anywhere">
+                  {/* 备注是唯一的自由文本:单行 + 省略号,全文在 title 上。 */}
+                  <td className="cell-ellipsis" title={r.comment || undefined}>
                     {r.comment || <span className="hint">{t('none')}</span>}
                   </td>
                   <td>
-                    <div className="row-gap">
+                    <div className="row-actions">
                       <button
                         type="button"
                         className="btn small"

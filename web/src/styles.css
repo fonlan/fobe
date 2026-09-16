@@ -162,6 +162,12 @@ section.card { margin-bottom: 0; }
 .row-between { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .row-gap { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .row-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* Per-row button pair (sing-box 入站编辑器、端口转发规则表)。行内动作**不许换行**:
+   .row-gap 的 flex-wrap 会把两个按钮叠成两行,窄屏上每条规则都变成双倍行高。
+   按钮自身也必须 nowrap 且不许收缩——flex 默认 flex-shrink:1,中文按钮文案
+   ("保存"/"删除")会被压成两行,单元格照样 56px 高(实测)。 */
+.row-actions { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+.row-actions .btn { flex: 0 0 auto; white-space: nowrap; }
 
 /* Bare "input + button" rows (sing-box port, subscription name, UA filter,
    subscription template picker). These controls sit outside a .field label, so
@@ -183,12 +189,38 @@ section.card { margin-bottom: 0; }
   border-radius: 8px;
   background: var(--panel-2);
 }
-/* The config.json editor (§9.3 实现修订 2026-09-17b): one row per inbound. */
+/* The config.json editor (§9.3 实现修订 2026-09-17b): one row per inbound.
+   The controls opt into the shared input look here because the panel's rule
+   below only matches controls wrapped in a .field / .cmd-input-row: without
+   this the bare inputs matched nothing and fell back to the UA defaults — no
+   panel border/background/radius, a font that is not the panel's — and, because
+   the six-column table has no narrow-screen form, the row grew wider than the
+   card on a phone. Values mirror that rule on purpose; the height is the dense
+   variant (this is a table row, not a form field), and the table lives in a
+   .table-wrap so the overflow scrolls inside the card instead of painting past
+   its right edge. */
 .sb-inbound-table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 13px; }
-.sb-inbound-table th { text-align: left; color: var(--text-dim); font-weight: 500; padding: 2px 6px; }
+.sb-inbound-table th { text-align: left; color: var(--text-dim); font-weight: 500; padding: 2px 6px; white-space: nowrap; }
 .sb-inbound-table td { padding: 2px 6px; vertical-align: middle; }
-.sb-inbound-table input[type='text'],
-.sb-inbound-table input:not([type]) { width: 100%; min-width: 90px; }
+.sb-inbound-table input:not([type='checkbox']) {
+  appearance: none;
+  box-sizing: border-box;
+  height: 32px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  min-width: 0;
+}
+.sb-inbound-table input:focus { outline: 2px solid var(--accent-weak); border-color: var(--accent); }
+.sb-inbound-table input[type='checkbox'] { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
+/* Text controls fill their cell, the port gets a fixed box just wide enough for
+   five digits. Both out-specify the rule above, so order matters: keep them last. */
+.sb-inbound-table input.sb-text { width: 100%; min-width: 90px; }
+.sb-inbound-table input.sb-num { width: 84px; }
 .sb-num { width: 84px; }
 .sb-local-list { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .sb-local-list li { display: block; }
@@ -532,6 +564,24 @@ section.card { margin-bottom: 0; }
    clips nor scrolls), so wide rows — audit log, UA strings, mono values —
    paint past the card edge. The wrapper owns the horizontal scroll instead. */
 .table-wrap { overflow-x: auto; }
+
+/* 端口转发规则表的备注列:自由文本,不能让它把整行撑成多行——单行 + 省略号,
+   完整值放在 title 里。两个按钮所在的 .row-actions 同理保持单行。 */
+.cell-ellipsis { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 手机竖屏:表格靠 .table-wrap 横向滚动(卡片内滚动,不再画出卡片右侧),这里
+   只收紧单元格内边距与控件宽度以缩短滚动距离。行高不受影响——短字段一律
+   nowrap(见 .nowrap / .cell-ellipsis),不会被挤成两行。 */
+@media (max-width: 640px) and (orientation: portrait) {
+  .table th,
+  .table td { padding: 8px 8px; }
+  .cell-ellipsis { max-width: 150px; }
+  .sb-inbound-table { font-size: 12.5px; }
+  .sb-inbound-table th,
+  .sb-inbound-table td { padding: 2px 4px; }
+  .sb-inbound-table input.sb-text { min-width: 74px; }
+  .sb-inbound-table input.sb-num { width: 68px; }
+}
 
 .chip {
   display: inline-block;
