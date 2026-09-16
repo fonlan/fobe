@@ -521,7 +521,14 @@ export function createSubscription(name: string): Promise<SubscriptionToken> {
 
 export function updateSubscription(
   id: string,
-  body: { enabled?: boolean; name?: string; template_id?: string | null; ua_filter?: string },
+  body: {
+    enabled?: boolean;
+    name?: string;
+    template_id?: string | null;
+    ua_filter?: string;
+    /** '' = auto, else 'singbox' / 'clash' (§10 修订). */
+    format?: string;
+  },
 ): Promise<{ ok: boolean }> {
   return request(`/api/subscriptions/${encodeURIComponent(id)}`, { method: 'PUT', body });
 }

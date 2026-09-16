@@ -54,6 +54,12 @@ export interface NodeView {
   agent_self_update: boolean;
   /** Whether the agent ever said hello (false = no caps reported yet). */
   agent_caps_seen: boolean;
+  /**
+   * §10: this node would render into a subscription (primary IP + sing-box
+   * inbound port + reported certificate). The subscription node picker lists
+   * only these.
+   */
+  singbox_ready: boolean;
 }
 
 /** GET /api/agent/update (design §5.5). */
@@ -269,6 +275,11 @@ export interface SubscriptionRow {
    * change) can only get a working URL by rotating.
    */
   link_available: boolean;
+  /**
+   * §10 实现修订 2026-09-16: pinned output format, '' = auto (the bound
+   * template's format, otherwise the client's ?format= / User-Agent).
+   */
+  format: string;
 }
 
 /** Plaintext token + URL (create / rotate / link reveal). */

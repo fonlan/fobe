@@ -532,15 +532,18 @@ type Subscription struct {
 	Enabled    bool
 	UAFilter   string         // comma-separated UA substrings; empty = allow all (§10)
 	TemplateID sql.NullString // nullable: empty → built-in default template
-	CreatedAt  int64
+	// Format pins the output format (§10 实现修订 2026-09-16): 'singbox' /
+	// 'clash', or '' for auto (bound template's format, else the request).
+	Format    string
+	CreatedAt int64
 }
 
-const subscriptionCols = `id, name, token_hash, token_enc, enabled, ua_filter, template_id, created_at`
+const subscriptionCols = `id, name, token_hash, token_enc, enabled, ua_filter, template_id, format, created_at`
 
 func scanSubscription(rs rowScanner) (*Subscription, error) {
 	sub := &Subscription{}
 	var enabled int
-	if err := rs.Scan(&sub.ID, &sub.Name, &sub.TokenHash, &sub.TokenEnc, &enabled, &sub.UAFilter, &sub.TemplateID, &sub.CreatedAt); err != nil {
+	if err := rs.Scan(&sub.ID, &sub.Name, &sub.TokenHash, &sub.TokenEnc, &enabled, &sub.UAFilter, &sub.TemplateID, &sub.Format, &sub.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -601,6 +604,13 @@ func (s *Store) SetSubscriptionMeta(id, name string, templateID *string) error {
 // substrings, already normalized by the caller; empty = every client allowed).
 func (s *Store) SetSubscriptionUAFilter(id, filter string) error {
 	_, err := s.db.Exec(`UPDATE subscriptions SET ua_filter = ? WHERE id = ?`, filter, id)
+	return err
+}
+
+// SetSubscriptionFormat pins the output format (§10 实现修订 2026-09-16);
+// ” means auto. Validated by the caller (validFormat).
+func (s *Store) SetSubscriptionFormat(id, format string) error {
+	_, err := s.db.Exec(`UPDATE subscriptions SET format = ? WHERE id = ?`, format, id)
 	return err
 }
 

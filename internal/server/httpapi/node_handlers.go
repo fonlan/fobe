@@ -70,6 +70,11 @@ type nodeView struct {
 	// hello": a freshly registered node has no caps yet, and accusing it of
 	// needing a reinstall would be wrong.
 	AgentCapsSeen bool `json:"agent_caps_seen"`
+	// SingboxReady: this node would actually render into a subscription (§10
+	// predicate: primary IP + inbound port + reported certificate). The
+	// subscription page's node picker lists only these, so selecting a node
+	// always has an effect on the output.
+	SingboxReady bool `json:"singbox_ready"`
 }
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +129,12 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 		v.MemUsed, v.MemTotal = m.MemUsed, m.MemTotal
 		v.DiskUsed, v.DiskTotal = m.DiskUsed, m.DiskTotal
 		v.NetRxRate, v.NetTxRate = m.NetRxRate, m.NetTxRate
+	}
+
+	// §10: the same predicate the subscription renderer applies, so the picker
+	// offers exactly the nodes that can appear in the output.
+	if sb, err := s.Store.GetNodeSingbox(n.ID); err == nil {
+		v.SingboxReady = subRenderable(n, sb)
 	}
 
 	// Today's bucket is computed outside the network-config branch: §8.2

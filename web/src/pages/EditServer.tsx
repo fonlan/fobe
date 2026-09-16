@@ -4,6 +4,7 @@ import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
 import {
+  copyText,
   datetimeLocalInZoneToUnix,
   dateStrToUnix,
   fmtTime,
@@ -153,13 +154,13 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
 
   const copy = async () => {
     if (!cmd) return;
-    try {
-      await navigator.clipboard.writeText(cmd);
+    // copyText, not navigator.clipboard: the panel is usually reached over
+    // plain http on a LAN IP, where the async clipboard API does not exist.
+    if (await copyText(cmd)) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard unavailable: the command is selectable text either way */
     }
+    // refused: the command is selectable text either way
   };
 
   return (

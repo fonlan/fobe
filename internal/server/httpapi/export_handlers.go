@@ -92,6 +92,7 @@ type exportSub struct {
 	Name           string   `json:"name"`
 	Enabled        bool     `json:"enabled"`
 	Template       string   `json:"template,omitempty"`
+	Format         string   `json:"format,omitempty"` // '' = auto (§10 修订)
 	NodeMachineIDs []string `json:"node_machine_ids,omitempty"`
 }
 
@@ -178,7 +179,7 @@ func (s *Server) buildExport() (*exportFile, error) {
 	}
 	for i := range subs {
 		sub := &subs[i]
-		es := exportSub{Name: sub.Name, Enabled: sub.Enabled}
+		es := exportSub{Name: sub.Name, Enabled: sub.Enabled, Format: sub.Format}
 		if sub.TemplateID.Valid && sub.TemplateID.String != "" {
 			if t, err := s.Store.GetTemplate(sub.TemplateID.String); err == nil {
 				es.Template = t.Name
@@ -495,6 +496,13 @@ func (s *Server) importSubscriptions(subs []exportSub, nodeByMachine map[string]
 					return err
 				}
 			}
+			// An imported pin is applied only when the snapshot carries one, so
+			// re-importing an older file cannot silently unpin a subscription.
+			if validFormat(es.Format) {
+				if err := s.Store.SetSubscriptionFormat(sub.ID, es.Format); err != nil {
+					return err
+				}
+			}
 			stats.SubscriptionsUpdated++
 			continue
 		}
@@ -523,6 +531,11 @@ func (s *Server) importSubscriptions(subs []exportSub, nodeByMachine map[string]
 		}
 		if tplID != nil {
 			if err := s.Store.SetSubscriptionMeta(id, name, tplID); err != nil {
+				return err
+			}
+		}
+		if validFormat(es.Format) {
+			if err := s.Store.SetSubscriptionFormat(id, es.Format); err != nil {
 				return err
 			}
 		}

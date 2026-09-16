@@ -104,6 +104,8 @@ type subscriptionView struct {
 	UAFilter      string   `json:"ua_filter"`
 	NodeIDs       []string `json:"node_ids"`
 	LinkAvailable bool     `json:"link_available"`
+	// Format is '' (auto) or a pinned output format (§10 实现修订 2026-09-16).
+	Format string `json:"format"`
 }
 
 func (s *Server) subscriptionView(sub *store.Subscription) subscriptionView {
@@ -112,6 +114,7 @@ func (s *Server) subscriptionView(sub *store.Subscription) subscriptionView {
 		ID: sub.ID, Name: sub.Name, Enabled: sub.Enabled, CreatedAt: sub.CreatedAt,
 		UAFilter: sub.UAFilter,
 		NodeIDs:  nodeIDs,
+		Format:   sub.Format,
 		// §10 实现修订 2026-09-16: the URL can be re-shown while the ciphertext
 		// is present; legacy rows (created before the column existed) can only
 		// get a working link by rotating it.
@@ -248,10 +251,22 @@ func (s *Server) handleUpdateSubscription(w http.ResponseWriter, r *http.Request
 		Name       *string  `json:"name,omitempty"`
 		TemplateID **string `json:"template_id,omitempty"` // null → clear, string → set
 		UAFilter   *string  `json:"ua_filter,omitempty"`
+		Format     *string  `json:"format,omitempty"` // '' → auto, else singbox/clash
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request")
 		return
+	}
+	if req.Format != nil {
+		f := strings.TrimSpace(*req.Format)
+		if f != "" && !validFormat(f) {
+			writeErr(w, http.StatusBadRequest, "bad_format")
+			return
+		}
+		if err := s.Store.SetSubscriptionFormat(id, f); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
 	}
 	if req.UAFilter != nil {
 		if err := s.Store.SetSubscriptionUAFilter(id, normalizeUAFilter(*req.UAFilter)); err != nil {
@@ -555,12 +570,12 @@ func normalizeUAFilter(filter string) string {
 	return strings.Join(kept, ",")
 }
 
-// sniffFormat decides the output format: explicit ?format= wins, then the
-// User-Agent (clash/mihomo → clash, sing-box → singbox), default singbox.
+// sniffFormat is the last resort for the output format: the User-Agent
+// (clash/mihomo → clash, sing-box → singbox), default singbox. The Surge UA
+// that §10 once listed is deliberately absent — there is no Surge output
+// format, and handing a Surge client a Clash config would be worse than the
+// JSON default it can at least be told about.
 func sniffFormat(r *http.Request) string {
-	if f := r.URL.Query().Get("format"); validFormat(f) {
-		return f
-	}
 	ua := strings.ToLower(r.Header.Get("User-Agent"))
 	switch {
 	case strings.Contains(ua, "clash"), strings.Contains(ua, "mihomo"):
@@ -570,6 +585,43 @@ func sniffFormat(r *http.Request) string {
 	default:
 		return FormatSingbox
 	}
+}
+
+// resolveFormat decides which format this fetch produces (§10 实现修订
+// 2026-09-16). In order:
+//
+//  1. ?format= — an explicit request always wins, it is how one subscription
+//     can still serve a second client type;
+//  2. the subscription's own pinned format;
+//  3. auto (” format): the bound template's format — binding a Clash template
+//     is a statement about what this subscription is for, so a client whose UA
+//     we do not recognise must not silently get the sing-box default with the
+//     operator's template unused;
+//  4. the User-Agent, then sing-box.
+func (s *Server) resolveFormat(sub *store.Subscription, r *http.Request) string {
+	if f := r.URL.Query().Get("format"); validFormat(f) {
+		return f
+	}
+	if validFormat(sub.Format) {
+		return sub.Format
+	}
+	if sub.TemplateID.Valid && sub.TemplateID.String != "" {
+		if t, err := s.Store.GetTemplate(sub.TemplateID.String); err == nil && validFormat(t.Format) {
+			return t.Format
+		}
+	}
+	return sniffFormat(r)
+}
+
+// subRenderable is the single predicate behind "this node shows up in a
+// subscription" (§10): a primary IP, an inbound port and a reported
+// certificate. The certificate is what makes pinning possible, so a node
+// without one is skipped instead of rendered with insecure=true (§9.3).
+// The node list exposes it as `singbox_ready` and the renderer below applies
+// it — the subscription page's node picker must offer exactly this set,
+// otherwise checking a node could have no effect on the output at all.
+func subRenderable(node *store.Node, sb *store.NodeSingbox) bool {
+	return node.PrimaryIP != "" && sb.Port > 0 && sb.CertPEM != ""
 }
 
 // subscriptionNodes assembles the renderable proxies for a subscription:
@@ -585,11 +637,11 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 	nodes := make([]singbox.ProxyNode, 0, len(ids))
 	for _, id := range ids {
 		node, err := s.Store.GetNode(id)
-		if err != nil || node.PrimaryIP == "" {
+		if err != nil {
 			continue
 		}
 		sb, err := s.Store.GetNodeSingbox(id)
-		if err != nil || sb.Port <= 0 || sb.CertPEM == "" {
+		if err != nil || !subRenderable(node, sb) {
 			continue
 		}
 		nodes = append(nodes, singbox.ProxyNode{
@@ -657,7 +709,7 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	format := sniffFormat(r)
+	format := s.resolveFormat(sub, r)
 	nodes := s.subscriptionNodes(sub)
 	body, err := s.renderSubscription(sub, format, nodes)
 	if err != nil {

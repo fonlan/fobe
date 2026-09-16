@@ -185,6 +185,9 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     -- can re-show the subscription URL on demand (§10 实现修订 2026-09-16).
     -- Rows written before that revision carry '' → their URL is unrecoverable.
     token_enc  TEXT NOT NULL DEFAULT '',
+    -- §10 实现修订 2026-09-16: '' = auto (bound template's format, else the
+    -- client's request), or a pinned 'singbox' / 'clash'.
+    format     TEXT NOT NULL DEFAULT '',
     enabled    INTEGER NOT NULL DEFAULT 1,
     ua_filter  TEXT NOT NULL DEFAULT '',
     template_id TEXT,

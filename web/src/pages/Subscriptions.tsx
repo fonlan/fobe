@@ -2,9 +2,10 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
-import { fmtTime } from '../format';
+import { copyText, fmtTime } from '../format';
 import type { NodeView, SubAccessRow, SubscriptionRow, SubscriptionToken, TemplateRow } from '../types';
 import Modal from '../components/Modal';
+import { useToast } from '../components/Toast';
 
 /** Placeholder pair every template must carry (server validates too). */
 const NODES_PH = '{{nodes}}';
@@ -41,6 +42,9 @@ function rulesClashValid(value: string): boolean {
 
 export default function Subscriptions() {
   const { t } = useI18n();
+  // Page-level feedback for the copy button: the toast is fixed-positioned, so
+  // it belongs to the page and not to a card that may scroll out of view.
+  const { show: showToast, node: toastNode } = useToast();
   // Templates are owned here: the subscription rows bind them (template picker)
   // and the templates card edits them, so one fetch feeds both.
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
@@ -65,16 +69,23 @@ export default function Subscriptions() {
       <div className="page-head">
         <h2>{t('subs_title')}</h2>
       </div>
-      <SubscriptionsCard templates={templates} />
+      <SubscriptionsCard templates={templates} onToast={showToast} />
       <TemplatesCard templates={templates} loadError={tplErr} onReload={loadTemplates} />
       <RulesCard />
+      {toastNode}
     </div>
   );
 }
 
 // --- subscriptions -----------------------------------------------------------
 
-function SubscriptionsCard({ templates }: { templates: TemplateRow[] }) {
+function SubscriptionsCard({
+  templates,
+  onToast,
+}: {
+  templates: TemplateRow[];
+  onToast: (message: string, tone?: 'ok' | 'error') => void;
+}) {
   const { t } = useI18n();
   const [subs, setSubs] = useState<SubscriptionRow[] | null>(null);
   const [nodes, setNodes] = useState<NodeView[]>([]);
@@ -169,10 +180,14 @@ function SubscriptionsCard({ templates }: { templates: TemplateRow[] }) {
     }
   };
 
-  // §10: '' clears the binding → the built-in default template is used.
-  const saveTemplate = async (sub: SubscriptionRow, templateId: string) => {
+  // §10: '' template clears the binding → the built-in default is used;
+  // '' format means auto (see TemplatePicker).
+  const saveTemplate = async (sub: SubscriptionRow, templateId: string, format: string) => {
     try {
-      await api.updateSubscription(sub.id, { template_id: templateId === '' ? null : templateId });
+      await api.updateSubscription(sub.id, {
+        template_id: templateId === '' ? null : templateId,
+        format,
+      });
       await load();
     } catch (ex) {
       setErr(apiErrorMessage(ex, t));
@@ -191,14 +206,37 @@ function SubscriptionsCard({ templates }: { templates: TemplateRow[] }) {
     }
   };
 
+  // §10 修订: the panel is the only place the URL can be read again, so the row
+  // offers one click instead of a two-step reveal. copyText falls back to
+  // execCommand because the panel is usually served over plain http on a LAN
+  // IP, where navigator.clipboard does not exist at all.
+  const copyLink = async (sub: SubscriptionRow) => {
+    if (!sub.link_available) {
+      onToast(t('err_link_unavailable'), 'error');
+      return;
+    }
+    try {
+      const link = await api.subscriptionLink(sub.id);
+      const url = link.url || '/sub/' + link.token;
+      if (await copyText(url)) {
+        onToast(t('sub_link_copied'));
+      } else {
+        // both clipboard paths refused: show the URL so it can be selected
+        setLinkFor(sub.id);
+        onToast(t('sub_link_copy_failed'), 'error');
+      }
+    } catch (ex) {
+      setLinkFor(sub.id);
+      onToast(apiErrorMessage(ex, t), 'error');
+    }
+  };
+
   const copyToken = async () => {
     if (!freshToken) return;
-    try {
-      await navigator.clipboard.writeText(freshToken.url || freshToken.token);
+    if (await copyText(freshToken.url || freshToken.token)) {
       setCopied(true);
       setCopyFailed(false);
-    } catch {
-      // clipboard unavailable (plain http origin): the token stays selectable
+    } else {
       setCopyFailed(true);
     }
   };
@@ -289,9 +327,9 @@ function SubscriptionsCard({ templates }: { templates: TemplateRow[] }) {
                     <button
                       type="button"
                       className="btn small"
-                      onClick={() => setLinkFor(linkFor === sub.id ? null : sub.id)}
+                      onClick={() => void copyLink(sub)}
                     >
-                      {t('sub_link')}
+                      {t('sub_link_copy')}
                     </button>{' '}
                     <button
                       type="button"
@@ -328,7 +366,7 @@ function SubscriptionsCard({ templates }: { templates: TemplateRow[] }) {
             key={'t' + sub.id}
             sub={sub}
             templates={templates}
-            onSave={(id) => void saveTemplate(sub, id)}
+            onSave={(id, format) => void saveTemplate(sub, id, format)}
           />
         ) : null,
       )}
@@ -368,6 +406,13 @@ function SubscriptionsCard({ templates }: { templates: TemplateRow[] }) {
   );
 }
 
+// §10 node picker. Only nodes the server marks `singbox_ready` are offered —
+// that flag is the renderer's own predicate (primary IP + inbound port +
+// reported certificate), so checking a node always changes the output. Nodes
+// that are bound but currently unrenderable stay listed (muted, still
+// checkable) instead of silently disappearing: they are usually mid-reinstall,
+// and dropping them from the binding behind the operator's back would be worse
+// than showing a node that renders nothing right now.
 function NodePicker({
   sub,
   nodes,
@@ -384,22 +429,31 @@ function NodePicker({
     setIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
+  const ready = nodes.filter((n) => n.singbox_ready);
+  const unavailableBound = nodes.filter((n) => !n.singbox_ready && sub.node_ids.includes(n.id));
+
+  const chip = (n: NodeView, muted = false) => (
+    <label key={n.id} className={'check-chip' + (muted ? ' chip-muted' : '')}>
+      <input type="checkbox" checked={ids.includes(n.id)} onChange={() => toggleNode(n.id)} />
+      {n.name || n.id}
+      {n.online ? '' : ` (${t('offline')})`}
+    </label>
+  );
+
   return (
     <div className="card" style={{ marginTop: 8 }}>
       <h4>{t('sub_nodes_of', { name: sub.name })}</h4>
       <p className="hint">{t('sub_nodes_hint')}</p>
-      {nodes.length === 0 ? (
-        <div className="hint">{t('no_nodes')}</div>
+      {ready.length === 0 ? (
+        <div className="hint">{nodes.length === 0 ? t('no_nodes') : t('sub_nodes_none_ready')}</div>
       ) : (
-        <div className="row-wrap">
-          {nodes.map((n) => (
-            <label key={n.id} className="check-chip">
-              <input type="checkbox" checked={ids.includes(n.id)} onChange={() => toggleNode(n.id)} />
-              {n.name || n.id}
-              {n.online ? '' : ` (${t('offline')})`}
-            </label>
-          ))}
-        </div>
+        <div className="row-wrap">{ready.map((n) => chip(n))}</div>
+      )}
+      {unavailableBound.length > 0 && (
+        <>
+          <p className="hint" style={{ marginTop: 10 }}>{t('sub_nodes_unavailable')}</p>
+          <div className="row-wrap">{unavailableBound.map((n) => chip(n, true))}</div>
+        </>
       )}
       <div className="row-end">
         <button type="button" className="btn primary small" onClick={() => onSave(ids)}>
@@ -410,9 +464,11 @@ function NodePicker({
   );
 }
 
-// §10: which template renders this subscription. Only a template of the format
-// the client asked for is used, otherwise the built-in default takes over
-// (see renderSubscription on the server) — the hint says so.
+// §10: which template renders this subscription, and which format it comes out
+// as. Auto means "the bound template's format", which is why binding a Clash
+// template stops a client with an unrecognised User-Agent from silently
+// receiving the sing-box default; pinning a format overrides the template for
+// what the client asked for (an explicit ?format= still wins over both).
 function TemplatePicker({
   sub,
   templates,
@@ -420,10 +476,11 @@ function TemplatePicker({
 }: {
   sub: SubscriptionRow;
   templates: TemplateRow[];
-  onSave: (templateId: string) => void;
+  onSave: (templateId: string, format: string) => void;
 }) {
   const { t } = useI18n();
   const [sel, setSel] = useState(sub.template_id ?? '');
+  const [format, setFormat] = useState(sub.format);
 
   return (
     <div className="card" style={{ marginTop: 8 }}>
@@ -440,7 +497,18 @@ function TemplatePicker({
             </option>
           ))}
         </select>
-        <button type="button" className="btn primary small" onClick={() => onSave(sel)}>
+      </div>
+      <label className="field" style={{ marginTop: 12, marginBottom: 0 }}>
+        <span>{t('sub_format')}</span>
+        <select value={format} onChange={(e) => setFormat(e.target.value)}>
+          <option value="">{t('sub_format_auto')}</option>
+          <option value="singbox">{t('sub_format_singbox')}</option>
+          <option value="clash">{t('sub_format_clash')}</option>
+        </select>
+      </label>
+      <p className="hint">{t('sub_format_hint')}</p>
+      <div className="row-end">
+        <button type="button" className="btn primary small" onClick={() => onSave(sel, format)}>
           {t('save')}
         </button>
       </div>
@@ -449,9 +517,10 @@ function TemplatePicker({
 }
 
 // §10 实现修订 2026-09-16: the subscription URL is copyable whenever you want
-// it, not only in the create/rotate response. The plaintext comes from the
-// server on demand; rows from before the ciphertext existed report
-// link_available=false and can only be re-linked by rotating.
+// it, not only in the create/rotate response. The row button normally copies it
+// straight to the clipboard; this panel is the fallback the button opens when
+// the clipboard refused (or the reveal failed), because a URL the operator can
+// still select by hand beats a toast that only says "copy failed".
 function LinkPanel({ sub }: { sub: SubscriptionRow }) {
   const { t } = useI18n();
   const [link, setLink] = useState<SubscriptionToken | null>(null);
@@ -475,12 +544,11 @@ function LinkPanel({ sub }: { sub: SubscriptionRow }) {
   const url = link ? link.url || '/sub/' + link.token : '';
 
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(url);
+    if (await copyText(url)) {
       setCopied(true);
       setCopyFailed(false);
-    } catch {
-      // plain http origin: no clipboard API — the field stays selectable
+    } else {
+      // both clipboard paths refused: the field below stays selectable
       setCopyFailed(true);
     }
   };
