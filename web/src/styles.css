@@ -108,6 +108,10 @@ a:hover { text-decoration: underline; }
 }
 
 .topbar-brand:hover { text-decoration: none; }
+
+/* brand artwork carries its own rounded tile; only size it here */
+.logo-img { width: 24px; height: 24px; display: block; }
+.logo-img.big { width: 64px; height: 64px; }
 .topbar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .icon-link.active { color: var(--accent); }
 

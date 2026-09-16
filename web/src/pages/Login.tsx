@@ -37,7 +37,7 @@ export default function Login() {
     <div className="login-wrap">
       <form className="card login-card" onSubmit={submit}>
         <div className="login-logo">
-          <span className="logo-mark big">f</span>
+          <img src="/logo.svg" alt="fobe" className="logo-img big" />
         </div>
         <h1>{t('login_title')}</h1>
         <label className="field">

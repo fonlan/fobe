@@ -51,7 +51,7 @@ export default function Layout() {
       <div className="main">
         <header className="topbar">
           <Link to="/" className="topbar-brand" aria-label={t('app_name')}>
-            <span className="logo-mark">f</span>
+            <img src="/logo.svg" alt="" className="logo-img" />
             <span>fobe</span>
           </Link>
           <div className="topbar-actions">

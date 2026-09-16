@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <title>Fobe — Server Pulse</title>
+  <desc>A minimal server frame crossed by a mint monitoring pulse on an indigo rounded tile.</desc>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="#465DDD"/>
+  <path d="M144 212V154Q144 130 168 130H344Q368 130 368 154V212M144 316V358Q144 382 168 382H344Q368 382 368 358V316" stroke="#EDF6FA" stroke-width="32" stroke-linecap="round"/>
+  <path d="M112 268H195L229 214L279 318L314 268H400" stroke="#60E6BB" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M232 176H280" stroke="#EDF6FA" stroke-width="16" stroke-linecap="round"/>
+</svg>
