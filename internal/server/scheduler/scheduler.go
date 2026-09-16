@@ -6,12 +6,8 @@ package scheduler
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"math"
-	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +43,12 @@ func (s *Scheduler) Start(stop <-chan struct{}) {
 	go s.loop(stop, 5*time.Minute, s.checkTraffic)   // §15: quota thresholds
 	go s.loop(stop, 6*time.Hour, s.checkBillingDue)  // §15: 7/3/1-day reminders
 	if s.backupDir != "" {
+		// Snapshot once at boot, not only on the 24h tick: a panel that gets
+		// recreated often (deploy churn) never lives long enough for the
+		// ticker to fire — the 2026-09-16 corruption incident found the
+		// backup dir empty despite the loop "running" for days. Timestamped
+		// names make restart churn additive; store.PruneBackups caps the pool.
+		go s.backup()
 		go s.loop(stop, 24*time.Hour, s.backup)
 	}
 }
@@ -373,29 +375,12 @@ func (s *Scheduler) closeBillingAlerts(nodeID string) {
 	_ = s.store.RecoverAlert(AlertBillingOver, nodeID)
 }
 
-// backup snapshots the DB via VACUUM INTO, keeping the newest 14 (§17/§19.3).
+// backup snapshots the DB via VACUUM INTO (§17/§19.3). Timestamped names:
+// re-running (boot, 24h tick, restart churn) always adds a fresh restore
+// point instead of dying on "file exists"; the pool is capped by
+// store.PruneBackups.
 func (s *Scheduler) backup() {
-	if err := os.MkdirAll(s.backupDir, 0o755); err != nil {
-		s.log.Warn("backup dir", "err", err)
-		return
-	}
-	target := filepath.Join(s.backupDir, fmt.Sprintf("fobe-%s.db", time.Now().Format("20060102")))
-	if err := s.store.BackupTo(target); err != nil {
+	if err := s.store.BackupDir(s.backupDir); err != nil {
 		s.log.Warn("backup", "err", err)
-		return
-	}
-	s.pruneBackups(14)
-}
-
-func (s *Scheduler) pruneBackups(keep int) {
-	entries, err := filepath.Glob(filepath.Join(s.backupDir, "fobe-*.db"))
-	if err != nil || len(entries) <= keep {
-		return
-	}
-	sort.Strings(entries)
-	for _, old := range entries[:len(entries)-keep] {
-		if err := os.Remove(old); err != nil {
-			s.log.Warn("remove old backup", "path", old, "err", err)
-		}
 	}
 }

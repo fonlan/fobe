@@ -458,3 +458,23 @@ func verifyHMAC(t *testing.T, body []byte, signature, secret string) bool {
 	want := hex.EncodeToString(mac.Sum(nil))
 	return signature == want
 }
+
+// The backup job must leave an openable SQLite file behind — the 2026-09-16
+// incident had a backup loop that was "enabled" for days without ever firing
+// (24h ticker vs. short-lived containers), and nobody would have noticed
+// until a restore was needed.
+func TestBackupJobProducesOpenableSnapshot(t *testing.T) {
+	st := testStore(t)
+	dir := t.TempDir()
+	New(st, testLogger(), dir, 7).backup()
+
+	snaps, _ := filepath.Glob(filepath.Join(dir, "fobe-*.db"))
+	if len(snaps) != 1 {
+		t.Fatalf("snapshot count = %d, want 1", len(snaps))
+	}
+	snap, err := store.Open(snaps[0])
+	if err != nil {
+		t.Fatalf("snapshot is not an openable database: %v", err)
+	}
+	snap.Close()
+}

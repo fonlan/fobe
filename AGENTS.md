@@ -79,7 +79,7 @@ docker compose exec server fobe-server admin unblock <ip|all> | reset-password |
 - 错误用 `fmt.Errorf("...: %w", err)` 包装，判断用 `errors.Is/As`。
 - handler 签名统一 `func (s *Server) handleX(w http.ResponseWriter, r *http.Request)`，会话内接口用 `s.requireSession(...)` 包装。
 - 需要新增 wire 类型时，只加在 `internal/protocol`；server 与 agent 都不另立定义。
-- 数据库：表/列加在 `store/schema.sql`；给老库加列走 `migrateAdditive`（必须幂等）。连接是单写者（`SetMaxOpenConns(1)`），别引入并发写路径。
+- 数据库：表/列加在 `store/schema.sql`；给老库加列走 `migrateAdditive`（必须幂等）。改 schema 必须同时 bump `store.SchemaVersion`——它驱动迁移前自动快照与降级告警；降级安全的前提是 schema 永远只做增量、所有查询显式列名（design §6 兼容策略）。连接是单写者（`SetMaxOpenConns(1)`），别引入并发写路径。
 - 新设置项用 `域.键` 命名（如 `server.public_url`、`ai.kill_switch`），经 `SetSetting`/`GetSetting`（敏感的用加密版本）。
 - 日志用 `log/slog`。
 - 版本注入：agent 是 `-X github.com/fobe-panel/fobe/internal/agent.Version=$VERSION`，server 是 `-X main.version=$VERSION`——别弄混。

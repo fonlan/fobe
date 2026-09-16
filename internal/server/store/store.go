@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,22 +17,43 @@ import (
 //go:embed schema.sql
 var schemaFS embed.FS
 
+// SchemaVersion is the schema generation this binary knows how to serve,
+// tracked in PRAGMA user_version. Bump it with every schema change (schema.sql
+// or migrateAdditive): it gates the pre-migration backup and the downgrade
+// warning. It does NOT gate the migrations themselves — those stay unconditional
+// and idempotent, so forgetting a bump only loses the backup-on-change
+// guarantee, never correctness. Upgrade and downgrade semantics: §6 "schema
+// 兼容策略" in design.md.
+const SchemaVersion = 1
+
 // Store is the database handle. Safe for concurrent use.
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 // Open opens (creating if needed) the database at path with WAL enabled.
 func Open(path string) (*Store, error) {
 	// busy_timeout: single writer, but brief contention with the retention sweeper.
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)", path)
+	// synchronous=FULL: WAL+NORMAL is the usual recommendation, but this file
+	// typically lives on a Docker bind mount whose fsync ordering is only as
+	// strong as the host filesystem (OrbStack/virtiofs et al). A 2026-09-16
+	// host reboot corrupted the main db mid-write and took the panel down.
+	// FULL fsyncs every commit; at this panel's write rate (second-spaced
+	// batches) the cost is unmeasurable, and a crash then costs at most the
+	// last commit instead of file integrity.
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
 	}
 	// modernc/sqlite serializes internally; multiple conns only add contention.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
+	if err := s.quickCheck(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -38,7 +61,77 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
+// quickCheck refuses to open a damaged file. A corrupt db used to surface as
+// scattered 500s across the panel while every write dug the hole deeper;
+// failing at startup names the file and points at the recovery path instead.
+// quick_check walks every b-tree, O(db size) — fine here, retention keeps the
+// sample tables bounded.
+func (s *Store) quickCheck() error {
+	rows, err := s.db.Query(`PRAGMA quick_check(8)`)
+	if err != nil {
+		return s.corruptDBErr(err)
+	}
+	defer rows.Close()
+	first, n := "", 0
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return s.corruptDBErr(err)
+		}
+		if line == "ok" {
+			return nil
+		}
+		n++
+		if first == "" {
+			first = line
+		}
+	}
+	if err := rows.Err(); err != nil {
+		// drivers may abort the scan on the first unreadable page instead of
+		// reporting it as a row — same verdict either way
+		return s.corruptDBErr(err)
+	}
+	return s.corruptDBErr(fmt.Errorf("%d reported problem(s), first: %s", n, first))
+}
+
+func (s *Store) corruptDBErr(detail error) error {
+	return fmt.Errorf("database file %s is corrupt (%v) — restore a snapshot from <data>/backup/ or rebuild with `sqlite3 <db> .recover`", s.path, detail)
+}
+
 func (s *Store) migrate() error {
+	dbVer, err := s.userVersion()
+	if err != nil {
+		return err
+	}
+	if dbVer > SchemaVersion {
+		// Downgrade (§5.5 version pinning makes these real, not hypothetical):
+		// the additive-only policy means an older binary finds a consistent
+		// subset — every query names its columns, so extra columns/tables from
+		// a newer build are inert. Serve without touching the file and without
+		// lowering user_version: this build doesn't know what the newer one
+		// applied, and re-setting it could let a half-known upgrade re-run.
+		slog.Warn("database schema is newer than this build; serving in downgrade-compatible mode (additive-only schema)",
+			"db_schema", dbVer, "build_schema", SchemaVersion)
+		return nil
+	}
+	if dbVer < SchemaVersion {
+		fresh, err := s.isEmpty()
+		if err != nil {
+			return err
+		}
+		if !fresh {
+			// Snapshot before the first tracked upgrade (and every later one):
+			// a bad migration then costs minutes of restore, not the panel.
+			// A failed backup must not wedge startup — migrations here are
+			// additive and idempotent, so the uncovered risk is small.
+			if err := s.BackupNow(); err != nil {
+				slog.Warn("pre-migration backup failed; continuing", "err", err)
+			} else {
+				slog.Info("pre-migration backup written", "dir", filepath.Join(filepath.Dir(s.path), "backup"))
+			}
+			slog.Info("migrating database schema", "from", dbVer, "to", SchemaVersion)
+		}
+	}
 	src, err := schemaFS.ReadFile("schema.sql")
 	if err != nil {
 		return fmt.Errorf("read embedded schema: %w", err)
@@ -63,7 +156,36 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("apply schema statement %.60q: %w", stmt, err)
 		}
 	}
-	return s.migrateAdditive()
+	if err := s.migrateAdditive(); err != nil {
+		return err
+	}
+	// Only write the version when it actually moved — user_version shares the
+	// header page with the change counter, rewriting it on every boot would
+	// dirty the file for nothing.
+	if dbVer != SchemaVersion {
+		if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, SchemaVersion)); err != nil {
+			return fmt.Errorf("set schema version: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) userVersion() (int, error) {
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	return v, nil
+}
+
+// isEmpty reports whether the file has no user tables yet (fresh install —
+// nothing worth snapshotting before "migrating" it).
+func (s *Store) isEmpty() (bool, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&n); err != nil {
+		return false, err
+	}
+	return n == 0, nil
 }
 
 // migrateAdditive adds columns introduced after the initial schema to

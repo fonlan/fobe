@@ -268,6 +268,13 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 **保留策略**：定时任务每 10 分钟删除 `metrics_samples`/`latency_samples` 中超过 7 天的行，并 `PRAGMA incremental_vacuum`。
 
+> **Schema 兼容策略（实现修订 2026-09-16，起因是宿主机重启导致主库页级损坏、settings 全丢的事故）**：
+> - **只做增量是铁律**：schema 变更只允许「新表 / 带默认值的新列 / 新索引」（`schema.sql` 的 `IF NOT EXISTS` + `migrateAdditive`，幂等）。所有查询**显式列名**，这样新表/新列对旧二进制是惰性的——旧版本直接打开新库也能服务，**降级不需要迁移**。
+> - **版本追踪**：`PRAGMA user_version` ↔ `store.SchemaVersion`，改 schema 必须同时 bump。`db < build`（升级）：先自动快照再跑迁移、写版本号；`db > build`（降级，§5.5 钉版本演练是真实场景）：只打 WARN、**不迁移、不回写版本号**——本次构建不知道新版本做过什么，重置版本号会让半知的升级重跑。
+> - **打开即 `quick_check`**：损坏的库拒绝启动（容器进入重启循环、日志给出恢复路径），而不是像事故里那样全站随机 500、每次写入把洞挖深。
+> - **`synchronous=FULL`**（原 NORMAL）：WAL+NORMAL 是常规推荐，但库文件在 Docker bind mount 上，fsync 顺序只与宿主文件系统一样可靠（OrbStack/virtiofs 等）。FULL 每提交一次 fsync，本面板写频是秒级批次、代价测不出来；换来崩溃时最多丢最后一次提交而不是文件完整性。
+> - **快照默认开启**：启动即拍 + 每 24h 一轮 + 迁移前必拍（时间戳命名，与每日快照共用 3 份池，§19.3 复核 2026-09-16：库体量随节点数增长，池子刻意压小）；`FOBE_BACKUP_DIR` 缺省 `<db 目录>/backup`，`off` 显式关闭。事故复盘：备份循环此前"配置着"但用 24h ticker、首次触发要等满一天，部署 churn 下容器从未活满——备份一次没跑过，坏的是「有机制、无快照」这种假安全感。
+
 ---
 
 ## 7. Agent ↔ Server 协议
@@ -706,7 +713,7 @@ services:
 
 - **构建管线**：`Dockerfile.server` 是多阶段构建——`node:22-alpine` 阶段构建 React 前端 → `golang` 阶段构建 `server` 与 `agent`（agent 交叉编译 `linux/amd64`，`CGO_ENABLED=0`）→ 运行镜像里同时含：server 二进制、`/srv/web`（前端产物）、`/srv/agent-seed/agent/<version>/`（agent 产物 + 带 sha256 的 `manifest.json`，启动时播种进 DL 卷，安装脚本与面板版本选择都读它）。`scripts/build.sh` 提供同一套产物的本地/CI 构建，供不进容器的开发方式使用。
 - **发布管线**（实现修订 2026-09-15）：推 `v*` tag 触发 `.github/workflows/release.yml`——先过 `gofmt`/`go vet`/`go test ./...`/前端 `tsc+vite build`，全绿才用 buildx 构建 `linux/amd64` 镜像推送到 `ghcr.io/<owner>/<repo>`，标签 `{version, v<tag>, latest}`；`$VERSION` = tag 去掉 `v` 前缀，同时注入 server 与 agent。镜像默认单平台、关 provenance：探针产物本就只有 linux/amd64（§10），attestation manifest list 会让旧 docker 引擎匿名拉取失败。compose 的 `image:` 指向它，`docker compose up -d` 即用预构建镜像；首次发布是 GHCR 私有包，转公开或 `docker login` 后再 `up`。
-- **备份**：每日 `VACUUM INTO` 快照到 `./data/backup/fobe-YYYYMMDD.db`（保留 14 份），另提供面板导出/导入 JSON（不含凭据明文）。
+- **备份**（实现修订 2026-09-16，默认开启）：启动即拍 + 每 24h 一轮 + 数据库迁移前必拍，`VACUUM INTO` 快照到 `./data/backup/fobe-<时间戳>.db`，保留 3 份；`FOBE_BACKUP_DIR` 换位置、`FOBE_BACKUP_DIR=off` 关闭。另提供面板导出/导入 JSON（不含凭据明文）。损坏恢复流程见 `README.md` 排障表。
 
 ---
 
@@ -733,7 +740,7 @@ services:
 
 1. 离线探针的指令入队后 TTL **10 分钟**，超时标失败（避免迟到指令突然生效）。
 2. 探针防火墙：agent **尝试自动放行** sing-box 端口（ufw / firewalld / nft / fw4），失败则把需要你手动执行的命令原文返回面板。
-3. 备份：每日 `VACUUM INTO` 快照保留 14 份 + 面板导出/导入。
+3. 备份：每日 `VACUUM INTO` 快照保留 3 份 + 面板导出/导入。（实现修订 2026-09-16：由 14 压到 3，库体量随节点数增长，池子刻意压小；启动即拍 + 迁移前必拍见 §6/§17。）
 4. agent 自更新：与 sing-box 同样三道闸门 + 版本显式指定。**（实现修订 2026-09-15：此条已被 §5.5 取代——agent 没有 `check`/观察期可用，实际是"下载 + sha256 + 旁路自检 + 原子替换"，且不保留 `.prev`；"跟随服务端"改为双向（含降级），触发是系统行为、不需确认，Kill Switch on 时冻结。）**
 5. anytls 端口默认随机高位端口，面板可改。
 6. **接入层完全外部化**：fobe 不碰 nginx、不签发也不续期证书；README 提供可直接复制的 nginx 配置（单上游 + WS 升级 + 真实 IP + 超时 + 上传体量）。

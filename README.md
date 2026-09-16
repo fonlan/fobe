@@ -270,14 +270,15 @@ data/                    # 单一数据目录（容器内挂载为 /data）
 ├─ dl/                   # agent / sing-box 产物（容器内是 /data/dl）
 │  ├─ agent/<version>/   # agent 二进制 + manifest.json（首次启动从镜像的 /srv/agent-seed 复制进来）
 │  └─ singbox/<version>/ # 面板可选的 sing-box 版本（服务端自动下载，或你手动投放）
-└─ backup/               # 每日 VACUUM INTO 快照，保留 14 份
+└─ backup/               # 快照备份：启动即拍 + 每 24h 一轮 + 迁移前必拍，保留 3 份
 ```
 
 - 整个 `data/` 只挂载一次（`./data:/data`），数据库、密钥、产物缓存、备份都在里面——备份整机就是拷走这一个目录（停服后拷更稳）。
+- **快照默认开启**：server 启动即拍一份、之后每 24 小时一轮、数据库迁移前必拍（`fobe-<时间戳>.db`，池子上限 3 份）。`FOBE_BACKUP_DIR=<目录>` 换位置，`FOBE_BACKUP_DIR=off` 关闭。启动时还会先跑一次 `PRAGMA quick_check`：库文件损坏就**拒绝启动**并在日志里给出恢复路径，不带病服务（`synchronous=FULL` 把崩溃时的损坏窗口压到只剩最后一次提交）。
+- 恢复：停服 → 用快照替换 `data/fobe.db` → 起服。
 - **sing-box 版本从哪来**：默认由服务端自己在启动时下载（仅当 `data/dl/singbox/` 里一个有效版本都没有；已有缓存则完全不联网）。也可以不联网：按上面的布局手动放一份 `singbox/<version>/{linux-amd64,linux-amd64.sha256,manifest.json}` 进去即可。想主动补一个版本，用设置页的「下载新版本」下拉（列的是上游 release，已缓存的那几条是灰的），或点「刷新版本列表」重新拉一次；下载中出现的那一行会就地显示阶段、字节与速度，失败的那一行保留原因并给重试图标。
 - **发布与删除**：设置页 sing-box 区块一行一个本地版本，行尾两个图标按钮——「发布」把这一行的版本下发到所有已启用 sing-box 的节点（会先列出受影响节点并要求二次确认；15 分钟后仍未生效的节点汇总发一条告警），「删除」把该版本从服务端磁盘删掉（仍被某节点 `desired_version` 引用时需要确认）。旧版本不会自动删，列表里能看到每个版本的占用、下载时间与被多少节点引用。**同一个产物只会下载一次**：下载进行中「发布」置灰，另一个版本的下载请求会返回 `download_in_progress`。
 - **GeoIP 国别库从哪来**：`data/geoip/GeoLite2-Country.mmdb`（容器内 `/data/geoip/`，跟 `fobe.db` 同一个挂载卷，随备份一起走）。服务端每天检查一次，文件超过「最长使用天数」（默认 7 天）就从免密钥镜像自动重新下载——**不需要 MaxMind 账号或 License Key**；设置页 GeoIP 区块能看状态与数据日期，也能点「立即更新」或直接「上传 MMDB」。下载与上传装的是同一个文件，**新库解析失败就拒绝替换**，旧库继续用；更新成功后立即生效，无需重启。
-- 恢复：停服 → 用快照替换 `data/fobe.db` → 起服。
 - 探针节点无需重建：agent 用落盘的 machine-id 重连即复用原节点。
 - 换了 `FOBE_MASTER_KEY` = 已加密的 AI key / Bot Token 等敏感设置全部失效，需要重填（节点与指标数据不受影响）。
 
@@ -373,6 +374,7 @@ export default defineConfig({
 
 | 症状 | 先查这里 |
 |---|---|
+| **全站随机 500、日志刷 `database disk image is malformed`** | SQLite 库文件损坏（典型诱因：宿主机断电/强制重启时，虚拟化文件系统没保证 fsync 顺序；新版 server 启动即 `quick_check`，损坏会拒绝启动而不是带病服务）。恢复：`docker compose stop server` → 从 `data/backup/` 取最新快照拷成 `data/fobe.db`（损坏原件留档别删）→ `docker compose start server`；没有快照时用 `sqlite3 data/fobe.db ".recover" > rec.sql` 重建（坏页上的数据会丢，通常是 settings 一类）。配置丢失后先补 `server.public_url` 等关键设置 |
 | 能登录，节点永远离线 | nginx 的 `Upgrade`/`Connection` 头与 `proxy_read_timeout` |
 | 终端打开几秒就断 | 同上 + `proxy_buffering off` |
 | 本地开发时终端/实时推送连不上 | Vite 代理 `/ws` 没开 `ws: true` |

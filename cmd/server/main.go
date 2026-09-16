@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -53,8 +54,10 @@ func env(key, def string) string {
 	return def
 }
 
-func mustStore() *store.Store {
-	st, err := store.Open(env("FOBE_DB", "/data/fobe.db"))
+func dbPath() string { return env("FOBE_DB", "/data/fobe.db") }
+
+func mustStore(path string) *store.Store {
+	st, err := store.Open(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fobe-server: open db: %v\n", err)
 		os.Exit(1)
@@ -84,7 +87,7 @@ func runServer() {
 	slog.SetDefault(log)
 
 	key := mustMasterKey()
-	st := mustStore()
+	st := mustStore(dbPath())
 	defer st.Close()
 
 	// Startup work that must not block serving (the sing-box artifact
@@ -171,7 +174,15 @@ func runServer() {
 		notify.NewTelegram(decryptSetting, notifyClient),
 		notify.NewWebhook(decryptSetting, notifyClient),
 	}
-	sched := scheduler.New(st, log, env("FOBE_BACKUP_DIR", ""), 7, channels...)
+	// Backups are on by default (snapshots land next to the database, §17) —
+	// the 2026-09-16 corruption incident cost the settings table because the
+	// only copy of the data was the data itself. FOBE_BACKUP_DIR relocates
+	// them; FOBE_BACKUP_DIR=off is the explicit opt-out.
+	backupDir := env("FOBE_BACKUP_DIR", filepath.Join(filepath.Dir(dbPath()), "backup"))
+	if backupDir == "off" || backupDir == "none" {
+		backupDir = ""
+	}
+	sched := scheduler.New(st, log, backupDir, 7, channels...)
 	sched.Start(stop)
 	go h.PumpCommands(2 * time.Second)
 
@@ -407,7 +418,7 @@ func runAdmin(args []string) {
 			fmt.Fprintln(os.Stderr, "usage: fobe-server admin unblock <ip|all>")
 			os.Exit(2)
 		}
-		st := mustStore()
+		st := mustStore(dbPath())
 		defer st.Close()
 		if err := st.UnblockIP(args[1]); err != nil {
 			fmt.Fprintf(os.Stderr, "unblock: %v\n", err)
@@ -416,7 +427,7 @@ func runAdmin(args []string) {
 		fmt.Printf("unblocked %s\n", args[1])
 
 	case "reset-password":
-		st := mustStore()
+		st := mustStore(dbPath())
 		defer st.Close()
 		pw, err := security.RandomToken(12)
 		if err != nil {
@@ -451,7 +462,7 @@ func runAdmin(args []string) {
 		fs := flag.NewFlagSet("list-sessions", flag.ContinueOnError)
 		revoke := fs.Bool("revoke", false, "revoke all sessions")
 		_ = fs.Parse(args[1:])
-		st := mustStore()
+		st := mustStore(dbPath())
 		defer st.Close()
 		if *revoke {
 			n, err := st.RevokeAllSessions()
@@ -480,7 +491,7 @@ func runAdmin(args []string) {
 			fmt.Fprintln(os.Stderr, "usage: fobe-server admin kill-switch on|off")
 			os.Exit(2)
 		}
-		st := mustStore()
+		st := mustStore(dbPath())
 		defer st.Close()
 		val := "0"
 		if args[1] == "on" {

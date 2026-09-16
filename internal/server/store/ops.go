@@ -4,6 +4,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
 )
 
 // --- commands (offline queue, TTL 10min, design §7/§19.1) ---
@@ -680,6 +684,56 @@ func (s *Store) BackupTo(path string) error {
 	_, err := s.db.Exec(fmt.Sprintf(`VACUUM INTO %q`, path))
 	if err != nil {
 		return fmt.Errorf("vacuum into %s: %w", path, err)
+	}
+	return nil
+}
+
+// backupKeep is how many snapshots survive pruning (design §17: 3, the
+// operator's call — sample tables are pruned to 7 days but traffic_daily is
+// permanent, so the db only grows with node count; keep the pool small).
+// The daily scheduler and the ad-hoc BackupNow share one naming scheme
+// (fobe-*.db), so they prune from the same pool.
+const backupKeep = 3
+
+// BackupNow writes one timestamped snapshot into <db dir>/backup and prunes
+// old ones. Used at boot (scheduler fires it immediately) and before schema
+// migrations — the snapshot that saves you is the one taken *before* the
+// thing that breaks.
+func (s *Store) BackupNow() error {
+	return s.BackupDir(filepath.Join(filepath.Dir(s.path), "backup"))
+}
+
+// BackupDir writes one timestamped snapshot into dir and prunes to backupKeep.
+func (s *Store) BackupDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("backup dir: %w", err)
+	}
+	// Millisecond precision: boot fires two snapshots back-to-back (the
+	// migration snapshot inside Open, then the scheduler's boot run) and a
+	// 1s timestamp collided. VACUUM INTO refuses to overwrite, so clear any
+	// same-named leftover first — a collision means our own earlier attempt,
+	// and the fresh snapshot is strictly better than the stale one.
+	name := fmt.Sprintf("fobe-%s.db", time.Now().Format("20060102-150405.000"))
+	target := filepath.Join(dir, name)
+	_ = os.Remove(target)
+	if err := s.BackupTo(target); err != nil {
+		return err
+	}
+	return PruneBackups(dir, backupKeep)
+}
+
+// PruneBackups removes the oldest fobe-*.db files in dir, keeping the newest
+// keep. Errors on individual files are non-fatal (best effort).
+func PruneBackups(dir string, keep int) error {
+	entries, err := filepath.Glob(filepath.Join(dir, "fobe-*.db"))
+	if err != nil || len(entries) <= keep {
+		return err
+	}
+	sort.Strings(entries)
+	for _, old := range entries[:len(entries)-keep] {
+		if err := os.Remove(old); err != nil {
+			return err
+		}
 	}
 	return nil
 }
