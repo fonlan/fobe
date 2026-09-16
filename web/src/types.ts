@@ -208,6 +208,7 @@ export interface AuditRow {
   ts: number;
   actor: string;
   node_id?: string;
+  node_name?: string;
   action: string;
   command?: string;
   risk?: string;

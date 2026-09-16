@@ -233,9 +233,13 @@ func (s *Store) UndeliveredAlerts() ([]Alert, error) {
 // --- audit logs (design §4.4) ---
 
 type AuditEntry struct {
-	TS          int64  `json:"ts"`
-	Actor       string `json:"actor"`
-	NodeID      string `json:"node_id,omitempty"`
+	TS     int64  `json:"ts"`
+	Actor  string `json:"actor"`
+	NodeID string `json:"node_id,omitempty"`
+	// NodeName is resolved at read time (LEFT JOIN nodes) so renamed nodes
+	// show their current name; it stays empty for nodes since deleted, and
+	// audit_logs itself is never written back to.
+	NodeName    string `json:"node_name,omitempty"`
 	Action      string `json:"action"`
 	Command     string `json:"command,omitempty"`
 	Reason      string `json:"reason,omitempty"`
@@ -258,8 +262,9 @@ func (s *Store) InsertAudit(a *AuditEntry) error {
 
 func (s *Store) ListAudit(limit int) ([]AuditEntry, error) {
 	rows, err := s.db.Query(
-		`SELECT ts, actor, node_id, action, command, reason, risk, source_ip, ai_session_id
-		 FROM audit_logs ORDER BY id DESC LIMIT ?`, limit,
+		`SELECT a.ts, a.actor, a.node_id, COALESCE(n.name, ''), a.action, a.command, a.reason, a.risk, a.source_ip, a.ai_session_id
+		 FROM audit_logs a LEFT JOIN nodes n ON n.id = a.node_id
+		 ORDER BY a.id DESC LIMIT ?`, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -268,7 +273,7 @@ func (s *Store) ListAudit(limit int) ([]AuditEntry, error) {
 	out := []AuditEntry{}
 	for rows.Next() {
 		var a AuditEntry
-		if err := rows.Scan(&a.TS, &a.Actor, &a.NodeID, &a.Action, &a.Command, &a.Reason,
+		if err := rows.Scan(&a.TS, &a.Actor, &a.NodeID, &a.NodeName, &a.Action, &a.Command, &a.Reason,
 			&a.Risk, &a.SourceIP, &a.AISessionID); err != nil {
 			return nil, err
 		}

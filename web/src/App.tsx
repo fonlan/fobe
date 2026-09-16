@@ -10,6 +10,7 @@ import Targets from './pages/Targets';
 import Servers from './pages/Servers';
 import EditServer from './pages/EditServer';
 import Alerts from './pages/Alerts';
+import Audit from './pages/Audit';
 import Settings from './pages/Settings';
 import Subscriptions from './pages/Subscriptions';
 import TerminalPage from './pages/TerminalPage';
@@ -44,6 +45,7 @@ export default function App() {
             <Route path="servers" element={<Servers />} />
             <Route path="servers/:id" element={<EditServer />} />
             <Route path="subscriptions" element={<Subscriptions />} />
+            <Route path="audit" element={<Audit />} />
           </Route>
           <Route path="/targets" element={<Navigate to="/settings/targets" replace />} />
           <Route path="/subs" element={<Navigate to="/settings/subscriptions" replace />} />

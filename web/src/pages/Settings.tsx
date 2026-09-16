@@ -15,7 +15,6 @@ import type {
   GeoIPStatus,
   SessionRow,
   SettingView,
-  AuditRow,
   ImportStats,
   SingboxCache,
   SingboxCacheVersion,
@@ -183,6 +182,9 @@ export default function Settings() {
           <NavLink to="/settings/subscriptions" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
             {t('nav_subs')}
           </NavLink>
+          <NavLink to="/settings/audit" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+            {t('nav_audit')}
+          </NavLink>
         </nav>
         <Outlet />
       </div>
@@ -206,6 +208,9 @@ export default function Settings() {
         </NavLink>
         <NavLink to="/settings/subscriptions" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
           {t('nav_subs')}
+        </NavLink>
+        <NavLink to="/settings/audit" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+          {t('nav_audit')}
         </NavLink>
       </nav>
 
@@ -289,7 +294,6 @@ export default function Settings() {
       />
       <BlacklistCard />
       <SessionsCard />
-      <AuditCard />
 
       <section className="card">
         <h3>{t('sec_theme')}</h3>
@@ -1441,63 +1445,3 @@ function SessionsCard() {
   );
 }
 
-function AuditCard() {
-  const { t } = useI18n();
-  const [entries, setEntries] = useState<AuditRow[] | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const r = await api.listAudit(200);
-      setEntries(r.entries ?? []);
-      setErr(null);
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    }
-  }, [t]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  return (
-    <section className="card">
-      <h3>{t('sec_audit')}</h3>
-      {err && <div className="form-error">{err}</div>}
-      {entries !== null && entries.length === 0 && <div className="hint">{t('audit_empty')}</div>}
-      {entries !== null && entries.length > 0 && (
-        <div className="table-wrap">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>{t('audit_time')}</th>
-                <th>{t('audit_actor')}</th>
-                <th>{t('audit_action')}</th>
-                <th>{t('audit_node')}</th>
-                <th>{t('audit_detail')}</th>
-                <th>{t('audit_source')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((e, i) => (
-                <tr key={i}>
-                  <td className="mono nowrap">{fmtTime(e.ts)}</td>
-                  <td>{e.actor}</td>
-                  <td>
-                    <span className="chip">{e.action}</span>
-                    {e.risk === 'risky' && <span className="chip status-failed">risky</span>}
-                  </td>
-                  <td className="mono">{e.node_id || '-'}</td>
-                  <td className="detail-cell" title={e.command}>
-                    {e.command || '-'}
-                  </td>
-                  <td className="mono">{e.source_ip || '-'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
