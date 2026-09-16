@@ -1,27 +1,23 @@
-// Overview: the node card wall plus the "add node" dialog (one-time reg token
-// + install command). Live refresh has three cooperating pieces: /ws/events
-// for state changes, a 5s list poll for metric reports (they fire no event at
-// all), and the §16 5s agent probe stream — enabled here for every online node
-// so the wall ticks instead of waiting out the 60s base cadence. Probe mode and
-// polling both stop while the tab is hidden, so a forgotten tab cannot pin
-// every agent at 5s forever.
+// Overview: the node card wall. Live refresh has three cooperating pieces:
+// /ws/events for state changes, a 5s list poll for metric reports (they fire no
+// event at all), and the §16 5s agent probe stream — enabled here for every
+// online node so the wall ticks instead of waiting out the 60s base cadence.
+// Probe mode and polling both stop while the tab is hidden, so a forgotten tab
+// cannot pin every agent at 5s forever. The "add node" dialog lives on
+// Settings → 服务器 (Servers.tsx): adding a probe is configuration, not
+// monitoring, so the overview stays a read-only wall.
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
-import type { NodeView, RegTokenInfo } from '../types';
+import type { NodeView } from '../types';
 import NodeCard from '../components/NodeCard';
-import Modal from '../components/Modal';
-import { copyText } from '../format';
-
-type AddStep = 'closed' | 'form' | 'done';
 
 export default function Overview() {
   const { t } = useI18n();
   const [nodes, setNodes] = useState<NodeView[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [addStep, setAddStep] = useState<AddStep>('closed');
 
   /** Node ids currently switched to the 5s probe cadence. */
   const probedRef = useRef<Set<string>>(new Set());
@@ -95,9 +91,6 @@ export default function Overview() {
           {t('nav_overview')}
           {nodes && <span className="count-chip">{t('nodes_count', { n: nodes.length })}</span>}
         </h2>
-        <button type="button" className="btn primary" onClick={() => setAddStep('form')}>
-          + {t('add_node')}
-        </button>
       </div>
 
       {err && (
@@ -120,114 +113,6 @@ export default function Overview() {
           ))}
         </div>
       )}
-
-      {addStep !== 'closed' && <AddNodeModal step={addStep} setStep={setAddStep} onCreated={() => void load()} />}
     </div>
-  );
-}
-
-function AddNodeModal({
-  step,
-  setStep,
-  onCreated,
-}: {
-  step: AddStep;
-  setStep: (s: AddStep) => void;
-  onCreated: () => void;
-}) {
-  const { t } = useI18n();
-  const [name, setName] = useState('');
-  const [note, setNote] = useState('');
-  const [info, setInfo] = useState<RegTokenInfo | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-
-  const create = async (e: FormEvent) => {
-    e.preventDefault();
-    if (busy) return;
-    setBusy(true);
-    setErr(null);
-    const trimmedName = name.trim();
-    if (!trimmedName) {
-      setErr(t('err_name_required'));
-      setBusy(false);
-      return;
-    }
-    try {
-      const r = await api.createRegToken(trimmedName, note.trim());
-      setInfo(r);
-      setStep('done');
-      onCreated();
-    } catch (ex) {
-      setErr(apiErrorMessage(ex, t));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const doCopy = async () => {
-    if (!info) return;
-    const ok = await copyText(info.install_command);
-    setCopied(ok);
-    if (ok) window.setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <Modal title={t('add_node_title')} onClose={() => setStep('closed')}>
-      {step === 'form' && (
-        <form onSubmit={create} className="stack">
-          <label className="field">
-            <span>{t('add_node_name_label')}</span>
-            <input
-              value={name}
-              autoFocus
-              required
-              maxLength={120}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span>{t('add_node_note_label')}</span>
-            <input value={note} onChange={(e) => setNote(e.target.value)} />
-          </label>
-          {err && <div className="form-error">{err}</div>}
-          <div className="row-end">
-            <button type="button" className="btn" onClick={() => setStep('closed')}>
-              {t('cancel')}
-            </button>
-            <button type="submit" className="btn primary" disabled={busy}>
-              {busy ? t('loading') : t('add_node_create')}
-            </button>
-          </div>
-        </form>
-      )}
-      {step === 'done' && info && (
-        <div className="stack">
-          <p className="hint">{t('install_cmd_warn', { min: Math.round(info.ttl / 60) })}</p>
-          <pre className="code-block">{info.install_command}</pre>
-          <div className="row-end">
-            <button type="button" className="btn" onClick={() => void doCopy()}>
-              {copied ? t('copied') : t('copy')}
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => {
-                setInfo(null);
-                setName('');
-                setNote('');
-                setStep('form');
-              }}
-            >
-              {t('add_another')}
-            </button>
-            <button type="button" className="btn primary" onClick={() => setStep('closed')}>
-              {t('close')}
-            </button>
-          </div>
-        </div>
-      )}
-    </Modal>
   );
 }
