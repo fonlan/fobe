@@ -249,7 +249,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `ip_blacklist` | ip, reason, fail_count, created_at, expires_at | 持久化 |
 | `settings` | key, value, encrypted | 全局 anytls 密码、AI 配置、Telegram、保留期、延迟测量频率（`latency.interval_seconds`，默认 5）等 |
 | `reg_tokens` | token_hash, note, expires_at, used_at | 单次 |
-| `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, distro_id, distro_version, cpu_cores, primary_ip, country_code, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表；`tz` 与发行版（os-release 自动探测，§16）由 agent 上报，只读 |
+| `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, distro_id, distro_version, cpu_cores, primary_ip, country_code, sub_name, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表；`tz` 与发行版（os-release 自动探测，§16）由 agent 上报，只读；`sub_name` 是 §10.2 的订阅展示名 |
 | `node_ips` | node_id, ip, family, scope, is_primary, manual_primary | 多 IP 全量上报 |
 | `node_interfaces` | node_id, name, is_default, updated_at | agent 上报的可选网卡清单与默认路由标记 |
 | `node_network` | node_id, iface, mode(in/out/both/max), quota_bytes, cycle_type(none/month/year), next_reset_at | 流量口径、配额与独立流量周期；空 `iface` 表示 agent 自动选择默认路由 |
@@ -261,7 +261,8 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `node_latency_targets` | node_id, target_id | 每探针选用的目标集 |
 | `latency_samples` | node_id, target_id, ts, icmp_ms, tcp_ms, loss | 保留 7 天 |
 | `subscriptions` | id, name, token_hash, format, template_id, enabled, ua_filter | 多订阅；`format` 空 = 自动（2026-09-16 实现：见 §10 修订），`token_enc` 见 §10 |
-| `subscription_nodes` | subscription_id, node_id | |
+| `subscription_nodes` | subscription_id, node_id | **旧直连投影**（§10.2）：`subscription_entries` 里 `relay_node_id=''` 且启用的那半边，双写以保降级可读 |
+| `subscription_entries` | subscription_id, node_id, relay_node_id, proto, src_port, iface, alias, enabled | §10.2 的订阅绑定单位 = 入口；`relay_node_id=''` 为直连，`enabled=0` 是**墓碑**（取消勾选，reconcile 不再加回） |
 | `templates` | id, name, format(singbox/clash), content | 完整配置模板 |
 | `node_singbox` | node_id, version, desired_version, desired_uninstall, config_hash, status, last_error, cert_pem, cert_sha256, port | sing-box 期望/实际状态；`desired_uninstall` 是面板的卸载意图（§9.2 实现修订 2026-09-16），探针回报 `absent` 后清零 |
 | `commands` | id, node_id, kind, payload, status, created_at, sent_at, finished_at, result | 指令队列 |
@@ -534,7 +535,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - 输出 = **模板渲染**：模板是每格式一份完整配置文件（Clash YAML / sing-box JSON），使用 `{{nodes}}` 占位符（2026-09-16b：`{{rules}}` 占位符已删除，分流规则直接写在模板里）；同一模板可被多个订阅复用。
 - **模板中禁止出现可手填的凭据**：节点数据统一由 `{{nodes}}` 注入，密码来自全局设置。这样"轮换密码"才不会漏改。
 - 面板功能：模板编辑器（含语法校验 + 预览渲染结果）、订阅的节点多选、**绑定模板**、UA 过滤、一键轮换 token、**链接随时复制**、访问日志（时间/IP/UA/**结果与拒绝原因**）。
-- 节点渲染为 anytls outbound：`server`（探针主 IP 或你指定的域名）、`server_port`、`password`、`tls.certificate`（内嵌 PEM pinning）、`tls.server_name`；**出站 tag = `fobe-<节点名>`**（节点名为空则用节点 id，重名依次加 `-2`/`-3`，2026-09-16 修订，见下）。
+- 节点渲染为 anytls outbound：`server`（探针主 IP 或你指定的域名）、`server_port`、`password`、`tls.certificate`（内嵌 PEM pinning）、`tls.server_name`；**出站 tag = `fobe-<节点名>`**（节点名为空则用节点 id，重名依次加 `-2`/`-3`，2026-09-16 修订，见下）。**2026-09-16c 起绑定的单位是「入口」而不是节点，且名称支持自定义（入口 alias / 节点订阅名 / 中转命名格式）——见 §10.2。**
 
 > **实现修订 2026-09-16（订阅链接随时可复制；`{{rules}}` 有了配置界面）**：补齐两处"规格与实现对不上"的地方，并补上一直缺的模板绑定入口。
 > - **链接不再只显示一次**：`subscriptions` 增列 `token_enc`（Cryptor AES-GCM 密文，密钥边界同 §4.4），hash 仍只用于 `/sub/<token>` 查询；新增 `GET /api/subscriptions/{id}/link` 返回 `{token,url}`，列表返回派生字段 `link_available`。**代价（说清楚）**：库里多一份密文，所以"库中只存 hash"这句话不再成立——单用户自托管下主密钥与库同处一地，单拿 `token_enc` 并不比单拿 hash 更危险，但**拿到整个 `data/` 就等于拿到全部订阅链接**；换来的是"想复制就复制"。本修订前建的订阅 `token_enc=''`、`link_available=false`，面板提示只能轮换 Token 换新链接（迁移只加列，不改老数据）。订阅行按钮「复制订阅链接」一次点击直接写剪贴板并 toast 反馈；明文不可恢复时 toast 提示轮换，两条剪贴板路径都被拒时才展开链接面板供手动选中。**复制一律走 `format.copyText` 而不是 `navigator.clipboard`**：面板通常跑在局域网明文 http 上，异步剪贴板 API 在非安全上下文里根本不存在，直连它会让按钮"点了没反应"。
@@ -562,6 +563,33 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 ```
 
 面板必须在轮换对话框里写明："此操作会要求所有客户端重新拉取订阅，旧密码立即失效"。建议也顺手实现"节点级密码覆盖"字段，方便你以后想隔离时不必重构数据模型（v1 UI 可以先不暴露）。
+
+### 10.2 入口（entry）：中转拓扑与订阅命名（2026-09-16c 新增）
+
+**需求**：节点 A 上的一条 nftables 转发的目标正好是节点 B 的 anytls 入站端口（`dst_ip ∈ B 的 IP`、`dst_port == B 的入站端口`、`tcp`）时，这两个节点在订阅里应产出 **3 个入口**：A 直连、B 直连、**B 经 A**（入口是 A 的 `ip:转发源端口`）；并且每个节点在订阅里的名称要能自定义。
+
+- **订阅绑定的单位从「节点」变成「入口」**：身份 `(node_id, relay_node_id, proto, src_port, iface)`，`relay_node_id=''` 即直连。渲染时一个入口 = 一个 anytls outbound：
+
+| 入口 | server | port | 证书 pin |
+|---|---|---|---|
+| A 直连 | `A.primary_ip` | A 的入站端口 | A 的自签证书 |
+| B 直连 | `B.primary_ip` | B 的入站端口 | B 的自签证书 |
+| B 经 A | `A.primary_ip` | 那条转发规则的 `src_port` | **B 的自签证书** |
+
+  DNAT 在 L4、TLS 仍终结在 B，所以中转入口 pin 的仍是 B 的证书、SNI 仍是全局 `www.bing.com`——`singbox.ProxyNode` 本来就是 `(server, port, cert)` 三元组，**渲染器零改动**，新增的只是「入口装配」这一层。
+
+- **推导规则（服务端，无新 wire、无新探针状态）**：`node_forwards` 快照里 `proto=tcp`、`dst_port == B.singbox.port`、`dst_ip ∈ B 上报的 IPv4 集合`（`node_ips` 里 `family=4`，不限于 `primary_ip`——入口渲染才一律用 `primary_ip`）的每条规则，就是 B 的一个中转入口。排除自环（`A == B`，或 `dst_ip` 落回 A 自己）。§21.1 说规则集才是事实，所以转发一改，入口跟着改——那是这个设计的重点，不是副作用。
+- **落账 + 墓碑（自动纳入，2026-09-16c 修订）**：新表 `subscription_entries`（SchemaVersion 9→10）。当某订阅里**已启用**某节点 B 的直连入口时，B 的所有**可渲染**中转候选自动落成 `enabled=1` 的行并落审计 `subscription_entry_auto_added`；操作员取消勾选写 `enabled=0` 的**墓碑**而不是删行——reconcile 不会把它加回来。`sub.relay_auto_include`（布尔式设置，默认 on）关掉就退化成「只作候选、手动勾选」。触发点：服务端启动、探针上报新的 forwards 快照（hub 观察者）、面板读候选列表。
+  - **代价（说清楚）**：订阅输出会在转发规则变化后**自己变**（这正是本需求要的），所以自动纳入必须可见——入口在面板上带「由转发规则发现」标记、审计里有记录、取消能长期生效。反过来：不可渲染的候选（B 还没有证书/端口）**不落账**，免得表里堆一批渲染不出东西的行。
+  - **候选消失不删行**：转发规则被删、探针离线导致快照失真时，入口标 `unavailable` 并在渲染时跳过，但**仍留在面板上可取消**——不静默消失，否则客户端的节点集合会毫无提示地变。此时 B 直连入口还在，客户端的降级是合理的。
+- **候选范围（§10 的限制继续生效，且按入口逐条判定）**：选择器只**列出会出现在输出里的入口**。直连入口要求该节点 `subRenderable`（主 IP + 入站端口 + 已上报证书）；中转入口还额外要求**落地节点**可渲染——中转是"借道"，最终 TLS 会话仍然终止在 B，所以 B 必须是可用的 anytls 节点；**跳板 A 自己不需要装 sing-box**（它只转发包），但必须有主 IP 才谈得上入口。已绑定但**当前**不可渲染的入口仍然列出（灰显 + 原因、可取消勾选），否则操作员保存一次就会把绑定关系悄悄丢掉——这与 §10 原口径完全一致。
+- **命名（每个节点可自定义）**：
+  - 直连入口：`alias` → `nodes.sub_name`（新增列，面板「编辑服务器 → 订阅名称」）→ `nodes.name` → 节点 id。
+  - 中转入口：`alias` → `sub.relay_name_format`（默认 `{name} · {relay}:{port}`；占位符 `{name}{relay}{host}{port}{proto}{iface}`，必须含 `{name}`）。`{name}` = 目标节点的最终基础名，`{relay}` = 跳板节点名。默认带 relay + port 是必需的：多条规则指向同一 B、多个中转指向同一 B 时默认名不能撞车。
+  - 出站 tag 仍由最终名派生 `fobe-<name>`（重名 `-2` / `#2` 留作兜底），但**显式 alias 撞名在保存时就拒**（`alias_conflict`）：静默加后缀会毁掉写模板的人的预期。alias 1–64 字符、禁控制字符；两个渲染器都走 escape，别名只出现在带引号的标量里，没有注入面。
+  - **代价**：改 alias/名字 = 改 tag，模板里 pin 过 `fobe-<旧名>` 的 selector/urltest/final 会失配——重拉订阅即恢复（订阅本来就是干这个的，同 §10 实现修订 2026-09-16 对 tag 的取舍）。
+- **接口**：`GET /api/subscriptions/{id}/entries`（候选 + 已绑定，含 `selected/alias/auto_name/available/reason/warning/discovered`）；`PUT /api/subscriptions/{id}/nodes` 接受 `entries`（**`node_ids` 保留为兼容路径**：等价于只维护直连入口，中转行不动）；`PATCH /api/nodes/{id}` 接受 `sub_name`。§17 快照带上入口与 alias（老快照只带 `node_machine_ids` → 导入为直连入口，与旧行为等价）。
+- **v1 边界**：只做单跳（`C→A→B` 不合成「B 经 C」，组合爆炸且每跳 masquerade 语义不同）；入口身份里的 `proto/src_port/iface` 与 §21 的规则身份逐项对齐，且一律用 `''` 而不是 NULL（SQLite 唯一索引允许多个 NULL，复合主键里塞 NULL 会漏掉去重）。遮蔽（§21.9）只在出口侧告警，不在转发侧拒绝。
 
 ---
 
@@ -944,3 +972,10 @@ docker run --rm --privileged -v "$PWD":/src -w /src golang:1.25 sh -c \
 - 探针 agent 必须先更新到带 §21 的版本，否则面板只能显示"版本过旧"（§5.5 自更新或重装）。
 - 面板新增的规则**没有来源标记**：nftables 里没有可靠的"这是我加的"字段（注释是用户可见的备注，不该被面板征用），所以列表不区分来源。这是有意的——所有 DNAT 规则都可读可删，来源标记只会给出会过期的假信息。
 - 未提供 AI 工具：端口转发会直接改变对外暴露面，v1 只走人工确认的面板路径（要开放给 AI 需按 §12.3 加确认与元操作门）。
+
+### 21.9 与订阅中转的交叉点（2026-09-16c 新增）
+
+- 一条转发的 `dst` 正好命中另一台探针的 anytls 入站端口时，它就是订阅里「B 经 A」入口的来源（推导与落账见 §10.2）。**转发侧不新增任何字段**：中转关系是推导出来的，不是声明出来的——否则同一件事会有两个事实来源。
+- **遮蔽（shadowing）**：跳板 A 上某条转发的 `src_port` 若等于 **A 自己的** anytls 入站端口，发往 `A:<该端口>` 的包在 prerouting 就被 DNAT 走了，「A 直连」入口实际已不可用。§21 的冲突检测只看转发规则之间、不看与本机入站端口的关系，**这里刻意不在转发侧拒绝**（端口占用是探针的事实，面板不替它做决定），改由订阅侧把该入口标成 `shadowed` 告警。
+- **转发变化会改变订阅输出**（自动纳入的中转入口，§10.2）：要停掉某个入口就取消勾选（写墓碑），不是删规则——两者语义不同，删规则是动探针，取消勾选只是这份订阅不发它。
+- 流量口径不受影响：转发流量穿过 A 的网卡，A 的周期用量会跟着涨（配额按节点计）——面板在入口列表里写明「经 <A>」，让这个账对得上（不额外在节点页做跳板徽标：那会多一份会过期的派生状态）。

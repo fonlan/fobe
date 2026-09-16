@@ -24,7 +24,7 @@ var schemaFS embed.FS
 // and idempotent, so forgetting a bump only loses the backup-on-change
 // guarantee, never correctness. Upgrade and downgrade semantics: §6 "schema
 // 兼容策略" in design.md.
-const SchemaVersion = 9
+const SchemaVersion = 10
 
 // Store is the database handle. Safe for concurrent use.
 type Store struct {
@@ -238,6 +238,9 @@ func (s *Store) migrateAdditive() error {
 		// §9.2 面板卸载 sing-box: the intent lives with the desired state so an
 		// offline probe still gets it from hello_ack (a queued command expires).
 		{"node_singbox", "desired_uninstall", `ALTER TABLE node_singbox ADD COLUMN desired_uninstall INTEGER NOT NULL DEFAULT 0`},
+		// §10.2 订阅里的展示名：节点名属于面板，订阅名常常要另起一个（中文名、
+		// 带地区缩写），而且中转入口的默认名要用它做前缀。
+		{"nodes", "sub_name", `ALTER TABLE nodes ADD COLUMN sub_name TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, m := range migrations {
 		if s.columnExists(m.table, m.column) {

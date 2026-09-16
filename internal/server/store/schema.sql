@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     primary_ip      TEXT NOT NULL DEFAULT '',
     country_code    TEXT NOT NULL DEFAULT '',
     country_manual  INTEGER NOT NULL DEFAULT 0, -- §14 手动指定的国旗,主 IP 变化后不回退
+    sub_name        TEXT NOT NULL DEFAULT '',   -- §10.2 订阅展示名（'' = 用 name）
     tz              TEXT NOT NULL DEFAULT 'UTC',
     caps            TEXT NOT NULL DEFAULT '{}',
     -- agent self-update bookkeeping (design §5.5). target is the version this
@@ -194,10 +195,32 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     created_at INTEGER NOT NULL
 );
 
+-- Legacy direct-only binding, kept as the *projection* of subscription_entries
+-- rows with relay_node_id='' (design §10.2 2026-09-16c): an older binary reads
+-- this table by column name, so writes mirror the direct half into it and a
+-- downgrade still renders the direct entries it used to.
 CREATE TABLE IF NOT EXISTS subscription_nodes (
     subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
     node_id         TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     PRIMARY KEY (subscription_id, node_id)
+);
+
+-- §10.2 entries: the unit a subscription binds is (target node, ingress) —
+-- relay_node_id='' is the node's own inbound, otherwise the target is reachable
+-- through that node's nftables DNAT rule. proto/src_port/iface mirror the §21
+-- rule identity; '' (never NULL) keeps the composite key deduplicating, since
+-- SQLite unique indexes treat NULLs as distinct. enabled=0 is a *tombstone*:
+-- the operator unchecked it, and the reconciler must not add it back.
+CREATE TABLE IF NOT EXISTS subscription_entries (
+    subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+    node_id         TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    relay_node_id   TEXT NOT NULL DEFAULT '',
+    proto           TEXT NOT NULL DEFAULT '',
+    src_port        INTEGER NOT NULL DEFAULT 0,
+    iface           TEXT NOT NULL DEFAULT '',
+    alias           TEXT NOT NULL DEFAULT '',
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (subscription_id, node_id, relay_node_id, proto, src_port, iface)
 );
 
 CREATE TABLE IF NOT EXISTS sub_access_logs (

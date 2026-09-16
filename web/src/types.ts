@@ -8,6 +8,8 @@ export interface Me {
 export interface NodeView {
   id: string;
   name: string;
+  /** §10.2 subscription display name; '' = use `name`. */
+  sub_name: string;
   status: string;
   online: boolean;
   note: string;
@@ -287,6 +289,71 @@ export interface SubscriptionRow {
    * template's format, otherwise the client's ?format= / User-Agent).
    */
   format: string;
+  /**
+   * §10.2: how many *enabled* entries this subscription emits. `node_ids` (the
+   * legacy direct projection) cannot express a node appearing twice — once
+   * directly and once through a relay.
+   */
+  entry_count: number;
+}
+
+/**
+ * One §10.2 subscription entry (GET /api/subscriptions/{id}/entries): a target
+ * node reached either directly or through a relay's nftables DNAT. The identity
+ * is (node_id, relay_node_id, proto, src_port, iface); relay_node_id === ''
+ * means the node's own inbound.
+ */
+export interface SubscriptionEntry {
+  node_id: string;
+  node_name: string;
+  /** '' = direct ingress, otherwise the relay node's id. */
+  relay_node_id: string;
+  relay_name: string;
+  /** 'tcp' for relayed entries (the derived rule's protocol). */
+  proto: string;
+  /** The relay's forwarding source port; 0 for direct entries. */
+  src_port: number;
+  iface: string;
+  /** The name the renderer derives when `alias` is empty. */
+  auto_name: string;
+  /** Operator override; '' = use auto_name. */
+  alias: string;
+  /** Bound to this subscription and enabled. */
+  selected: boolean;
+  /** false = listed right now, but it would render nothing. */
+  available: boolean;
+  /** Why available is false: not_ready | relay_not_ready | relay_gone. */
+  reason: string;
+  /** Non-fatal code, currently only `shadowed` (§21.9). */
+  warning: string;
+  /** True = derived from a live forward rule on the probe. */
+  discovered: boolean;
+  /** The forward rule's comment, so a rule can be told from its twin. */
+  source: string;
+}
+
+/** GET /api/subscriptions/{id}/entries. */
+export interface SubscriptionEntries {
+  entries: SubscriptionEntry[];
+  /** §10.2 auto-enrolment of freshly detected relay entries (global setting). */
+  relay_auto_include: boolean;
+  relay_name_format: string;
+}
+
+/**
+ * PUT /api/subscriptions/{id}/nodes body: exactly the seven fields the server
+ * reads. The picker sends every entry it displayed, unchecked ones included —
+ * an unchecked entry that was bound becomes a tombstone, which is the only
+ * thing that stops the reconciler from auto-adding it again.
+ */
+export interface SubscriptionEntryInput {
+  node_id: string;
+  relay_node_id: string;
+  proto: string;
+  src_port: number;
+  iface: string;
+  alias: string;
+  selected: boolean;
 }
 
 /** Plaintext token + URL (create / rotate / link reveal). */

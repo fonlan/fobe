@@ -149,6 +149,10 @@ type Node struct {
 	CPUCores      int
 	PrimaryIP     string
 	CountryCode   string
+	// SubName is the §10.2 display name inside subscriptions ('' = use Name).
+	// It exists because the panel name and the name a client shows are often
+	// not the same string, and the relay entry's auto name builds on it.
+	SubName string
 	// CountryManual is the §14 operator pin: when set, hub never re-derives
 	// country_code from the primary IP, same contract as node_ips.manual_primary.
 	CountryManual bool
@@ -167,7 +171,7 @@ type Node struct {
 // column in one place and forgetting the others used to be the easy mistake
 // (scanNode would then fail at runtime, not at compile time).
 const nodeColumns = `id, name, machine_id, status, note, created_at, last_seen, agent_version,
-		        os, arch, kernel, distro_id, distro_version, hostname, cpu_cores, primary_ip, country_code, country_manual, tz, caps,
+		        os, arch, kernel, distro_id, distro_version, hostname, cpu_cores, primary_ip, country_code, country_manual, sub_name, tz, caps,
 		        agent_target_version, agent_update_state, agent_update_attempts, agent_update_error,
 		        agent_update_planned_at, agent_update_done_at`
 
@@ -223,7 +227,7 @@ func (s *Store) scanNode(rs rowScanner) (*Node, error) {
 	var caps string
 	err := rs.Scan(&n.ID, &n.Name, &n.MachineID, &n.Status, &n.Note, &n.CreatedAt, &n.LastSeen,
 		&n.AgentVersion, &n.OS, &n.Arch, &n.Kernel, &n.DistroID, &n.DistroVersion, &n.Hostname, &n.CPUCores,
-		&n.PrimaryIP, &n.CountryCode, &n.CountryManual, &n.TZ, &caps,
+		&n.PrimaryIP, &n.CountryCode, &n.CountryManual, &n.SubName, &n.TZ, &caps,
 		&n.AgentTargetVersion, &n.AgentUpdateState, &n.AgentUpdateAttempts, &n.AgentUpdateError,
 		&n.AgentUpdatePlannedAt, &n.AgentUpdateDoneAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -350,6 +354,14 @@ func (s *Store) RenameNode(id, name string) error {
 
 func (s *Store) SetNodeNote(id, note string) error {
 	_, err := s.Exec(`UPDATE nodes SET note = ? WHERE id = ?`, note, id)
+	return err
+}
+
+// SetNodeSubName stores the §10.2 subscription display name (” = fall back to
+// the node name). Kept separate from RenameNode on purpose: renaming a probe
+// and renaming what clients see are two different decisions.
+func (s *Store) SetNodeSubName(id, name string) error {
+	_, err := s.Exec(`UPDATE nodes SET sub_name = ? WHERE id = ?`, name, id)
 	return err
 }
 

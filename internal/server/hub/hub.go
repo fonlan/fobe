@@ -37,6 +37,10 @@ type Hub struct {
 	// whatever they run.
 	agentUp AgentUpdater
 
+	// onForwards runs after a forwards snapshot lands (§10.2 relay entries).
+	// Optional; nil in tests that do not care about subscriptions.
+	onForwards func()
+
 	mu    sync.RWMutex
 	conns map[string]*Conn
 	// wake nudges PumpCommands (buffered 1: more requests while a drain is in
@@ -65,6 +69,13 @@ type AgentUpdater interface {
 
 // SetAgentUpdater wires (or replaces) the §5.5 self-update manager.
 func (h *Hub) SetAgentUpdater(u AgentUpdater) { h.agentUp = u }
+
+// SetForwardsObserver installs a callback run after a probe's nftables
+// forwards snapshot is replaced (design §10.2). The panel needs it because a
+// relay entry is *derived* from those rules: when they change, the entry set of
+// every subscription may change with them, and waiting for the next panel open
+// would leave the subscription serving a topology that no longer exists.
+func (h *Hub) SetForwardsObserver(fn func()) { h.onForwards = fn }
 
 // New builds a Hub. geo is optional (variadic) so existing callers keep
 // compiling: pass a geoip.Resolver to enable §14 country resolution; without

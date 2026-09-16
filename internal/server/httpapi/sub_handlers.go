@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -120,10 +121,21 @@ type subscriptionView struct {
 	LinkAvailable bool     `json:"link_available"`
 	// Format is '' (auto) or a pinned output format (§10 实现修订 2026-09-16).
 	Format string `json:"format"`
+	// EntryCount is the number of *enabled* §10.2 entries, which is what the
+	// subscription actually emits — NodeIDs (the legacy direct projection)
+	// cannot express a node appearing twice, once directly and once via a relay.
+	EntryCount int `json:"entry_count"`
 }
 
 func (s *Server) subscriptionView(sub *store.Subscription) subscriptionView {
 	nodeIDs, _ := s.Store.SubscriptionNodeIDs(sub.ID)
+	entries, _ := s.Store.SubscriptionEntries(sub.ID)
+	entryCount := 0
+	for _, e := range entries {
+		if e.Enabled {
+			entryCount++
+		}
+	}
 	v := subscriptionView{
 		ID: sub.ID, Name: sub.Name, Enabled: sub.Enabled, CreatedAt: sub.CreatedAt,
 		UAFilter: sub.UAFilter,
@@ -133,6 +145,7 @@ func (s *Server) subscriptionView(sub *store.Subscription) subscriptionView {
 		// is present; legacy rows (created before the column existed) can only
 		// get a working link by rotating it.
 		LinkAvailable: sub.TokenEnc != "",
+		EntryCount:    entryCount,
 	}
 	if sub.TemplateID.Valid && sub.TemplateID.String != "" {
 		v.TemplateID = &sub.TemplateID.String
@@ -353,8 +366,26 @@ func (s *Server) handleDeleteSubscription(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// subEntryInput is one picker row (§10.2). Selected=false only ever writes a
+// *tombstone* for an entry that is already bound: an untouched candidate listed
+// as "off" must stay absent from the table, otherwise the first save would
+// freeze auto-enrolment forever (store.SetSubscriptionEntries owns that rule).
+type subEntryInput struct {
+	NodeID      string `json:"node_id"`
+	RelayNodeID string `json:"relay_node_id"`
+	Proto       string `json:"proto"`
+	SrcPort     int    `json:"src_port"`
+	Iface       string `json:"iface"`
+	Alias       string `json:"alias"`
+	Selected    bool   `json:"selected"`
+}
+
 type setSubNodesReq struct {
-	NodeIDs []string `json:"node_ids"`
+	// NodeIDs is the pre-§10.2 shape: "these nodes, direct entry only". Still
+	// accepted so an old frontend (or a §17 snapshot) keeps working; it owns
+	// the direct half and leaves relay rows to the reconciler.
+	NodeIDs []string        `json:"node_ids"`
+	Entries []subEntryInput `json:"entries"`
 }
 
 func (s *Server) handleSetSubscriptionNodes(w http.ResponseWriter, r *http.Request) {
@@ -371,19 +402,124 @@ func (s *Server) handleSetSubscriptionNodes(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusBadRequest, "bad_request")
 		return
 	}
-	// foreign keys would reject unknown ids mid-transaction; validate first
-	for _, nid := range req.NodeIDs {
-		if _, err := s.Store.GetNode(nid); err != nil {
-			writeErr(w, http.StatusBadRequest, "bad_request")
+	if req.Entries == nil {
+		// foreign keys would reject unknown ids mid-transaction; validate first
+		for _, nid := range req.NodeIDs {
+			if _, err := s.Store.GetNode(nid); err != nil {
+				writeErr(w, http.StatusBadRequest, "bad_request")
+				return
+			}
+		}
+		if err := s.Store.SetSubscriptionNodes(id, req.NodeIDs); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
+		s.publishEvent("subscriptions_changed", id)
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
 	}
-	if err := s.Store.SetSubscriptionNodes(id, req.NodeIDs); err != nil {
+
+	entries, code := s.validateSubEntries(req.Entries)
+	if code != "" {
+		writeErr(w, http.StatusBadRequest, code)
+		return
+	}
+	if err := s.Store.SetSubscriptionEntries(id, entries); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	s.Store.InsertAudit(&store.AuditEntry{
+		Actor: "panel", Action: "subscription_entries_updated",
+		Command: fmt.Sprintf("%d entries", len(entries)), SourceIP: s.Trust.RealIP(r),
+	})
 	s.publishEvent("subscriptions_changed", id)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// validateSubEntries turns the picker payload into store rows. It returns a
+// snake_case error code (§16) rather than an error: the panel maps codes to
+// i18n text, so "why did my save not stick" stays answerable in both languages.
+func (s *Server) validateSubEntries(in []subEntryInput) ([]store.SubscriptionEntry, string) {
+	seenIdentity := map[string]bool{}
+	seenAlias := map[string]bool{}
+	out := make([]store.SubscriptionEntry, 0, len(in))
+	for _, e := range in {
+		if _, err := s.Store.GetNode(e.NodeID); err != nil {
+			return nil, "bad_request"
+		}
+		if e.RelayNodeID != "" {
+			if e.RelayNodeID == e.NodeID {
+				return nil, "bad_request" // a self-loop is not a relay (§10.2)
+			}
+			if _, err := s.Store.GetNode(e.RelayNodeID); err != nil {
+				return nil, "bad_request"
+			}
+		}
+		switch e.Proto {
+		case "", "tcp", "udp":
+		default:
+			return nil, "bad_request"
+		}
+		if e.SrcPort < 0 || e.SrcPort > 65535 {
+			return nil, "bad_request"
+		}
+		// Trimmed here, not only in the panel: a name of spaces would render as
+		// a blank node in every client, and "" already means "derive the name".
+		e.Alias = strings.TrimSpace(e.Alias)
+		if !store.ValidAlias(e.Alias) {
+			return nil, "bad_alias"
+		}
+		if e.Alias != "" {
+			// An explicit duplicate would silently become "-2"/"#2" at render
+			// time, which is exactly what a template author cannot predict.
+			if seenAlias[e.Alias] {
+				return nil, "alias_conflict"
+			}
+			seenAlias[e.Alias] = true
+		}
+		entry := store.SubscriptionEntry{
+			NodeID: e.NodeID, RelayNodeID: e.RelayNodeID,
+			Proto: e.Proto, SrcPort: e.SrcPort, Iface: e.Iface,
+			Alias: e.Alias, Enabled: e.Selected,
+		}
+		if seenIdentity[entryKey(entry)] {
+			continue
+		}
+		seenIdentity[entryKey(entry)] = true
+		out = append(out, entry)
+	}
+	return out, ""
+}
+
+// handleSubscriptionEntries serves the §10.2 picker: every candidate entry of
+// this subscription (direct entries for all nodes, plus the relay entries
+// derived from the fleet's forwards) unioned with what is bound. Reading is
+// also a reconcile trigger — it is the one moment the operator is definitely
+// looking, and auto-enrolment is meant to be visible, not to happen at a
+// random later time.
+func (s *Server) handleSubscriptionEntries(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sub, err := s.Store.GetSubscription(id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	} else if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	s.reconcileSubscriptionEntries(sub)
+	views, err := s.subscriptionEntryViews(sub)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries": views,
+		// The picker shows the auto-name it will get and lets the operator turn
+		// auto-enrolment off from here, so both travel with the data.
+		"relay_auto_include": s.relayAutoInclude(),
+		"relay_name_format":  s.relayNameFormat(),
+	})
 }
 
 // handleRotateSubscription mints a new token; the old URL stops resolving and
@@ -640,32 +776,58 @@ func (s *Server) resolveFormat(sub *store.Subscription, r *http.Request) string 
 // it — the subscription page's node picker must offer exactly this set,
 // otherwise checking a node could have no effect on the output at all.
 func subRenderable(node *store.Node, sb *store.NodeSingbox) bool {
-	return node.PrimaryIP != "" && sb.Port > 0 && sb.CertPEM != ""
+	// nil sb is the common "never installed sing-box" case, not an error to
+	// handle at every call site (§10.2 asks this question for every node).
+	return node != nil && sb != nil && node.PrimaryIP != "" && sb.Port > 0 && sb.CertPEM != ""
 }
 
-// subscriptionNodes assembles the renderable proxies for a subscription:
-// primary IP + sing-box inbound port + reported certificate. Probes without
-// a port/certificate yet are skipped — a pinning subscription must never
-// fall back to insecure=true (§9.3).
+// subscriptionNodes assembles the renderable proxies for a subscription
+// (design §10.2): every *enabled entry* becomes one anytls outbound. A direct
+// entry dials the node's own inbound; a relayed entry dials the relay's primary
+// IP and the src port of its DNAT rule — while the pinned certificate still
+// belongs to the *target*, because DNAT is layer 4 and TLS terminates on B
+// exactly as it would if the client dialled B directly.
 func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode {
-	ids, err := s.Store.SubscriptionNodeIDs(sub.ID)
+	entries, err := s.Store.SubscriptionEntries(sub.ID)
 	if err != nil {
 		return nil
 	}
 	password, _ := s.GetDecryptedSetting("anytls_password")
-	nodes := make([]singbox.ProxyNode, 0, len(ids))
-	for _, id := range ids {
-		node, err := s.Store.GetNode(id)
+	format := s.relayNameFormat()
+	nodes := make([]singbox.ProxyNode, 0, len(entries))
+	for _, e := range entries {
+		if !e.Enabled {
+			continue // tombstone (§10.2): unbound, kept so reconcile cannot re-add it
+		}
+		target, err := s.Store.GetNode(e.NodeID)
 		if err != nil {
 			continue
 		}
-		sb, err := s.Store.GetNodeSingbox(id)
-		if err != nil || !subRenderable(node, sb) {
+		sb, err := s.Store.GetNodeSingbox(e.NodeID)
+		if err != nil {
 			continue
 		}
+		var server, name string
+		var port int
+		if e.RelayNodeID == "" {
+			if !subRenderable(target, sb) {
+				continue
+			}
+			server, port, name = target.PrimaryIP, sb.Port, entryBaseName(target)
+		} else {
+			relay, err := s.Store.GetNode(e.RelayNodeID)
+			if err != nil || relay.PrimaryIP == "" || sb.Port <= 0 || sb.CertPEM == "" {
+				continue // the relay leg is gone (rule deleted / node removed)
+			}
+			server, port = relay.PrimaryIP, e.SrcPort
+			name = relayAutoName(format, target, relay, e)
+		}
+		if e.Alias != "" {
+			name = e.Alias
+		}
 		nodes = append(nodes, singbox.ProxyNode{
-			ID: node.ID, Name: node.Name, Server: node.PrimaryIP,
-			Port: sb.Port, Password: password, CertPEM: sb.CertPEM,
+			ID: e.NodeID, Name: name, Server: server, Port: port,
+			Password: password, CertPEM: sb.CertPEM,
 		})
 	}
 	return nodes

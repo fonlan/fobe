@@ -29,9 +29,13 @@ type nodeView struct {
 	CountryCode string `json:"country_code"`
 	// CountryManual marks a §14 operator-pinned flag (edit-page field); the
 	// UI uses it to say "手动指定" instead of implying geoip said so.
-	CountryManual bool   `json:"country_manual"`
-	AgentVersion  string `json:"agent_version"`
-	TZ            string `json:"tz"`
+	CountryManual bool `json:"country_manual"`
+	// SubName is the §10.2 name clients see ('' = fall back to Name). Separate
+	// from Name because "what the panel calls this probe" and "what the client
+	// list shows" are different decisions.
+	SubName      string `json:"sub_name"`
+	AgentVersion string `json:"agent_version"`
+	TZ           string `json:"tz"`
 	// Linux distribution the agent detected from /etc/os-release (§16 基本信息).
 	DistroID      string  `json:"distro_id"`
 	DistroVersion string  `json:"distro_version"`
@@ -103,6 +107,7 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 		Note: n.Note, OS: n.OS, Arch: n.Arch, Hostname: n.Hostname,
 		CPUCores: n.CPUCores, PrimaryIP: n.PrimaryIP, CountryCode: n.CountryCode,
 		CountryManual: n.CountryManual,
+		SubName:       n.SubName,
 		AgentVersion:  n.AgentVersion,
 		TZ:            n.TZ,
 		DistroID:      n.DistroID, DistroVersion: n.DistroVersion,
@@ -254,6 +259,9 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 type updateNodeReq struct {
 	Name *string `json:"name,omitempty"`
 	Note *string `json:"note,omitempty"`
+	// SubName is the §10.2 subscription display name ('' clears it back to the
+	// node name). Pointer = absent vs explicit, like every other field here.
+	SubName *string `json:"sub_name,omitempty"`
 	// CountryCode (§14 手动国旗): "XX" pins the flag; "" clears the pin and
 	// re-derives from the current primary IP. Pointer = absent vs explicit.
 	CountryCode      *string          `json:"country_code,omitempty"`
@@ -313,6 +321,17 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Note != nil {
 		_ = s.Store.SetNodeNote(id, *req.Note)
+	}
+	if req.SubName != nil {
+		sub := strings.TrimSpace(*req.SubName)
+		if !store.ValidAlias(sub) {
+			writeErr(w, http.StatusBadRequest, "bad_alias")
+			return
+		}
+		if err := s.Store.SetNodeSubName(id, sub); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
 	}
 	if req.CountryCode != nil {
 		cc := strings.ToUpper(strings.TrimSpace(*req.CountryCode))

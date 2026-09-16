@@ -35,6 +35,9 @@ import type {
   SingboxUpdateJob,
   SingboxVersion,
   SubAccessRow,
+  SubscriptionEntries,
+  SubscriptionEntry,
+  SubscriptionEntryInput,
   SubscriptionRow,
   SubscriptionToken,
   TemplateRow,
@@ -181,6 +184,8 @@ export function getNode(id: string): Promise<NodeDetailData> {
 
 export interface UpdateNodeBody {
   name?: string;
+  /** §10.2 subscription display name; '' clears it back to `name`. */
+  sub_name?: string;
   note?: string;
   /** §14 手动国旗: "XX" pins the flag, "" clears the pin (back to auto). */
   country_code?: string;
@@ -539,10 +544,66 @@ export function deleteSubscription(id: string): Promise<{ ok: boolean }> {
   return request(`/api/subscriptions/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
-export function setSubscriptionNodes(id: string, nodeIds: string[]): Promise<{ ok: boolean }> {
+// The server still accepts the legacy `{node_ids}` shape (an old bundle, or a
+// §17 snapshot), but the panel deliberately has no wrapper for it any more:
+// that path owns the direct entries only, so calling it from an entry-aware UI
+// would leave relay rows untouched behind the operator's back.
+
+/**
+ * The server tags every empty string `omitempty`, so an empty relay id, alias,
+ * reason, warning or source arrives as a *missing key*. Controlled inputs and
+ * t() interpolation need real values (`alias || auto_name` would otherwise
+ * render "undefined"). Fill them here rather than at every use site.
+ */
+function normSubscriptionEntry(e: Partial<SubscriptionEntry>): SubscriptionEntry {
+  return {
+    node_id: e.node_id ?? '',
+    node_name: e.node_name ?? '',
+    relay_node_id: e.relay_node_id ?? '',
+    relay_name: e.relay_name ?? '',
+    proto: e.proto ?? '',
+    src_port: e.src_port ?? 0,
+    iface: e.iface ?? '',
+    auto_name: e.auto_name ?? '',
+    alias: e.alias ?? '',
+    selected: e.selected === true,
+    available: e.available !== false,
+    reason: e.reason ?? '',
+    warning: e.warning ?? '',
+    discovered: e.discovered === true,
+    source: e.source ?? '',
+  };
+}
+
+/**
+ * §10.2 entry picker rows: every candidate entry of this subscription (direct
+ * plus relayed) unioned with what is already bound. The read is also the
+ * server's auto-enrolment trigger, so the picker re-reads it after every save
+ * instead of trusting its local copy.
+ */
+export async function listSubscriptionEntries(id: string): Promise<SubscriptionEntries> {
+  const r = await request<{
+    entries?: Array<Partial<SubscriptionEntry>>;
+    relay_auto_include?: boolean;
+    relay_name_format?: string;
+  }>(`/api/subscriptions/${encodeURIComponent(id)}/entries`);
+  return {
+    entries: (r.entries ?? []).map(normSubscriptionEntry),
+    // Unset means on (design §10.2), so only an explicit false turns it off.
+    relay_auto_include: r.relay_auto_include !== false,
+    relay_name_format: r.relay_name_format ?? '',
+  };
+}
+
+/**
+ * Bind entries (§10.2). `entries` must contain every row the picker displayed,
+ * including the unchecked ones: the server writes a tombstone for a disabled
+ * entry that was bound, and skips candidates that were never bound.
+ */
+export function setSubscriptionEntries(id: string, entries: SubscriptionEntryInput[]): Promise<{ ok: boolean }> {
   return request(`/api/subscriptions/${encodeURIComponent(id)}/nodes`, {
     method: 'PUT',
-    body: { node_ids: nodeIds },
+    body: { entries },
   });
 }
 

@@ -104,10 +104,21 @@ type Server struct {
 }
 
 func NewServer(st *store.Store, h *hub.Hub, trust *security.TrustChain, crypt *security.Cryptor, log *slog.Logger) *Server {
-	return &Server{
+	s := &Server{
 		Store: st, Hub: h, Trust: trust, Crypt: crypt, Log: log,
 		evSubs: map[chan []byte]struct{}{},
 	}
+	// §10.2 relay entries are derived from the probes' nftables rules, so a
+	// forwards snapshot is the moment they can change — wire the reconciler
+	// here, where both halves already exist.
+	if h != nil {
+		h.SetForwardsObserver(func() {
+			if n := s.ReconcileSubscriptionEntries(); n > 0 {
+				s.Log.Info("auto-enrolled relay subscription entries", "count", n)
+			}
+		})
+	}
+	return s
 }
 
 // Handler builds the full route table.
@@ -211,6 +222,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/subscriptions/{id}", s.requireSession(s.handleUpdateSubscription))
 	mux.HandleFunc("DELETE /api/subscriptions/{id}", s.requireSession(s.handleDeleteSubscription))
 	mux.HandleFunc("PUT /api/subscriptions/{id}/nodes", s.requireSession(s.handleSetSubscriptionNodes))
+	// §10.2 entry picker: candidates (including relay entries derived from the
+	// fleet's nftables forwards) unioned with what is bound.
+	mux.HandleFunc("GET /api/subscriptions/{id}/entries", s.requireSession(s.handleSubscriptionEntries))
 	mux.HandleFunc("POST /api/subscriptions/{id}/rotate", s.requireSession(s.handleRotateSubscription))
 	mux.HandleFunc("GET /api/subscriptions/{id}/access", s.requireSession(s.handleSubscriptionAccess))
 	// §10 实现修订 2026-09-16: copy an existing subscription's URL at any time.

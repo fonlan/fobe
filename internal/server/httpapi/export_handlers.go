@@ -94,6 +94,22 @@ type exportSub struct {
 	Template       string   `json:"template,omitempty"`
 	Format         string   `json:"format,omitempty"` // '' = auto (§10 修订)
 	NodeMachineIDs []string `json:"node_machine_ids,omitempty"`
+	// Entries is the §10.2 binding (target + ingress + alias). NodeMachineIDs
+	// stays for snapshots and callers that only ever knew about nodes; when
+	// both are present, entries win.
+	Entries []exportEntry `json:"entries,omitempty"`
+}
+
+// exportEntry binds both ends by machine_id (node ids are random) and carries
+// the alias, because a lost alias silently renames nodes for every client.
+type exportEntry struct {
+	Node    string `json:"node"`
+	Relay   string `json:"relay,omitempty"`
+	Proto   string `json:"proto,omitempty"`
+	SrcPort int    `json:"src_port,omitempty"`
+	Iface   string `json:"iface,omitempty"`
+	Alias   string `json:"alias,omitempty"`
+	Enabled bool   `json:"enabled"`
 }
 
 type exportTemplate struct {
@@ -190,6 +206,29 @@ func (s *Server) buildExport() (*exportFile, error) {
 				if mid, ok := nodeMachine[id]; ok {
 					es.NodeMachineIDs = append(es.NodeMachineIDs, mid)
 				}
+			}
+		}
+		// §10.2: entries are the real binding; the direct projection above is
+		// kept in the file so an older panel importing this snapshot still
+		// binds the nodes it can represent.
+		if entries, err := s.Store.SubscriptionEntries(sub.ID); err == nil {
+			for _, e := range entries {
+				mid, ok := nodeMachine[e.NodeID]
+				if !ok {
+					continue
+				}
+				ex := exportEntry{
+					Node: mid, Proto: e.Proto, SrcPort: e.SrcPort, Iface: e.Iface,
+					Alias: e.Alias, Enabled: e.Enabled,
+				}
+				if e.RelayNodeID != "" {
+					rmid, ok := nodeMachine[e.RelayNodeID]
+					if !ok {
+						continue // the relay is gone: the entry is not portable
+					}
+					ex.Relay = rmid
+				}
+				es.Entries = append(es.Entries, ex)
 			}
 		}
 		ef.Subscriptions = append(ef.Subscriptions, es)
@@ -498,6 +537,13 @@ func (s *Server) importSubscriptions(subs []exportSub, nodeByMachine map[string]
 					return err
 				}
 			}
+			// §10.2: entries win over the legacy direct projection, which is
+			// why they are applied second (a newer snapshot carries both).
+			if es.Entries != nil {
+				if err := s.Store.RestoreSubscriptionEntries(sub.ID, importEntries(es.Entries, nodeByMachine)); err != nil {
+					return err
+				}
+			}
 			if tplID != nil {
 				if err := s.Store.SetSubscriptionMeta(sub.ID, sub.Name, tplID); err != nil {
 					return err
@@ -536,6 +582,11 @@ func (s *Server) importSubscriptions(subs []exportSub, nodeByMachine map[string]
 				return err
 			}
 		}
+		if es.Entries != nil {
+			if err := s.Store.RestoreSubscriptionEntries(id, importEntries(es.Entries, nodeByMachine)); err != nil {
+				return err
+			}
+		}
 		if tplID != nil {
 			if err := s.Store.SetSubscriptionMeta(id, name, tplID); err != nil {
 				return err
@@ -563,6 +614,33 @@ func resolveImportedNodes(machineIDs []string, nodeByMachine map[string]string) 
 		if id, ok := nodeByMachine[mid]; ok {
 			out = append(out, id)
 		}
+	}
+	return out
+}
+
+// importEntries maps a snapshot's §10.2 rows back onto this panel's node ids.
+// An entry whose target node is unknown cannot be rendered, and one whose relay
+// is unknown would silently degrade into "directly dial B" — neither is what
+// the file said, so both are dropped instead of guessed.
+func importEntries(entries []exportEntry, nodeByMachine map[string]string) []store.SubscriptionEntry {
+	out := make([]store.SubscriptionEntry, 0, len(entries))
+	for _, e := range entries {
+		nodeID, ok := nodeByMachine[e.Node]
+		if !ok {
+			continue
+		}
+		entry := store.SubscriptionEntry{
+			NodeID: nodeID, Proto: e.Proto, SrcPort: e.SrcPort, Iface: e.Iface,
+			Alias: e.Alias, Enabled: e.Enabled,
+		}
+		if e.Relay != "" {
+			relayID, ok := nodeByMachine[e.Relay]
+			if !ok || relayID == nodeID {
+				continue
+			}
+			entry.RelayNodeID = relayID
+		}
+		out = append(out, entry)
 	}
 	return out
 }

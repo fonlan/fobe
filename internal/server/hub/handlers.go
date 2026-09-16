@@ -272,6 +272,13 @@ func (h *Hub) RecordForwardState(nodeID string, f *protocol.ForwardsState) {
 	}
 	if err := h.store.ReplaceNodeForwards(nodeID, status, rows); err != nil {
 		h.log.Warn("replace node forwards", "node", nodeID, "err", err)
+		return
+	}
+	// §10.2: the ruleset changed, so the set of relay entries derived from it
+	// may have too. Run the reconciler out of band — the agent's frame handler
+	// must not block on subscription bookkeeping.
+	if h.onForwards != nil {
+		go h.onForwards()
 	}
 }
 

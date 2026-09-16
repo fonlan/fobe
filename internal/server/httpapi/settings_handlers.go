@@ -73,6 +73,9 @@ var allowedKeys = func() map[string]bool {
 		"geoip.auto_update", "geoip.max_age_days", "geoip.url",
 		// §5.5 agent self-update switch (default on).
 		agentupdate.SettingAutoUpdate,
+		// §10.2 relay entries: how they are named, and whether a detected relay
+		// is enrolled automatically.
+		SettingRelayNameFormat, SettingRelayAutoInclude,
 	} {
 		m[k] = true
 	}
@@ -168,6 +171,17 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if key == "latency.interval_seconds" && !validLatencyInterval(value) {
 			writeErr(w, http.StatusBadRequest, "bad_latency_interval")
+			return
+		}
+		// §10.2: the auto-name template travels verbatim into every client
+		// config the subscription hands out, so a typo'd placeholder is refused
+		// here rather than shipped; the switch follows the same rule as §5.5.
+		if key == SettingRelayNameFormat && !validRelayNameFormat(value) {
+			writeErr(w, http.StatusBadRequest, "bad_relay_name_format")
+			return
+		}
+		if key == SettingRelayAutoInclude && !validBoolSetting(value) {
+			writeErr(w, http.StatusBadRequest, "bad_switch")
 			return
 		}
 		// §14.1 policy values; validated by the same helper the §17 import uses.

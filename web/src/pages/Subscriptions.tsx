@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
 import { copyText, fmtTime } from '../format';
-import type { NodeView, SubAccessRow, SubscriptionRow, SubscriptionToken, TemplateRow } from '../types';
+import type { SubAccessRow, SubscriptionEntry, SubscriptionEntryInput, SubscriptionRow, SubscriptionToken, TemplateRow } from '../types';
 import Modal from '../components/Modal';
 import { useToast } from '../components/Toast';
 
@@ -17,6 +17,9 @@ const NODES_PH = '{{nodes}}';
  */
 const LEGACY_RULES_PH = '{{rules}}';
 
+/** §10.2 default relay auto-name; mirrors DefaultRelayNameFormat server-side. */
+const DEFAULT_RELAY_FORMAT = '{name} · {relay}:{port}';
+
 export default function Subscriptions() {
   const { t } = useI18n();
   // Page-level feedback for the copy button: the toast is fixed-positioned, so
@@ -26,6 +29,12 @@ export default function Subscriptions() {
   // and the templates card edits them, so one fetch feeds both.
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [tplErr, setTplErr] = useState<string | null>(null);
+  /**
+   * §10.2: the global relay name format decides the `auto_name` an open picker
+   * displays, so saving that card bumps this counter and makes the picker
+   * re-read its rows instead of showing a stale name.
+   */
+  const [relayVersion, setRelayVersion] = useState(0);
 
   const loadTemplates = useCallback(async () => {
     try {
@@ -46,7 +55,8 @@ export default function Subscriptions() {
       <div className="page-head">
         <h2>{t('subs_title')}</h2>
       </div>
-      <SubscriptionsCard templates={templates} onToast={showToast} />
+      <RelayEntryCard onSaved={() => setRelayVersion((v) => v + 1)} />
+      <SubscriptionsCard templates={templates} onToast={showToast} relayVersion={relayVersion} />
       <TemplatesCard templates={templates} loadError={tplErr} onReload={loadTemplates} />
       {toastNode}
     </div>
@@ -58,13 +68,14 @@ export default function Subscriptions() {
 function SubscriptionsCard({
   templates,
   onToast,
+  relayVersion,
 }: {
   templates: TemplateRow[];
   onToast: (message: string, tone?: 'ok' | 'error') => void;
+  relayVersion: number;
 }) {
   const { t } = useI18n();
   const [subs, setSubs] = useState<SubscriptionRow[] | null>(null);
-  const [nodes, setNodes] = useState<NodeView[]>([]);
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -83,9 +94,8 @@ function SubscriptionsCard({
 
   const load = useCallback(async () => {
     try {
-      const [s, n] = await Promise.all([api.listSubscriptions(), api.listNodes().catch(() => ({ nodes: [] }))]);
+      const s = await api.listSubscriptions();
       setSubs(s.subscriptions ?? []);
-      setNodes(n.nodes ?? []);
       setErr(null);
     } catch (e) {
       setErr(apiErrorMessage(e, t));
@@ -131,15 +141,6 @@ function SubscriptionsCard({
   const toggle = async (sub: SubscriptionRow) => {
     try {
       await api.updateSubscription(sub.id, { enabled: !sub.enabled });
-      await load();
-    } catch (ex) {
-      setErr(apiErrorMessage(ex, t));
-    }
-  };
-
-  const saveNodes = async (sub: SubscriptionRow, nodeIds: string[]) => {
-    try {
-      await api.setSubscriptionNodes(sub.id, nodeIds);
       await load();
     } catch (ex) {
       setErr(apiErrorMessage(ex, t));
@@ -218,7 +219,7 @@ function SubscriptionsCard({
   };
 
   return (
-    <section className="card">
+    <section className="card" style={{ marginTop: 16 }}>
       <h3>{t('subs_section')}</h3>
       <p className="hint">{t('subs_desc')}</p>
 
@@ -260,7 +261,7 @@ function SubscriptionsCard({
               <tr>
                 <th>{t('name')}</th>
                 <th>{t('sub_status_col')}</th>
-                <th>{t('sub_nodes_col')}</th>
+                <th>{t('sub_entries_col')}</th>
                 <th>{t('session_created')}</th>
                 <th />
               </tr>
@@ -274,7 +275,7 @@ function SubscriptionsCard({
                       {sub.enabled ? t('sub_enabled') : t('sub_disabled')}
                     </span>
                   </td>
-                  <td className="mono">{sub.node_ids.length}</td>
+                  <td className="mono">{sub.entry_count}</td>
                   <td className="mono nowrap">{fmtTime(sub.created_at)}</td>
                   <td className="nowrap">
                     <button
@@ -333,7 +334,12 @@ function SubscriptionsCard({
 
       {subs?.map((sub) =>
         expanded === sub.id ? (
-          <NodePicker key={'n' + sub.id} sub={sub} nodes={nodes} onSave={(ids) => void saveNodes(sub, ids)} />
+          <EntryPicker
+            key={'n' + sub.id}
+            sub={sub}
+            reloadKey={relayVersion}
+            onSaved={() => void load()}
+          />
         ) : null,
       )}
       {subs?.map((sub) =>
@@ -382,61 +388,315 @@ function SubscriptionsCard({
   );
 }
 
-// §10 node picker. Only nodes the server marks `singbox_ready` are offered —
-// that flag is the renderer's own predicate (primary IP + inbound port +
-// reported certificate), so checking a node always changes the output. Nodes
-// that are bound but currently unrenderable stay listed (muted, still
-// checkable) instead of silently disappearing: they are usually mid-reinstall,
-// and dropping them from the binding behind the operator's back would be worse
-// than showing a node that renders nothing right now.
-function NodePicker({
+/**
+ * §10.2: the entry identity as one string — mirrors the server's own key so an
+ * edit can be applied to exactly one row without trusting array positions.
+ */
+function entryKey(e: SubscriptionEntry): string {
+  return [e.node_id, e.relay_node_id, e.proto, e.src_port, e.iface].join('|');
+}
+
+/** §10.2 unavailable codes; anything unknown falls back to a generic line. */
+const ENTRY_REASON_KEYS: Record<string, string> = {
+  not_ready: 'sub_entry_reason_not_ready',
+  relay_not_ready: 'sub_entry_reason_relay_not_ready',
+  relay_gone: 'sub_entry_reason_relay_gone',
+};
+
+/** Panel-written booleans use the on/off spelling; unset (empty) means on. */
+function relayAutoOff(v: string): boolean {
+  switch (v.trim().toLowerCase()) {
+    case '0':
+    case 'false':
+    case 'off':
+    case 'no':
+      return true;
+    default:
+      return false;
+  }
+}
+
+// §10.2 entry picker. A subscription binds *entries*, not nodes: the same node
+// can be listed twice — once as its own inbound and once through a relay's
+// nftables DNAT — so every row is a checkbox plus its own naming input, grouped
+// per node with the direct ingress first (the order the renderer emits).
+//
+// Entries that cannot render right now (mid-reinstall, relay rule just removed)
+// stay listed, muted and still checkable: the binding is real and silently
+// dropping it would change what clients fetch with no way to unbind it. Every
+// row shown is sent back on save, unchecked ones included — the server turns an
+// unchecked bound row into a tombstone, which is what keeps the auto-enrolment
+// reconciler from re-adding it.
+function EntryPicker({
   sub,
-  nodes,
-  onSave,
+  reloadKey,
+  onSaved,
 }: {
   sub: SubscriptionRow;
-  nodes: NodeView[];
-  onSave: (ids: string[]) => void;
+  reloadKey: number;
+  onSaved: () => void;
 }) {
   const { t } = useI18n();
-  const [ids, setIds] = useState<string[]>(sub.node_ids);
+  const [entries, setEntries] = useState<SubscriptionEntry[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
-  const toggleNode = (id: string) => {
-    setIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const reload = useCallback(async () => {
+    try {
+      const r = await api.listSubscriptionEntries(sub.id);
+      setEntries(r.entries);
+      setErr(null);
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+      setEntries(null);
+    }
+  }, [sub.id, t]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload, reloadKey]);
+
+  const patch = (key: string, fn: (e: SubscriptionEntry) => SubscriptionEntry) => {
+    setSaved(false);
+    setEntries((prev) => (prev === null ? prev : prev.map((e) => (entryKey(e) === key ? fn(e) : e))));
   };
 
-  const ready = nodes.filter((n) => n.singbox_ready);
-  const unavailableBound = nodes.filter((n) => !n.singbox_ready && sub.node_ids.includes(n.id));
+  const save = async () => {
+    if (entries === null || busy) return;
+    setBusy(true);
+    setErr(null);
+    setSaved(false);
+    try {
+      await api.setSubscriptionEntries(
+        sub.id,
+        entries.map(
+          (e): SubscriptionEntryInput => ({
+            node_id: e.node_id,
+            relay_node_id: e.relay_node_id,
+            proto: e.proto,
+            src_port: e.src_port,
+            iface: e.iface,
+            // Trimmed here because the server bounds aliases but does not trim
+            // them: a name of only spaces would render blank in every client.
+            alias: e.alias.trim(),
+            selected: e.selected,
+          }),
+        ),
+      );
+      // Re-read instead of trusting the local copy: the server may have written
+      // tombstones, and reading the list is also its auto-enrolment trigger.
+      await reload();
+      onSaved();
+      setSaved(true);
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  };
 
-  const chip = (n: NodeView, muted = false) => (
-    <label key={n.id} className={'check-chip' + (muted ? ' chip-muted' : '')}>
-      <input type="checkbox" checked={ids.includes(n.id)} onChange={() => toggleNode(n.id)} />
-      {n.name || n.id}
-      {n.online ? '' : ` (${t('offline')})`}
-    </label>
-  );
+  // Group by target node, direct ingress first, then relays.
+  const groups = useMemo(() => {
+    const order: string[] = [];
+    const byNode = new Map<string, SubscriptionEntry[]>();
+    for (const e of entries ?? []) {
+      const list = byNode.get(e.node_id);
+      if (list) {
+        list.push(e);
+      } else {
+        byNode.set(e.node_id, [e]);
+        order.push(e.node_id);
+      }
+    }
+    return order.map((nodeID) => {
+      const list = byNode.get(nodeID) ?? [];
+      return {
+        nodeID,
+        nodeName: list[0]?.node_name || nodeID,
+        direct: list.filter((e) => e.relay_node_id === ''),
+        relayed: list.filter((e) => e.relay_node_id !== ''),
+      };
+    });
+  }, [entries]);
+
+  const anyUnavailable = (entries ?? []).some((e) => !e.available);
+
+  const row = (e: SubscriptionEntry) => {
+    const key = entryKey(e);
+    const muted = !e.available;
+    const effective = e.alias.trim() || e.auto_name;
+    const label =
+      e.relay_node_id === ''
+        ? e.node_name || e.node_id
+        : t('sub_entry_via', { relay: e.relay_name || e.relay_node_id, port: e.src_port });
+    return (
+      <div key={key} className={'sub-entry' + (muted ? ' sub-entry-unavailable' : '')}>
+        <div className="row-wrap">
+          <label
+            className={'check-chip' + (muted ? ' chip-muted' : '')}
+            title={e.source || undefined}
+          >
+            <input
+              type="checkbox"
+              checked={e.selected}
+              onChange={() => patch(key, (x) => ({ ...x, selected: !x.selected }))}
+            />
+            {label}
+          </label>
+          {e.relay_node_id === '' ? (
+            <span className="chip">{t('sub_entry_direct')}</span>
+          ) : null}
+          {e.discovered ? <span className="chip">{t('sub_entry_discovered')}</span> : null}
+          {e.source !== '' ? <span className="hint">{t('sub_entry_source', { comment: e.source })}</span> : null}
+        </div>
+        <div className="cmd-input-row sub-entry-name">
+          <input
+            className="mono"
+            value={e.alias}
+            maxLength={64}
+            placeholder={e.auto_name}
+            title={t('sub_entry_alias_ph')}
+            aria-label={t('sub_entry_alias')}
+            onChange={(ev) => patch(key, (x) => ({ ...x, alias: ev.target.value }))}
+          />
+          <span className="hint nowrap">{t('sub_entry_effective', { name: effective })}</span>
+        </div>
+        {!e.available && (
+          <p className="hint sub-entry-reason">{t(ENTRY_REASON_KEYS[e.reason] ?? 'sub_entry_reason_unknown')}</p>
+        )}
+        {e.warning === 'shadowed' && <p className="sub-entry-warn">{t('sub_entry_warning_shadowed')}</p>}
+      </div>
+    );
+  };
 
   return (
     <div className="card" style={{ marginTop: 8 }}>
       <h4>{t('sub_nodes_of', { name: sub.name })}</h4>
-      <p className="hint">{t('sub_nodes_hint')}</p>
-      {ready.length === 0 ? (
-        <div className="hint">{nodes.length === 0 ? t('no_nodes') : t('sub_nodes_none_ready')}</div>
-      ) : (
-        <div className="row-wrap">{ready.map((n) => chip(n))}</div>
-      )}
-      {unavailableBound.length > 0 && (
-        <>
-          <p className="hint" style={{ marginTop: 10 }}>{t('sub_nodes_unavailable')}</p>
-          <div className="row-wrap">{unavailableBound.map((n) => chip(n, true))}</div>
-        </>
-      )}
+      <p className="hint">{t('sub_entries_hint')}</p>
+      {err && <div className="form-error">{err}</div>}
+      {entries === null && !err && <div className="hint">{t('loading')}</div>}
+      {entries !== null && entries.length === 0 && <div className="hint">{t('sub_entries_empty')}</div>}
+      {anyUnavailable && <p className="hint">{t('sub_entries_unavailable_hint')}</p>}
+      {groups.map((g) => (
+        <div className="sub-entry-group" key={g.nodeID}>
+          <h5 className="sub-entry-node">{g.nodeName}</h5>
+          {g.direct.map(row)}
+          {g.relayed.map(row)}
+        </div>
+      ))}
       <div className="row-end">
-        <button type="button" className="btn primary small" onClick={() => onSave(ids)}>
-          {t('save')}
+        {saved && <span className="form-ok">{t('server_edit_saved')}</span>}
+        <button
+          type="button"
+          className="btn primary small"
+          disabled={busy || entries === null}
+          onClick={() => void save()}
+        >
+          {busy ? t('loading') : t('save')}
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * §10.2 global relay settings. They are panel-wide (the auto-name is derived on
+ * every read, for every subscription), which is why the card sits above the
+ * list instead of inside one subscription's row.
+ */
+function RelayEntryCard({ onSaved }: { onSaved: () => void }) {
+  const { t } = useI18n();
+  const [auto, setAuto] = useState(true);
+  const [format, setFormat] = useState('');
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .getSettings()
+      .then((r) => {
+        if (!alive) return;
+        const map: Record<string, string> = {};
+        for (const s of r.settings ?? []) map[s.key] = s.set ? s.value : '';
+        setAuto(!relayAutoOff(map['sub.relay_auto_include'] ?? ''));
+        setFormat(map['sub.relay_name_format'] ?? '');
+        setLoaded(true);
+      })
+      .catch((e) => {
+        if (alive) setErr(apiErrorMessage(e, t));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [t]);
+
+  const save = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    setSaved(false);
+    const trimmed = format.trim();
+    try {
+      // Both keys travel together, and an empty format is meaningful (reset to
+      // the built-in default) — unlike Settings' "skip empty fields" rule.
+      await api.putSettings({
+        'sub.relay_auto_include': auto ? 'on' : 'off',
+        'sub.relay_name_format': trimmed,
+      });
+      setFormat(trimmed);
+      setSaved(true);
+      onSaved();
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="card">
+      <h3>{t('sub_relay_card')}</h3>
+      <p className="hint">{t('sub_relay_desc')}</p>
+      {err && <div className="form-error">{err}</div>}
+      <label className="check-chip" style={{ marginTop: 8 }}>
+        <input
+          type="checkbox"
+          checked={auto}
+          disabled={busy || !loaded}
+          onChange={(e) => {
+            setAuto(e.target.checked);
+            setSaved(false);
+          }}
+        />
+        {t('sub_relay_auto')}
+      </label>
+      <p className="hint">{t('sub_relay_auto_hint')}</p>
+      <label className="field" style={{ marginTop: 12, marginBottom: 0 }}>
+        <span>{t('sub_relay_format')}</span>
+        <input
+          className="mono"
+          value={format}
+          placeholder={DEFAULT_RELAY_FORMAT}
+          disabled={busy || !loaded}
+          onChange={(e) => {
+            setFormat(e.target.value);
+            setSaved(false);
+          }}
+        />
+        <small className="hint">{t('sub_relay_format_hint')}</small>
+        <small className="hint">{t('sub_relay_format_default', { format: DEFAULT_RELAY_FORMAT })}</small>
+      </label>
+      <div className="row-end">
+        {saved && <span className="form-ok">{t('sub_relay_saved')}</span>}
+        <button type="button" className="btn primary small" disabled={busy || !loaded} onClick={() => void save()}>
+          {busy ? t('loading') : t('save')}
+        </button>
+      </div>
+    </section>
   );
 }
 

@@ -478,23 +478,12 @@ func (s *Store) GetSubscriptionByTokenHash(tokenHash string) (id, name string, e
 	return
 }
 
+// SetSubscriptionNodes is the pre-§10.2 binding API (node ids only). It now
+// writes through subscription_entries — the single source of truth — and only
+// owns the direct half, so relay entries bound by the reconciler survive a
+// legacy save (design §10.2).
 func (s *Store) SetSubscriptionNodes(subID string, nodeIDs []string) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM subscription_nodes WHERE subscription_id = ?`, subID); err != nil {
-		return err
-	}
-	for _, id := range nodeIDs {
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO subscription_nodes (subscription_id, node_id) VALUES (?, ?)`, subID, id,
-		); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return s.SetSubscriptionDirectNodes(subID, nodeIDs)
 }
 
 func (s *Store) SubscriptionNodeIDs(subID string) ([]string, error) {

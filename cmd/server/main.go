@@ -302,6 +302,14 @@ func runServer() {
 		log.Info("inlined legacy {{rules}} snippets into templates", "templates", n)
 	}
 
+	// §10.2: relay entries are derived from the probes' nftables forwards, so
+	// the rows an upgrade inherits must be reconciled before the first fetch —
+	// a topology that already existed would otherwise only appear the next time
+	// a probe re-reports its rules. Idempotent; tombstones are never revived.
+	if n := api.ReconcileSubscriptionEntries(); n > 0 {
+		log.Info("auto-enrolled relay subscription entries", "count", n)
+	}
+
 	addr := env("FOBE_LISTEN", "0.0.0.0:8080")
 	srv := &http.Server{
 		Addr:              addr,

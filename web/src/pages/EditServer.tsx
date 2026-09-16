@@ -276,6 +276,8 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
   const billing = data.billing;
 
   const [name, setName] = useState(node.name);
+  // §10.2 name the clients see in subscriptions; '' = fall back to `name`.
+  const [subName, setSubName] = useState(node.sub_name ?? '');
   const [note, setNote] = useState(node.note);
   const [country, setCountry] = useState(node.country_code);
   const [iface, setIface] = useState(net?.iface ?? '');
@@ -305,6 +307,7 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
     try {
       await api.updateNode(node.id, {
         name,
+        sub_name: subName.trim(),
         note,
         country_code: country.trim().toUpperCase(),
         network: {
@@ -338,6 +341,11 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
         <label className="field">
           <span>{t('edit_name')}</span>
           <input value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>{t('edit_sub_name')}</span>
+          <input value={subName} onChange={(e) => setSubName(e.target.value)} />
+          <small className="hint">{t('edit_sub_name_hint')}</small>
         </label>
         <label className="field">
           <span>{t('country_region')}</span>
