@@ -506,7 +506,14 @@ func (s *Server) importSubscriptions(subs []exportSub, nodeByMachine map[string]
 		if err != nil {
 			return err
 		}
-		if err := s.Store.CreateSubscription(id, name, tokenHash(token)); err != nil {
+		// The import mints a fresh token (the snapshot carries none, §17) and
+		// stores it encrypted too, so the URL of an imported subscription is
+		// copyable from the panel like any other (§10 实现修订 2026-09-16).
+		enc, err := s.Crypt.Encrypt(token)
+		if err != nil {
+			return err
+		}
+		if err := s.Store.CreateSubscription(id, name, tokenHash(token), enc); err != nil {
 			return err
 		}
 		if len(nodeIDs) > 0 {
@@ -556,6 +563,14 @@ func (s *Server) importSettings(settings map[string]string, stats *importStats) 
 		// A hand-edited snapshot must not install a §14.1 policy the API would
 		// have rejected (a nonsense threshold or a non-URL source).
 		if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {
+			continue
+		}
+		// Same reasoning for the §10 rules snippets: a fragment that cannot be
+		// spliced into a template would break every subscription fetch.
+		if key == SettingRulesSingbox && !validateRulesFragment(FormatSingbox, value) {
+			continue
+		}
+		if key == SettingRulesClash && !validateRulesFragment(FormatClash, value) {
 			continue
 		}
 		if err := s.Store.SetSetting(key, value, false); err != nil {

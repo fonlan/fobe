@@ -514,7 +514,7 @@ export function listSubscriptions(): Promise<{ subscriptions: SubscriptionRow[] 
   return request('/api/subscriptions');
 }
 
-/** The plaintext token is in the response body exactly once. */
+/** Create a subscription. The URL stays retrievable later via subscriptionLink. */
 export function createSubscription(name: string): Promise<SubscriptionToken> {
   return request('/api/subscriptions', { method: 'POST', body: { name } });
 }
@@ -537,9 +537,18 @@ export function setSubscriptionNodes(id: string, nodeIds: string[]): Promise<{ o
   });
 }
 
-/** Rotate the token: the old URL stops resolving, the new one shows once. */
+/** Rotate the token: the old URL stops resolving, the new one is shown. */
 export function rotateSubscription(id: string): Promise<SubscriptionToken> {
   return request(`/api/subscriptions/${encodeURIComponent(id)}/rotate`, { method: 'POST' });
+}
+
+/**
+ * Re-reveal an existing subscription's URL (§10 实现修订 2026-09-16). Fails with
+ * `link_unavailable` (409) when the plaintext is no longer recoverable — the
+ * panel then points at rotation instead.
+ */
+export function subscriptionLink(id: string): Promise<SubscriptionToken> {
+  return request(`/api/subscriptions/${encodeURIComponent(id)}/link`);
 }
 
 export function subscriptionAccess(id: string): Promise<{ logs: SubAccessRow[] }> {

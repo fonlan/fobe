@@ -457,10 +457,14 @@ func (s *Store) SetNodeSingboxPasswordOverride(nodeID, password string) error {
 
 // --- subscriptions & templates (design §10; rendering lands in M3) ---
 
-func (s *Store) CreateSubscription(id, name, tokenHash string) error {
+// CreateSubscription stores a new subscription. tokenEnc is the Cryptor
+// ciphertext of the plaintext token (design §10 实现修订 2026-09-16: the panel
+// re-shows the URL on demand instead of only once); the hash remains the only
+// thing /sub/<token> looks up.
+func (s *Store) CreateSubscription(id, name, tokenHash, tokenEnc string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO subscriptions (id, name, token_hash, enabled, created_at) VALUES (?, ?, ?, 1, ?)`,
-		id, name, tokenHash, now(),
+		`INSERT INTO subscriptions (id, name, token_hash, token_enc, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)`,
+		id, name, tokenHash, tokenEnc, now(),
 	)
 	return err
 }
@@ -517,23 +521,26 @@ func (s *Store) InsertSubAccess(subID, ip, ua string) {
 }
 
 // Subscription is one subscription row (design §10). The token hash is never
-// exposed over HTTP; the plaintext is shown exactly once at creation/rotation.
+// exposed over HTTP; the plaintext itself lives on encrypted in TokenEnc so
+// the panel can show the URL again at any time (§10 实现修订 2026-09-16) —
+// it is empty for rows created before that revision.
 type Subscription struct {
 	ID         string
 	Name       string
 	TokenHash  string
+	TokenEnc   string // AES-GCM ciphertext; '' = unrecoverable (legacy row)
 	Enabled    bool
 	UAFilter   string         // comma-separated UA substrings; empty = allow all (§10)
 	TemplateID sql.NullString // nullable: empty → built-in default template
 	CreatedAt  int64
 }
 
-const subscriptionCols = `id, name, token_hash, enabled, ua_filter, template_id, created_at`
+const subscriptionCols = `id, name, token_hash, token_enc, enabled, ua_filter, template_id, created_at`
 
 func scanSubscription(rs rowScanner) (*Subscription, error) {
 	sub := &Subscription{}
 	var enabled int
-	if err := rs.Scan(&sub.ID, &sub.Name, &sub.TokenHash, &enabled, &sub.UAFilter, &sub.TemplateID, &sub.CreatedAt); err != nil {
+	if err := rs.Scan(&sub.ID, &sub.Name, &sub.TokenHash, &sub.TokenEnc, &enabled, &sub.UAFilter, &sub.TemplateID, &sub.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -572,10 +579,11 @@ func (s *Store) GetSubscriptionByToken(tokenHash string) (*Subscription, error) 
 		`SELECT `+subscriptionCols+` FROM subscriptions WHERE token_hash = ?`, tokenHash))
 }
 
-// RotateSubscriptionToken replaces the token hash (design §10 一键轮换):
-// old URLs stop resolving, the new plaintext is shown once.
-func (s *Store) RotateSubscriptionToken(id, tokenHash string) error {
-	_, err := s.db.Exec(`UPDATE subscriptions SET token_hash = ? WHERE id = ?`, tokenHash, id)
+// RotateSubscriptionToken replaces the token hash and its ciphertext
+// (design §10 一键轮换): old URLs stop resolving, and the new URL stays
+// copyable from the panel afterwards.
+func (s *Store) RotateSubscriptionToken(id, tokenHash, tokenEnc string) error {
+	_, err := s.db.Exec(`UPDATE subscriptions SET token_hash = ?, token_enc = ? WHERE id = ?`, tokenHash, tokenEnc, id)
 	return err
 }
 

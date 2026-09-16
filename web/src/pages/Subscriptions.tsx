@@ -10,33 +10,86 @@ import Modal from '../components/Modal';
 const NODES_PH = '{{nodes}}';
 const RULES_PH = '{{rules}}';
 
+/** Settings keys behind {@link RulesCard} (mirrors httpapi.SettingRules*). */
+const RULES_SINGBOX_KEY = 'sub.rules_singbox';
+const RULES_CLASH_KEY = 'sub.rules_clash';
+
+/**
+ * Mirrors validateRulesFragment on the server: catching a broken snippet here
+ * just saves a round trip — the server still refuses it, because a fragment
+ * that cannot be spliced in would hand every client an unloadable config.
+ */
+function rulesSingboxValid(value: string): boolean {
+  if (value.trim() === '') return true;
+  try {
+    const parsed: unknown = JSON.parse('[' + value + ']');
+    return (
+      Array.isArray(parsed) &&
+      parsed.every((r) => r !== null && typeof r === 'object' && !Array.isArray(r))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function rulesClashValid(value: string): boolean {
+  return value.split('\n').every((line) => {
+    const l = line.trim();
+    return l === '' || l.startsWith('#') || l.startsWith('-');
+  });
+}
+
 export default function Subscriptions() {
   const { t } = useI18n();
+  // Templates are owned here: the subscription rows bind them (template picker)
+  // and the templates card edits them, so one fetch feeds both.
+  const [templates, setTemplates] = useState<TemplateRow[]>([]);
+  const [tplErr, setTplErr] = useState<string | null>(null);
+
+  const loadTemplates = useCallback(async () => {
+    try {
+      const r = await api.listTemplates();
+      setTemplates(r.templates ?? []);
+      setTplErr(null);
+    } catch (e) {
+      setTplErr(apiErrorMessage(e, t));
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void loadTemplates();
+  }, [loadTemplates]);
+
   return (
     <div>
       <div className="page-head">
         <h2>{t('subs_title')}</h2>
       </div>
-      <SubscriptionsCard />
-      <TemplatesCard />
+      <SubscriptionsCard templates={templates} />
+      <TemplatesCard templates={templates} loadError={tplErr} onReload={loadTemplates} />
+      <RulesCard />
     </div>
   );
 }
 
 // --- subscriptions -----------------------------------------------------------
 
-function SubscriptionsCard() {
+function SubscriptionsCard({ templates }: { templates: TemplateRow[] }) {
   const { t } = useI18n();
   const [subs, setSubs] = useState<SubscriptionRow[] | null>(null);
   const [nodes, setNodes] = useState<NodeView[]>([]);
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  /** id → plaintext token reveal (create/rotate), shown exactly once. */
+  /** Plaintext token from a create/rotate response (the link stays available
+   *  in the list afterwards, see LinkPanel). */
   const [freshToken, setFreshToken] = useState<SubscriptionToken | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null); // node picker
   const [uaFor, setUaFor] = useState<string | null>(null); // §10 UA filter editor
+  const [tplFor, setTplFor] = useState<string | null>(null); // template binding
+  const [linkFor, setLinkFor] = useState<string | null>(null); // §10 修订: URL reveal
   const [accessFor, setAccessFor] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<SubscriptionRow | null>(null);
   const [rotating, setRotating] = useState<SubscriptionRow | null>(null);
@@ -65,6 +118,7 @@ function SubscriptionsCard() {
       const tok = await api.createSubscription(name.trim());
       setFreshToken(tok);
       setCopied(false);
+      setCopyFailed(false);
       setName('');
       await load();
     } catch (ex) {
@@ -80,6 +134,7 @@ function SubscriptionsCard() {
       const tok = await api.rotateSubscription(sub.id);
       setFreshToken(tok);
       setCopied(false);
+      setCopyFailed(false);
       await load();
     } catch (ex) {
       setErr(apiErrorMessage(ex, t));
@@ -114,6 +169,16 @@ function SubscriptionsCard() {
     }
   };
 
+  // §10: '' clears the binding → the built-in default template is used.
+  const saveTemplate = async (sub: SubscriptionRow, templateId: string) => {
+    try {
+      await api.updateSubscription(sub.id, { template_id: templateId === '' ? null : templateId });
+      await load();
+    } catch (ex) {
+      setErr(apiErrorMessage(ex, t));
+    }
+  };
+
   const doDelete = async () => {
     if (!deleting) return;
     try {
@@ -131,8 +196,10 @@ function SubscriptionsCard() {
     try {
       await navigator.clipboard.writeText(freshToken.url || freshToken.token);
       setCopied(true);
+      setCopyFailed(false);
     } catch {
-      // clipboard unavailable (http): the token stays selectable on screen
+      // clipboard unavailable (plain http origin): the token stays selectable
+      setCopyFailed(true);
     }
   };
 
@@ -159,6 +226,7 @@ function SubscriptionsCard() {
           <p>{t('sub_token_once')}</p>
           <p className="mono selectable">{freshToken.url || freshToken.token}</p>
           <div className="row-end">
+            {copyFailed && <span className="hint">{t('copy_manual')}</span>}
             <button type="button" className="btn small" onClick={() => void copyToken()}>
               {copied ? t('copied') : t('copy')}
             </button>
@@ -205,10 +273,25 @@ function SubscriptionsCard() {
                     <button
                       type="button"
                       className="btn small"
+                      onClick={() => setTplFor(tplFor === sub.id ? null : sub.id)}
+                      title={templates.find((tp) => tp.id === sub.template_id)?.name}
+                    >
+                      {t('sub_template')}
+                    </button>{' '}
+                    <button
+                      type="button"
+                      className="btn small"
                       onClick={() => setUaFor(uaFor === sub.id ? null : sub.id)}
                       title={sub.ua_filter || undefined}
                     >
                       {t('sub_ua_filter')}
+                    </button>{' '}
+                    <button
+                      type="button"
+                      className="btn small"
+                      onClick={() => setLinkFor(linkFor === sub.id ? null : sub.id)}
+                    >
+                      {t('sub_link')}
                     </button>{' '}
                     <button
                       type="button"
@@ -240,8 +323,19 @@ function SubscriptionsCard() {
         ) : null,
       )}
       {subs?.map((sub) =>
+        tplFor === sub.id ? (
+          <TemplatePicker
+            key={'t' + sub.id}
+            sub={sub}
+            templates={templates}
+            onSave={(id) => void saveTemplate(sub, id)}
+          />
+        ) : null,
+      )}
+      {subs?.map((sub) =>
         uaFor === sub.id ? <UAFilterEditor key={'u' + sub.id} sub={sub} onSave={(f) => void saveUAFilter(sub, f)} /> : null,
       )}
+      {subs?.map((sub) => (linkFor === sub.id ? <LinkPanel key={'l' + sub.id} sub={sub} /> : null))}
       {subs?.map((sub) => (accessFor === sub.id ? <AccessLog key={'a' + sub.id} subId={sub.id} /> : null))}
 
       {rotating && (
@@ -312,6 +406,108 @@ function NodePicker({
           {t('save')}
         </button>
       </div>
+    </div>
+  );
+}
+
+// §10: which template renders this subscription. Only a template of the format
+// the client asked for is used, otherwise the built-in default takes over
+// (see renderSubscription on the server) — the hint says so.
+function TemplatePicker({
+  sub,
+  templates,
+  onSave,
+}: {
+  sub: SubscriptionRow;
+  templates: TemplateRow[];
+  onSave: (templateId: string) => void;
+}) {
+  const { t } = useI18n();
+  const [sel, setSel] = useState(sub.template_id ?? '');
+
+  return (
+    <div className="card" style={{ marginTop: 8 }}>
+      <h4>
+        {t('sub_template')} — {sub.name}
+      </h4>
+      <p className="hint">{t('sub_template_hint')}</p>
+      <div className="cmd-input-row">
+        <select value={sel} onChange={(e) => setSel(e.target.value)}>
+          <option value="">{t('sub_template_default')}</option>
+          {templates.map((tp) => (
+            <option key={tp.id} value={tp.id}>
+              {tp.name} ({tp.format})
+            </option>
+          ))}
+        </select>
+        <button type="button" className="btn primary small" onClick={() => onSave(sel)}>
+          {t('save')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// §10 实现修订 2026-09-16: the subscription URL is copyable whenever you want
+// it, not only in the create/rotate response. The plaintext comes from the
+// server on demand; rows from before the ciphertext existed report
+// link_available=false and can only be re-linked by rotating.
+function LinkPanel({ sub }: { sub: SubscriptionRow }) {
+  const { t } = useI18n();
+  const [link, setLink] = useState<SubscriptionToken | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    // legacy row: nothing to fetch, the hint below already explains why
+    if (!sub.link_available) return;
+    api
+      .subscriptionLink(sub.id)
+      .then((r) => alive && setLink(r))
+      .catch((e) => alive && setErr(apiErrorMessage(e, t)));
+    return () => {
+      alive = false;
+    };
+  }, [sub.id, sub.link_available, t]);
+
+  const url = link ? link.url || '/sub/' + link.token : '';
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setCopyFailed(false);
+    } catch {
+      // plain http origin: no clipboard API — the field stays selectable
+      setCopyFailed(true);
+    }
+  };
+
+  return (
+    <div className="card" style={{ marginTop: 8 }}>
+      <h4>
+        {t('sub_link')} — {sub.name}
+      </h4>
+      <p className="hint">{t('sub_link_hint')}</p>
+      {!sub.link_available && <p className="hint">{t('sub_link_unavailable')}</p>}
+      {err && <div className="form-error">{err}</div>}
+      {link && (
+        <div className="cmd-input-row">
+          <input
+            className="mono"
+            readOnly
+            value={url}
+            onFocus={(e) => e.currentTarget.select()}
+            aria-label={t('sub_link')}
+          />
+          {copyFailed && <span className="hint nowrap">{t('copy_manual')}</span>}
+          <button type="button" className="btn small" onClick={() => void copy()}>
+            {copied ? t('copied') : t('copy')}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -397,9 +593,16 @@ function AccessLog({ subId }: { subId: string }) {
 
 // --- templates ---------------------------------------------------------------
 
-function TemplatesCard() {
+function TemplatesCard({
+  templates,
+  loadError,
+  onReload,
+}: {
+  templates: TemplateRow[];
+  loadError: string | null;
+  onReload: () => Promise<void>;
+}) {
   const { t } = useI18n();
-  const [templates, setTemplates] = useState<TemplateRow[] | null>(null);
   const [editing, setEditing] = useState<TemplateRow | null>(null); // null = closed
   const [name, setName] = useState('');
   const [format, setFormat] = useState<'singbox' | 'clash'>('singbox');
@@ -407,20 +610,6 @@ function TemplatesCard() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<TemplateRow | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const r = await api.listTemplates();
-      setTemplates(r.templates ?? []);
-      setErr(null);
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    }
-  }, [t]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
 
   const openNew = () => {
     setEditing({ id: '', name: '', format: 'singbox', content: '', created_at: 0, updated_at: 0 });
@@ -449,7 +638,7 @@ function TemplatesCard() {
         await api.updateTemplate(editing.id, { name: name.trim(), format, content });
       }
       setEditing(null);
-      await load();
+      await onReload();
     } catch (ex) {
       setErr(apiErrorMessage(ex, t));
     } finally {
@@ -462,15 +651,14 @@ function TemplatesCard() {
     try {
       await api.deleteTemplate(deleting.id);
       setDeleting(null);
-      await load();
+      await onReload();
     } catch (ex) {
       setErr(apiErrorMessage(ex, t));
       setDeleting(null);
     }
   };
 
-  const placeholdersMissing =
-    !content.includes(NODES_PH) || !content.includes(RULES_PH);
+  const placeholdersMissing = !content.includes(NODES_PH) || !content.includes(RULES_PH);
 
   return (
     <section className="card" style={{ marginTop: 16 }}>
@@ -482,10 +670,10 @@ function TemplatesCard() {
       </div>
       <p className="hint">{t('tpl_placeholders_hint')}</p>
 
-      {err && <div className="form-error">{err}</div>}
+      {(err || loadError) && <div className="form-error">{err || loadError}</div>}
 
-      {templates !== null && templates.length === 0 && <div className="hint">{t('tpl_empty')}</div>}
-      {templates !== null && templates.length > 0 && (
+      {templates.length === 0 && <div className="hint">{t('tpl_empty')}</div>}
+      {templates.length > 0 && (
         <div className="table-wrap">
           <table className="table">
             <thead>
@@ -538,12 +726,11 @@ function TemplatesCard() {
           <label className="field">
             <span>{t('tpl_content')}</span>
             <textarea
-              className="mono"
+              className="code-area"
               rows={14}
               spellCheck={false}
               value={content}
               onChange={(e) => setContent(e.target.value)}
-              style={{ width: '100%', fontFamily: 'monospace' }}
             />
           </label>
           <p className={'hint' + (placeholdersMissing ? ' form-error' : '')}>
@@ -573,6 +760,108 @@ function TemplatesCard() {
           </div>
         </Modal>
       )}
+    </section>
+  );
+}
+
+// --- routing rules (§10 实现修订 2026-09-16) ---------------------------------
+
+/**
+ * The panel-side home of {{rules}}. Two snippets (one per output format,
+ * because a subscription's format is chosen per request) that the renderer
+ * splices into the template verbatim — so, exactly like {{nodes}}, the snippet
+ * carries its own list markers and indentation and the template owns the
+ * surrounding key.
+ */
+function RulesCard() {
+  const { t } = useI18n();
+  const [singbox, setSingbox] = useState('');
+  const [clash, setClash] = useState('');
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.getSettings();
+      const map: Record<string, string> = {};
+      for (const s of r.settings ?? []) map[s.key] = s.value;
+      setSingbox(map[RULES_SINGBOX_KEY] ?? '');
+      setClash(map[RULES_CLASH_KEY] ?? '');
+      setLoaded(true);
+      setErr(null);
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async () => {
+    if (busy) return;
+    // Client-side pre-check only: the server validates again and owns the verdict.
+    if (!rulesSingboxValid(singbox)) {
+      setErr(t('rules_bad_singbox'));
+      return;
+    }
+    if (!rulesClashValid(clash)) {
+      setErr(t('rules_bad_clash'));
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    setSaved(false);
+    try {
+      await api.putSettings({ [RULES_SINGBOX_KEY]: singbox, [RULES_CLASH_KEY]: clash });
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 3000);
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="card" style={{ marginTop: 16 }}>
+      <h3>{t('rules_section')}</h3>
+      <p className="hint">{t('rules_desc')}</p>
+
+      {err && <div className="form-error">{err}</div>}
+      {saved && <div className="form-ok">{t('settings_saved')}</div>}
+
+      <label className="field">
+        <span>{t('rules_singbox')}</span>
+        <textarea
+          className="code-area"
+          rows={5}
+          spellCheck={false}
+          disabled={!loaded}
+          placeholder={t('rules_singbox_ph')}
+          value={singbox}
+          onChange={(e) => setSingbox(e.target.value)}
+        />
+      </label>
+      <label className="field">
+        <span>{t('rules_clash')}</span>
+        <textarea
+          className="code-area"
+          rows={5}
+          spellCheck={false}
+          disabled={!loaded}
+          placeholder={t('rules_clash_ph')}
+          value={clash}
+          onChange={(e) => setClash(e.target.value)}
+        />
+      </label>
+      <div className="row-end">
+        <button type="button" className="btn primary" disabled={busy || !loaded} onClick={() => void save()}>
+          {busy ? t('loading') : t('save')}
+        </button>
+      </div>
     </section>
   );
 }

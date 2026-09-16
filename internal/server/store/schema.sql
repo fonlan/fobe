@@ -181,6 +181,10 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
+    -- AES-GCM ciphertext (Cryptor, §4.4) of the plaintext token, so the panel
+    -- can re-show the subscription URL on demand (§10 实现修订 2026-09-16).
+    -- Rows written before that revision carry '' → their URL is unrecoverable.
+    token_enc  TEXT NOT NULL DEFAULT '',
     enabled    INTEGER NOT NULL DEFAULT 1,
     ua_filter  TEXT NOT NULL DEFAULT '',
     template_id TEXT,

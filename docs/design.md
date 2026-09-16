@@ -533,8 +533,13 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - 格式决策：`?format=singbox|clash` 显式指定；缺省按 UA 嗅探（`clash` / `sing-box` / `mihomo` / `surge`），嗅探失败默认 `singbox`。
 - 输出 = **模板渲染**：模板是每格式一份完整配置文件（Clash YAML / sing-box JSON），使用 `{{nodes}}`、`{{rules}}` 占位符；同一模板可被多个订阅复用。
 - **模板中禁止出现可手填的凭据**：节点数据统一由 `{{nodes}}` 注入，密码来自全局设置。这样"轮换密码"才不会漏改。
-- 面板功能：模板编辑器（含语法校验 + 预览渲染结果）、订阅的节点多选、UA 过滤、一键轮换 token、访问日志（时间/IP/UA）。
+- 面板功能：模板编辑器（含语法校验 + 预览渲染结果）、订阅的节点多选、**绑定模板**、UA 过滤、一键轮换 token、**链接随时复制**、**路由规则编辑**、访问日志（时间/IP/UA）。
 - 节点渲染为 anytls outbound：`server`（探针主 IP 或你指定的域名）、`server_port`、`password`、`tls.certificate`（内嵌 PEM pinning）、`tls.server_name`。
+
+> **实现修订 2026-09-16（订阅链接随时可复制；`{{rules}}` 有了配置界面）**：补齐两处"规格与实现对不上"的地方，并补上一直缺的模板绑定入口。
+> - **链接不再只显示一次**：`subscriptions` 增列 `token_enc`（Cryptor AES-GCM 密文，密钥边界同 §4.4），hash 仍只用于 `/sub/<token>` 查询；新增 `GET /api/subscriptions/{id}/link` 返回 `{token,url}`，列表返回派生字段 `link_available`。**代价（说清楚）**：库里多一份密文，所以"库中只存 hash"这句话不再成立——单用户自托管下主密钥与库同处一地，单拿 `token_enc` 并不比单拿 hash 更危险，但**拿到整个 `data/` 就等于拿到全部订阅链接**；换来的是"想复制就复制"。本修订前建的订阅 `token_enc=''`、`link_available=false`，面板提示只能轮换 Token 换新链接（迁移只加列，不改老数据）。
+> - **`{{rules}}` 从"原样保留"改为"注入"**：校验器一直强制模板包含 `{{rules}}`，渲染器却从不替换它 ⇒ 任何带该占位符的手写模板都会输出含字面量 `{{rules}}` 的坏配置。现由两个设置填充：`sub.rules_singbox` / `sub.rules_clash`（按输出格式各一份，因为订阅格式由客户端请求决定，同一订阅可能两种格式都被拉），订阅页「路由规则」卡片编辑。片段与 `{{nodes}}` 同规格：**自带列表符号与缩进**，模板只负责外层的键；空值展开为空。`PUT /api/settings` 做基本校验（sing-box 要求包进 `[]` 后是合法 JSON 对象数组，Clash 要求每个非空行以 `-` 开头），不合格回 `bad_rules`；设置页之外的写入路径（§17 导入）同样受 `allowedKeys` 约束。
+> - **订阅绑定模板**：`template_id` 一直由 `PUT /api/subscriptions/{id}` 支持，但页面没有入口；现于订阅行加「模板」下拉（内置默认 / 指定模板）。渲染选择逻辑未变：模板格式与请求格式不一致时回退内置默认模板。
 
 ### 10.1 共享密码的取舍 ⚠
 

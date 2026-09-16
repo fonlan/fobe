@@ -24,7 +24,7 @@ var schemaFS embed.FS
 // and idempotent, so forgetting a bump only loses the backup-on-change
 // guarantee, never correctness. Upgrade and downgrade semantics: §6 "schema
 // 兼容策略" in design.md.
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // Store is the database handle. Safe for concurrent use.
 type Store struct {
@@ -206,6 +206,10 @@ func (s *Store) migrateAdditive() error {
 		{"commands", "risk", `ALTER TABLE commands ADD COLUMN risk TEXT NOT NULL DEFAULT ''`},
 		{"audit_logs", "reason", `ALTER TABLE audit_logs ADD COLUMN reason TEXT NOT NULL DEFAULT ''`},
 		{"subscriptions", "ua_filter", `ALTER TABLE subscriptions ADD COLUMN ua_filter TEXT NOT NULL DEFAULT ''`},
+		// §10 实现修订 2026-09-16: the subscription URL must stay copyable, so
+		// the plaintext token is kept alongside its hash as Cryptor ciphertext
+		// (empty for rows created by older builds).
+		{"subscriptions", "token_enc", `ALTER TABLE subscriptions ADD COLUMN token_enc TEXT NOT NULL DEFAULT ''`},
 		{"node_ips", "manual_primary", `ALTER TABLE node_ips ADD COLUMN manual_primary INTEGER NOT NULL DEFAULT 0`},
 		{"node_singbox", "firewall_hint", `ALTER TABLE node_singbox ADD COLUMN firewall_hint TEXT NOT NULL DEFAULT ''`},
 		{"node_singbox", "password_override", `ALTER TABLE node_singbox ADD COLUMN password_override TEXT NOT NULL DEFAULT ''`},

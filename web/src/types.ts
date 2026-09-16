@@ -263,9 +263,15 @@ export interface SubscriptionRow {
   /** §10 UA allow-list: comma-separated substrings; empty = every client. */
   ua_filter: string;
   node_ids: string[];
+  /**
+   * §10 实现修订 2026-09-16: true while the server can still reconstruct the
+   * plaintext token. Rows created before that revision (or after a master-key
+   * change) can only get a working URL by rotating.
+   */
+  link_available: boolean;
 }
 
-/** One-time plaintext token response (create / rotate). */
+/** Plaintext token + URL (create / rotate / link reveal). */
 export interface SubscriptionToken {
   id?: string;
   name?: string;

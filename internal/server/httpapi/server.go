@@ -206,6 +206,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/subscriptions/{id}/nodes", s.requireSession(s.handleSetSubscriptionNodes))
 	mux.HandleFunc("POST /api/subscriptions/{id}/rotate", s.requireSession(s.handleRotateSubscription))
 	mux.HandleFunc("GET /api/subscriptions/{id}/access", s.requireSession(s.handleSubscriptionAccess))
+	// §10 实现修订 2026-09-16: copy an existing subscription's URL at any time.
+	mux.HandleFunc("GET /api/subscriptions/{id}/link", s.requireSession(s.handleSubscriptionLink))
 	mux.HandleFunc("GET /api/templates", s.requireSession(s.handleListTemplates))
 	mux.HandleFunc("POST /api/templates", s.requireSession(s.handleCreateTemplate))
 	mux.HandleFunc("PUT /api/templates/{id}", s.requireSession(s.handleUpdateTemplate))

@@ -163,11 +163,29 @@ section.card { margin-bottom: 0; }
 .row-gap { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .row-wrap { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
-/* Bare "input + button" rows (sing-box port, subscription name, UA filter).
-   These inputs sit outside a .field label, so they need their own layout —
-   the visual styling is shared with .field input further down. */
+/* Bare "input + button" rows (sing-box port, subscription name, UA filter,
+   subscription template picker). These controls sit outside a .field label, so
+   they need their own layout — the visual styling is shared with .field input
+   further down. */
 .cmd-input-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
-.cmd-input-row input { flex: 1; min-width: 0; }
+.cmd-input-row input,
+.cmd-input-row select { flex: 1; min-width: 0; }
+
+/* Monospace text areas (template body, §10 routing-rule snippets). */
+.code-area {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 10px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.code-area:focus { outline: 2px solid var(--accent-weak); border-color: var(--accent); }
 
 .page-head {
   display: flex;
@@ -297,7 +315,8 @@ section.card { margin-bottom: 0; }
 
 .field input,
 .field select,
-.cmd-input-row input {
+.cmd-input-row input,
+.cmd-input-row select {
   appearance: none;
   box-sizing: border-box;
   height: 38px;
@@ -313,7 +332,8 @@ section.card { margin-bottom: 0; }
 
 .field input:focus,
 .field select:focus,
-.cmd-input-row input:focus {
+.cmd-input-row input:focus,
+.cmd-input-row select:focus {
   outline: 2px solid var(--accent-weak);
   border-color: var(--accent);
 }

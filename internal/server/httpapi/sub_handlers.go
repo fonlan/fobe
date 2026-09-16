@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -22,8 +23,8 @@ const (
 func validFormat(f string) bool { return f == FormatSingbox || f == FormatClash }
 
 // Placeholders every stored template must contain (§10): {{nodes}} is where
-// the renderer injects the anytls outbound list; {{rules}} is kept verbatim
-// for authors to anchor their own static rules.
+// the renderer injects the anytls outbound list; {{rules}} is where it injects
+// the operator's routing rules (see the rules settings below).
 const (
 	placeholderNodes = "{{nodes}}"
 	placeholderRules = "{{rules}}"
@@ -33,16 +34,76 @@ func templatePlaceholdersOK(content string) bool {
 	return strings.Contains(content, placeholderNodes) && strings.Contains(content, placeholderRules)
 }
 
+// --- routing rules (§10 实现修订 2026-09-16) ---
+//
+// Rules for {{rules}} are two panel settings instead of free text inside every
+// template: one snippet per output format, because a subscription's format is
+// chosen per request (?format= / UA sniffing) and sing-box rules are JSON
+// while Clash rules are YAML list items. The renderer splices the snippet in
+// verbatim, so — exactly like {{nodes}} — the snippet owns its own list
+// markers and indentation and the template owns only the surrounding key.
+const (
+	SettingRulesSingbox = "sub.rules_singbox"
+	SettingRulesClash   = "sub.rules_clash"
+)
+
+func rulesSettingKey(format string) string {
+	if format == FormatClash {
+		return SettingRulesClash
+	}
+	return SettingRulesSingbox
+}
+
+// validateRulesFragment rejects snippets that cannot possibly render: an empty
+// value is fine (the placeholder expands to nothing), otherwise the text must
+// parse as the array elements it will be spliced between.
+func validateRulesFragment(format, value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	if format == FormatClash {
+		// YAML sequence entries: "  - MATCH,PROXY". Comments and blank lines
+		// are allowed so an operator can annotate the fragment.
+		for _, line := range strings.Split(value, "\n") {
+			l := strings.TrimSpace(line)
+			if l == "" || strings.HasPrefix(l, "#") {
+				continue
+			}
+			if !strings.HasPrefix(l, "-") {
+				return false
+			}
+		}
+		return true
+	}
+	// sing-box: the elements of a route.rules array. Wrapping them in [] has to
+	// yield valid JSON of objects — this is the check that catches a half-typed
+	// rule before it reaches every client.
+	var rules []map[string]any
+	return json.Unmarshal([]byte("["+value+"]"), &rules) == nil
+}
+
+// subscriptionRules returns the configured snippet for one format (” when the
+// operator never configured rules for it).
+func (s *Server) subscriptionRules(format string) string {
+	val, err := s.Store.GetSetting(rulesSettingKey(format))
+	if err != nil {
+		return ""
+	}
+	return val
+}
+
 // --- subscriptions API ---
 
 type subscriptionView struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Enabled    bool     `json:"enabled"`
-	CreatedAt  int64    `json:"created_at"`
-	TemplateID *string  `json:"template_id,omitempty"`
-	UAFilter   string   `json:"ua_filter"`
-	NodeIDs    []string `json:"node_ids"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Enabled       bool     `json:"enabled"`
+	CreatedAt     int64    `json:"created_at"`
+	TemplateID    *string  `json:"template_id,omitempty"`
+	UAFilter      string   `json:"ua_filter"`
+	NodeIDs       []string `json:"node_ids"`
+	LinkAvailable bool     `json:"link_available"`
 }
 
 func (s *Server) subscriptionView(sub *store.Subscription) subscriptionView {
@@ -51,6 +112,10 @@ func (s *Server) subscriptionView(sub *store.Subscription) subscriptionView {
 		ID: sub.ID, Name: sub.Name, Enabled: sub.Enabled, CreatedAt: sub.CreatedAt,
 		UAFilter: sub.UAFilter,
 		NodeIDs:  nodeIDs,
+		// §10 实现修订 2026-09-16: the URL can be re-shown while the ciphertext
+		// is present; legacy rows (created before the column existed) can only
+		// get a working link by rotating it.
+		LinkAvailable: sub.TokenEnc != "",
 	}
 	if sub.TemplateID.Valid && sub.TemplateID.String != "" {
 		v.TemplateID = &sub.TemplateID.String
@@ -75,8 +140,9 @@ type createSubscriptionReq struct {
 	Name string `json:"name"`
 }
 
-// handleCreateSubscription mints a subscription and returns the plaintext
-// token exactly once (§10: only the hash is stored, like reg tokens).
+// handleCreateSubscription mints a subscription and returns its URL. The token
+// is stored twice (§10 实现修订 2026-09-16): hashed for /sub/<token> lookups,
+// and as Cryptor ciphertext so the panel can re-show the link at any time.
 func (s *Server) handleCreateSubscription(w http.ResponseWriter, r *http.Request) {
 	var req createSubscriptionReq
 	if err := decodeJSON(r, &req); err != nil {
@@ -98,19 +164,70 @@ func (s *Server) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	if err := s.Store.CreateSubscription(id, name, tokenHash(token)); err != nil {
+	enc, err := s.Crypt.Encrypt(token)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if err := s.Store.CreateSubscription(id, name, tokenHash(token), enc); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	s.Store.InsertAudit(&store.AuditEntry{Actor: "panel", Action: "subscription_created", Command: name, SourceIP: s.Trust.RealIP(r)})
 	s.publishEvent("subscriptions_changed", id)
 
-	url, urlErr := s.publicBaseURL(r)
-	subURL := ""
-	if urlErr == nil {
-		subURL = url + "/sub/" + token
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "name": name, "token": token, "url": s.subscriptionURL(r, token)})
+}
+
+// subscriptionURL builds the client-facing URL for one token. An unconfigured
+// server.public_url yields an empty string (the panel then shows the bare
+// path instead of a wrong origin).
+func (s *Server) subscriptionURL(r *http.Request, token string) string {
+	base, err := s.publicBaseURL(r)
+	if err != nil {
+		return ""
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "name": name, "token": token, "url": subURL})
+	return base + "/sub/" + token
+}
+
+// subscriptionToken decrypts the stored token ciphertext. A row created before
+// the token_enc column (or one whose ciphertext no longer decrypts, e.g. after
+// a FOBE_MASTER_KEY change) has no recoverable plaintext — only rotation can
+// mint a usable link again.
+func (s *Server) subscriptionToken(sub *store.Subscription) (string, error) {
+	if sub.TokenEnc == "" {
+		return "", errTokenUnrecoverable
+	}
+	token, err := s.Crypt.Decrypt(sub.TokenEnc)
+	if err != nil || token == "" {
+		return "", errTokenUnrecoverable
+	}
+	return token, nil
+}
+
+var errTokenUnrecoverable = errors.New("subscription token is not recoverable")
+
+// handleSubscriptionLink re-reveals an existing subscription's URL (§10 实现修订
+// 2026-09-16: copy it whenever you like, not only at creation time).
+func (s *Server) handleSubscriptionLink(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sub, err := s.Store.GetSubscription(id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	token, err := s.subscriptionToken(sub)
+	if err != nil {
+		// 409, not 404: the subscription exists, its URL just cannot be
+		// reconstructed — the panel turns this into "rotate to get a new link".
+		writeErr(w, http.StatusConflict, "link_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "url": s.subscriptionURL(r, token)})
 }
 
 // handleUpdateSubscription toggles enabled / renames / rebinds the template.
@@ -240,7 +357,8 @@ func (s *Server) handleSetSubscriptionNodes(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// handleRotateSubscription mints a new token; the old URL stops resolving.
+// handleRotateSubscription mints a new token; the old URL stops resolving and
+// the new one stays copyable from the panel afterwards.
 func (s *Server) handleRotateSubscription(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, err := s.Store.GetSubscription(id); errors.Is(err, store.ErrNotFound) {
@@ -255,18 +373,18 @@ func (s *Server) handleRotateSubscription(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	if err := s.Store.RotateSubscriptionToken(id, tokenHash(token)); err != nil {
+	enc, err := s.Crypt.Encrypt(token)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if err := s.Store.RotateSubscriptionToken(id, tokenHash(token), enc); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	s.Store.InsertAudit(&store.AuditEntry{Actor: "panel", Action: "subscription_rotated", SourceIP: s.Trust.RealIP(r)})
 	s.publishEvent("subscriptions_changed", id)
-	url, urlErr := s.publicBaseURL(r)
-	subURL := ""
-	if urlErr == nil {
-		subURL = url + "/sub/" + token
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"token": token, "url": subURL})
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "url": s.subscriptionURL(r, token)})
 }
 
 func (s *Server) handleSubscriptionAccess(w http.ResponseWriter, r *http.Request) {
@@ -484,7 +602,8 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 
 // renderSubscription produces the final config body for the chosen format:
 // the subscription's template when it matches the format, otherwise the
-// built-in default; {{nodes}} is substituted, {{rules}} stays verbatim.
+// built-in default; {{nodes}} and {{rules}} are substituted with the rendered
+// outbounds and the format's configured routing rules.
 func (s *Server) renderSubscription(sub *store.Subscription, format string, nodes []singbox.ProxyNode) (string, error) {
 	tmpl := ""
 	if sub.TemplateID.Valid && sub.TemplateID.String != "" {
@@ -510,7 +629,10 @@ func (s *Server) renderSubscription(sub *store.Subscription, format string, node
 			return "", err
 		}
 	}
-	return strings.ReplaceAll(tmpl, placeholderNodes, injected), nil
+	// {{nodes}} first, then {{rules}}: a rules fragment is operator text and
+	// must never be re-scanned for the node placeholder.
+	body := strings.ReplaceAll(tmpl, placeholderNodes, injected)
+	return strings.ReplaceAll(body, placeholderRules, s.subscriptionRules(format)), nil
 }
 
 // handleSubscription serves GET /sub/<token> (design §10): token in URL,

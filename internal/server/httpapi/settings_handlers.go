@@ -17,6 +17,8 @@ import (
 //   domain / webhook_url (encrypted) / webhook_secret (encrypted) (§15,
 //   2026-09-16 修订: the QR flow itself writes these via feishureg.Save)
 //   retention.metrics_days
+//   sub.rules_singbox, sub.rules_clash (raw routing-rule snippets spliced into
+//   {{rules}}; §10 实现修订 2026-09-16)
 //   geoip.auto_update, geoip.max_age_days, geoip.url (§14.1; the MMDB itself
 //   arrives via the upload/download endpoints, and geoip.status is server-owned)
 //   ui.theme (light|dark|system; localStorage + server dual-write, §16)
@@ -66,6 +68,9 @@ var allowedKeys = func() map[string]bool {
 		"alert.traffic_warn_pct", "alert.traffic_crit_pct",
 		"ai.kill_switch",
 		"ui.theme", // light|dark|system; validated below (§16 dual-write)
+		// §10 实现修订 2026-09-16: {{rules}} is filled from these two snippets
+		// (one per output format) instead of being hard-coded per template.
+		SettingRulesSingbox, SettingRulesClash,
 		// §14.1 GeoIP database refresh policy.
 		"geoip.auto_update", "geoip.max_age_days", "geoip.url",
 		// §5.5 agent self-update switch (default on).
@@ -170,6 +175,17 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		// §14.1 policy values; validated by the same helper the §17 import uses.
 		if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {
 			writeErr(w, http.StatusBadRequest, geoIPSettingErrCode(key))
+			return
+		}
+		// §10 rules snippets: a fragment that cannot be spliced into the
+		// template would hand every client a config it refuses to load, so it
+		// is refused here rather than at the next subscription fetch.
+		if key == SettingRulesSingbox && !validateRulesFragment(FormatSingbox, value) {
+			writeErr(w, http.StatusBadRequest, "bad_rules")
+			return
+		}
+		if key == SettingRulesClash && !validateRulesFragment(FormatClash, value) {
+			writeErr(w, http.StatusBadRequest, "bad_rules")
 			return
 		}
 		stored := value
