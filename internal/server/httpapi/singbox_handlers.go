@@ -332,9 +332,12 @@ func (s *Server) handleSingboxPort(w http.ResponseWriter, r *http.Request) {
 // `singbox_config:<node_id>` (the same key hub.buildDesiredState reads), keep
 // agent-reported fields, and push the desired frame when the node is online.
 func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, version string, port int, status string) error {
-	password, ok := s.GetDecryptedSetting("anytls_password")
-	if !ok || password == "" {
-		return errAnytlsPasswordUnset
+	// The credential is machine-generated on first use (§10.1 实现修订
+	// 2026-09-16): installing a node is what creates it, so the operator never
+	// has to provide one and there is no "password not configured" branch left.
+	password, err := s.ensureAnytlsPassword()
+	if err != nil {
+		return err
 	}
 	config, err := singbox.BuildNodeConfig(port, password)
 	if err != nil {
@@ -379,14 +382,28 @@ func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, versi
 // operator's only way out is "click install again". A template bug must not
 // need that. Startup-only and idempotent: nodes already on the current template
 // are skipped, so an ordinary restart rewrites nothing.
+//
+// Since §10.1 实现修订 2026-09-16 it is also one of the places the global anytls
+// password can come into existence — but only once a node is actually managed,
+// so a fresh install never mints a credential it does not use.
 func (s *Server) SyncSingboxConfigs() int {
-	password, ok := s.GetDecryptedSetting("anytls_password")
-	if !ok || password == "" {
-		return 0 // no shared password = no managed config to rebuild
-	}
 	targets, err := s.Store.ListSingboxTargets()
 	if err != nil {
 		s.Log.Warn("singbox config sync: list targets", "err", err)
+		return 0
+	}
+	if len(targets) == 0 {
+		return 0 // nothing is managed — do not mint a credential nobody asked for
+	}
+	// §10.1 实现修订 2026-09-16: the password is generated on demand, and this pass
+	// is real demand — a managed node exists, so its config has to be derivable.
+	// (Before that change this branch meant "the operator has not configured a
+	// password yet" and skipping was the whole answer.) A failure here is a
+	// storage or master-key problem, never a reason to rotate: report, rebuild
+	// nothing, and leave working clients alone.
+	password, err := s.ensureAnytlsPassword()
+	if err != nil {
+		s.Log.Error("singbox config sync: anytls password", "err", err)
 		return 0
 	}
 	updated := 0
@@ -459,12 +476,10 @@ func (s *Server) pushDesired(nodeID string) bool {
 	return s.Hub.Send(nodeID, protocol.NewEnvelope(protocol.TypeDesired, "", desired))
 }
 
-var errAnytlsPasswordUnset = errors.New("anytls_password not configured")
-
+// singboxWriteErr maps a desired-state write failure onto an API error code.
+// Every remaining cause is a storage or generator failure, so there is exactly
+// one answer: internal. The old `anytls_password_unset` 400 died with
+// operator-supplied passwords (§10.1 实现修订 2026-09-16).
 func singboxWriteErr(w http.ResponseWriter, err error) {
-	if errors.Is(err, errAnytlsPasswordUnset) {
-		writeErr(w, http.StatusBadRequest, "anytls_password_unset")
-		return
-	}
 	writeErr(w, http.StatusInternalServerError, "internal")
 }

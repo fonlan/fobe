@@ -55,6 +55,11 @@ export default function Subscriptions() {
       <div className="page-head">
         <h2>{t('subs_title')}</h2>
       </div>
+      {/* §10.1 实现修订 2026-09-16: the global anytls password is generated and
+          owned by the server, so the panel has no field for it. This line is
+          here because the honest answer to "where do I set the password?" is
+          now "nowhere" — an operator who does not know that will hunt for it. */}
+      <p className="hint">{t('subs_anytls_password_hint')}</p>
       <RelayEntryCard onSaved={() => setRelayVersion((v) => v + 1)} />
       <SubscriptionsCard templates={templates} onToast={showToast} relayVersion={relayVersion} />
       <TemplatesCard templates={templates} loadError={tplErr} onReload={loadTemplates} />

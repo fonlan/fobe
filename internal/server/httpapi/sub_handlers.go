@@ -792,7 +792,18 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 	if err != nil {
 		return nil
 	}
-	password, _ := s.GetDecryptedSetting("anytls_password")
+	password, err := s.ensureAnytlsPassword()
+	if err != nil {
+		// A subscription is the other place the password can be born (§10.1 实现
+		// 修订 2026-09-16): rendering is as much a "use it" moment as installing.
+		// If the credential cannot be had at all (storage, or the wrong-master-key
+		// case of §4.4), serve nothing rather than a list of outbounds with an
+		// empty password — a client would import nodes that can never
+		// authenticate, and the operator would be staring at a 200. Real cause is
+		// in the log.
+		s.Log.Error("subscription: anytls password", "err", err)
+		return nil
+	}
 	format := s.relayNameFormat()
 	nodes := make([]singbox.ProxyNode, 0, len(entries))
 	for _, e := range entries {

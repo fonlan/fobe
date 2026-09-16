@@ -52,6 +52,50 @@ const (
 	MaxPort = 60000
 )
 
+// Global anytls password shape (§10.1 实现修订 2026-09-16): the credential is
+// machine-generated on first use and never typed by the operator, so it only
+// has to be (a) high-entropy and (b) safe to paste anywhere. 16 chars of
+// [A-Za-z0-9] is ~95 bits and survives every URI/JSON/YAML/shell context
+// without percent-encoding — which matters because the same string travels as
+// a JSON field in node configs, a URI auth component in third-party clients
+// and a Clash YAML scalar in subscriptions.
+const (
+	AnytlsPasswordLen     = 16
+	anytlsPasswordCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+)
+
+// GenerateAnytlsPassword returns a fresh AnytlsPasswordLen-char alnum password.
+//
+// Bytes at or above the largest multiple of the charset size (248 = 4*62) are
+// rejected instead of folded with `%` — a plain modulo would bias the first 8
+// characters of the alphabet, and a credential generator is exactly the place
+// where "good enough" randomness is not.
+func GenerateAnytlsPassword() (string, error) {
+	const (
+		charsetLen = len(anytlsPasswordCharset)
+		// The largest multiple of the charset size that fits in a byte
+		// (248 = 4*62); bytes at or above it are rejected.
+		limit = 256 - 256%charsetLen
+	)
+	out := make([]byte, 0, AnytlsPasswordLen)
+	buf := make([]byte, AnytlsPasswordLen*2)
+	for len(out) < AnytlsPasswordLen {
+		if _, err := rand.Read(buf); err != nil {
+			return "", fmt.Errorf("random anytls password: %w", err)
+		}
+		for _, b := range buf {
+			if int(b) >= limit {
+				continue
+			}
+			out = append(out, anytlsPasswordCharset[int(b)%charsetLen])
+			if len(out) == AnytlsPasswordLen {
+				break
+			}
+		}
+	}
+	return string(out), nil
+}
+
 // RandomPort returns a cryptographically random inbound port in [MinPort, MaxPort].
 func RandomPort() (int, error) {
 	n, err := rand.Int(rand.Reader, big.NewInt(MaxPort-MinPort+1))

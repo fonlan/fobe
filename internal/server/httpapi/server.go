@@ -101,6 +101,11 @@ type Server struct {
 	// (GET /api/singbox/releases). Memory-only: a listing is a convenience,
 	// never a source of truth — the versions on disk are (§9.2).
 	sbRel singboxReleasesCache
+
+	// anytlsMu serializes the lazy creation of the global anytls password
+	// (§10.1 实现修订 2026-09-16): ensureAnytlsPassword reads the setting and then
+	// writes it, and SQLite's single writer does not make that pair atomic.
+	anytlsMu sync.Mutex
 }
 
 func NewServer(st *store.Store, h *hub.Hub, trust *security.TrustChain, crypt *security.Cryptor, log *slog.Logger) *Server {

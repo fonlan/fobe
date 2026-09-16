@@ -65,8 +65,7 @@ func TestSyncSingboxConfigsRegeneratesStaleConfigs(t *testing.T) {
 	}
 }
 
-// Nodes the panel does not manage (no desired_version) are left alone, and a
-// missing shared password must not fail the pass.
+// Nodes the panel does not manage (no desired_version) are left alone.
 func TestSyncSingboxConfigsSkipsUnmanagedAndUnconfigured(t *testing.T) {
 	_, api := newTestServer(t)
 	nodeID, _ := seedNode(t, api, "idle", "m-idle-1", "198.51.100.10")
@@ -76,6 +75,12 @@ func TestSyncSingboxConfigsSkipsUnmanagedAndUnconfigured(t *testing.T) {
 	if n := api.SyncSingboxConfigs(); n != 0 {
 		t.Fatalf("sync touched %d nodes without a password, want 0", n)
 	}
+	// §10.1 实现修订 2026-09-16: the password is generated on demand now, and an
+	// unmanaged node is not demand — a fresh install must not mint a credential
+	// nothing will ever use.
+	if _, err := api.Store.GetSetting("anytls_password"); err == nil {
+		t.Fatal("an unmanaged node minted an anytls password")
+	}
 
 	setEncryptedPassword(t, api, "shared-pw")
 	if n := api.SyncSingboxConfigs(); n != 0 {
@@ -83,6 +88,37 @@ func TestSyncSingboxConfigsSkipsUnmanagedAndUnconfigured(t *testing.T) {
 	}
 	if stored, _ := api.Store.GetSetting("singbox_config:" + nodeID); stored != "{}" {
 		t.Fatalf("unmanaged node's setting was rewritten: %s", stored)
+	}
+}
+
+// §10.1 实现修订 2026-09-16: a *managed* node is demand. If the credential is gone
+// (a partial restore, say), the sync mints one and rebuilds rather than leaving
+// every node config — and every subscription — to render an empty password.
+func TestSyncSingboxConfigsMintsMissingPassword(t *testing.T) {
+	_, api := newTestServer(t)
+	nodeID, _ := seedNode(t, api, "sb", "m-sync-mint", "198.51.100.11")
+	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
+		NodeID: nodeID, DesiredVersion: "1.15.0-alpha.4", Port: 22040, Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := api.SyncSingboxConfigs(); n != 1 {
+		t.Fatalf("sync updated %d nodes, want 1", n)
+	}
+	password := storedAnytlsPassword(t, api)
+	if !anytlsPasswordRE.MatchString(password) {
+		t.Fatalf("sync did not mint a usable password: %q", password)
+	}
+	stored, err := api.Store.GetSetting("singbox_config:" + nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stored, password) {
+		t.Fatalf("rebuilt config does not carry the new password:\n%s", stored)
+	}
+	if n := api.SyncSingboxConfigs(); n != 0 {
+		t.Fatalf("second sync updated %d nodes, want 0", n)
 	}
 }
 

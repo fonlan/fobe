@@ -37,7 +37,6 @@ const DL_FAILURE_VISIBLE = 30 * 60;
 
 const SERVER_KEYS = ['server.public_url'] as const;
 const AI_KEYS = ['ai.base_url', 'ai.model', 'ai.api_key', 'ai.default_policy'] as const;
-const PROXY_KEYS = ['anytls_password'] as const;
 /** §14.1 database refresh policy; the database itself has its own endpoints. */
 const GEOIP_KEYS = ['geoip.auto_update', 'geoip.max_age_days', 'geoip.url'] as const;
 const AGENT_KEYS = ['agent.auto_update'] as const;
@@ -215,14 +214,6 @@ export default function Settings() {
           })}
         </div>
         <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(AI_KEYS)} label={t('save')} />
-      </section>
-
-      <section className="card">
-        <h3>{t('sec_proxy')}</h3>
-        <div className="form-grid">
-          {field('anytls_password', t('anytls_password'), { password: true })}
-        </div>
-        <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(PROXY_KEYS)} label={t('save')} />
       </section>
 
       <SingboxCacheCard />

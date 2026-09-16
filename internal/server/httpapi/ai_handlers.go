@@ -622,12 +622,11 @@ func aiToolsSpec() []aiOpenAIToolSpec {
 			},
 			"port"),
 		tool("set_anytls_password",
-			"Change the global anytls password and re-push configs to all nodes. Always requires operator confirmation.",
+			"Rotate the global anytls password and re-push configs to all nodes. The panel generates and owns this credential, so omitting `password` (or sending an empty one) mints a fresh random one — prefer that over inventing a value. Always requires operator confirmation.",
 			map[string]any{
 				"password": map[string]any{"type": "string"},
 				"reason":   reason,
-			},
-			"password"),
+			}),
 		tool("tail_logs",
 			"Read the latest sing-box service log lines from the selected node (read-only).",
 			map[string]any{
@@ -851,8 +850,10 @@ func (s *Server) handleAISetSingboxPort(r *http.Request, session *store.AISessio
 	return toolCall
 }
 
-// handleAISetAnytlsPassword stages a global anytls password change (§12.3
-// meta operation, forced confirmation). The plaintext never lands in the
+// handleAISetAnytlsPassword stages a global anytls password rotation (§12.3
+// meta operation, forced confirmation). An empty password means "generate one":
+// since §10.1 实现修订 2026-09-16 the panel owns this credential, so the model
+// never has to invent a secret to rotate it. The plaintext never lands in the
 // pending action: only its ciphertext does.
 func (s *Server) handleAISetAnytlsPassword(r *http.Request, session *store.AISession, action *aiToolAction, toolCall map[string]any) map[string]any {
 	var args struct {
@@ -864,9 +865,20 @@ func (s *Server) handleAISetAnytlsPassword(r *http.Request, session *store.AISes
 		return toolCall
 	}
 	args.Password = strings.TrimSpace(args.Password)
-	if args.Password == "" || len(args.Password) > aiMaxPasswordLen {
+	if len(args.Password) > aiMaxPasswordLen {
 		toolCall["status"] = "invalid"
 		return toolCall
+	}
+	// §10.1 实现修订 2026-09-16: the panel owns this credential, so an empty
+	// `password` means "mint a fresh one" — a rotation the operator can confirm
+	// without first having to invent a secret.
+	if args.Password == "" {
+		generated, err := singbox.GenerateAnytlsPassword()
+		if err != nil {
+			toolCall["status"] = "internal"
+			return toolCall
+		}
+		args.Password = generated
 	}
 	encrypted, err := s.Crypt.Encrypt(args.Password)
 	if err != nil {

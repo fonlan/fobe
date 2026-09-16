@@ -24,7 +24,7 @@
 | 10 | 构建形态 | server / agent 分开编译；前端**不嵌入 Go 二进制**但**编进生产镜像**；agent 产物进服务端镜像 | 共享 protocol 模块 + 产物分发链路；镜像构建多一个前端 stage；**挂载卷会遮蔽镜像内的 agent 产物，服务端启动时得把它补进卷**（§5.5） |
 | 11 | 数据库 | SQLite（WAL），文件挂载在容器外 | 单写者；指标靠保留期控盘 |
 | 12 | 订阅模型 | 单用户 + 多订阅，每订阅独立节点集与模板文件 | 模板管理 + 双格式引擎 |
-| 13 | 探针凭据 | 一个入站 + 一个**全局共享** anytls 密码 | 无法按订阅吊销代理访问，只能全局轮换 |
+| 13 | 探针凭据 | 一个入站 + 一个**全局共享** anytls 密码（**2026-09-16 修订：密码由服务端自动生成，不由操作员填写**，见 §10.1） | 无法按订阅吊销代理访问，只能全局轮换 |
 | 14 | 流量重置 | 独立周期类型（无 / 按月 / 按年）+ 下次重置时间；填一次自动滚动 | 需处理月末、闰日边界、秒级时间与探针时区 |
 | 15 | 缴费周期 | 周期类型（无 / 按月 / 按天 / 按年，2026-09-15 增按年）+ 周期长度 + 下次到期日，手动改；**周期长度单位随类型（天/月/年），类型只作记账口径、不参与任何到期计算**；**无续费按钮、无历史** | 查不到"上期什么时候交的" |
 | 16 | 指标保留 | 明细只存 7 天；另存永久「按天流量」表 | 7 天以外的曲线不可得（月曲线靠日表） |
@@ -137,7 +137,7 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 
 ### 4.4 密钥托管
 
-- 主密钥 `FOBE_MASTER_KEY`（32 字节，环境变量 / Docker secret）。用它 AES-GCM 加密：AI API Key、Telegram Bot Token、订阅模板中的敏感段。（2026-09-15：不再加密任何 SSH 凭据——Web 终端已改走 agent 本地 PTY，见 §11。）
+- 主密钥 `FOBE_MASTER_KEY`（32 字节，环境变量 / Docker secret）。用它 AES-GCM 加密：AI API Key、Telegram Bot Token、全局 anytls 密码（§10.1）、订阅模板中的敏感段。（2026-09-15：不再加密任何 SSH 凭据——Web 终端已改走 agent 本地 PTY，见 §11。）
 - 未设置主密钥时，服务端**拒绝启动**并打印生成命令（不静默降级为明文）。**（实现修订 2026-09-15：镜像入口脚本 `deploy/docker-entrypoint.sh` 在「未设置」时先行兜底，优先级 env > `FOBE_MASTER_KEY_FILE` > 生成随机 32 字节落盘到数据卷 `/data/.master_key`（0600，重启复用）。服务端的 fail-closed 语义不变——生成失败（如 `/data` 不可写）容器直接退出，绝无明文回退；admin CLI 跳过密钥解析，逃生口永不被堵。代价是密钥与密文同卷，见 §20.12；要分开就显式设置 `FOBE_MASTER_KEY`。）**
 - 所有审计写 `audit_logs`：谁、何时、对哪个节点、什么动作、命令原文、来源 IP。
 
@@ -247,7 +247,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `users` | id, password_hash | 单行 |
 | `sessions` | id, created_at, last_seen, ua, ip, revoked | 可批量吊销 |
 | `ip_blacklist` | ip, reason, fail_count, created_at, expires_at | 持久化 |
-| `settings` | key, value, encrypted | 全局 anytls 密码、AI 配置、Telegram、保留期、延迟测量频率（`latency.interval_seconds`，默认 5）等 |
+| `settings` | key, value, encrypted | 全局 anytls 密码（服务端自动生成，§10.1）、AI 配置、Telegram、保留期、延迟测量频率（`latency.interval_seconds`，默认 5）等 |
 | `reg_tokens` | token_hash, note, expires_at, used_at | 单次 |
 | `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, distro_id, distro_version, cpu_cores, primary_ip, country_code, sub_name, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表；`tz` 与发行版（os-release 自动探测，§16）由 agent 上报，只读；`sub_name` 是 §10.2 的订阅展示名 |
 | `node_ips` | node_id, ip, family, scope, is_primary, manual_primary | 多 IP 全量上报 |
@@ -368,7 +368,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 服务端为每个节点生成完整 `config.json`（inbound + log + 必要的出站），存 `config_hash`；面板改任何参数 → hash 变化 → 下发 → agent 应用。
 
-> **实现修订 2026-09-16（生成的配置要能自己追上新模板）**：每台被管理的节点，其 `config.json` 只在**变更时**生成一次，然后作为 `singbox_config:<node_id>` 缓存在设置里，之后没有任何东西重新推导它。生成器稳定时这没问题，但**生成器本身改了**（§9.4 那次：地址式 DNS 段必须去掉）就出问题了——存量节点会永远收到那份陈旧字节，而 agent 只比 hash（磁盘 == 期望）所以没有任何理由重写文件，**唯一出路是操作员再点一次"安装"**。因此服务端启动时多一步 `SyncSingboxConfigs()`：遍历所有 `desired_version` 非空的节点，用当前模板重新生成，**只有字节不同才**写回 setting + 刷新 `config_hash` + 下发（写 `audit_logs`，actor=system）；幂等，普通重启一个字节都不动。没有 `anytls_password` 或端口非法（未分配/越界）的节点跳过并记 WARN——那不是这一趟的事。
+> **实现修订 2026-09-16（生成的配置要能自己追上新模板）**：每台被管理的节点，其 `config.json` 只在**变更时**生成一次，然后作为 `singbox_config:<node_id>` 缓存在设置里，之后没有任何东西重新推导它。生成器稳定时这没问题，但**生成器本身改了**（§9.4 那次：地址式 DNS 段必须去掉）就出问题了——存量节点会永远收到那份陈旧字节，而 agent 只比 hash（磁盘 == 期望）所以没有任何理由重写文件，**唯一出路是操作员再点一次"安装"**。因此服务端启动时多一步 `SyncSingboxConfigs()`：遍历所有 `desired_version` 非空的节点，用当前模板重新生成，**只有字节不同才**写回 setting + 刷新 `config_hash` + 下发（写 `audit_logs`，actor=system）；幂等，普通重启一个字节都不动。端口非法（未分配/越界）的节点跳过并记 WARN——那不是这一趟的事；密码缺失也不再是跳过理由（没有就现生成，见 §10.1 实现修订）。
 
 ### 9.2 安装/更新三道闸门
 
@@ -432,7 +432,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - **私钥永不离开探针**：首次启用时由 agent 用 Go 标准库 `crypto/x509` 现场生成自签证书（不依赖 openssl——OpenWrt 常常没有），存 `/etc/one-sing/cert/{cert.crt,private.key}`（0600）。密钥算法保持 ECDSA P-256（而非 one-sing.sh 的 RSA-4096）：探针是小机器、密钥在设备上现场生成，而客户端是按 SHA256 指纹 pinning 的，算法对客户端不可见。
 - agent 上报**证书 PEM + SHA256 指纹 + 有效期**给面板（不含私钥）。
 - 订阅渲染时把证书 PEM 写进客户端的 `tls.certificate` 字段做 **pinning**，而不是让客户端 `insecure: true`。这样自签也不会被中间人。
-- 入站口令 = `settings.anytls_password`（全局共享，见 §11.3 的取舍）。
+- 入站口令 = `settings.anytls_password`（全局共享 + 服务端自动生成，见 §10.1 的取舍与修订）。
 - 端口：默认随机高位端口（10000-60000），面板可改；改端口时 agent 尝试自动放行防火墙（ufw / firewalld / nft / OpenWrt fw4），失败则返回需要你手动执行的命令原文。
 
 ### 9.4 sing-box 入站模板（生成物示意）
@@ -557,12 +557,20 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 所有订阅共用一个 anytls 密码 → **订阅 token 只能吊销 URL，吊销不了代理访问**。真泄密时的补救链路是：
 
 ```
-面板「轮换代理密码」→ 更新 settings → 批量下发所有节点 desired state
+面板（AI 工具 `set_anytls_password`，留空即重新生成）→ 更新 settings → 批量下发所有节点 desired state
                     → agent 重载 sing-box（不断开现有连接，新连接用新密码）
                     → 重新渲染所有订阅 → 客户端重新拉订阅
 ```
 
 面板必须在轮换对话框里写明："此操作会要求所有客户端重新拉取订阅，旧密码立即失效"。建议也顺手实现"节点级密码覆盖"字段，方便你以后想隔离时不必重构数据模型（v1 UI 可以先不暴露）。
+
+> **实现修订 2026-09-16（密码改由服务端生成，取消操作员输入）**：这个凭据过去要人手填——不填，面板就拒绝在任何节点上安装 sing-box（`anytls_password_unset`），设置页的「代理」卡片是唯一的输入口与轮换口。但它的消费者全是机器产物（下发给 agent 的 `config.json`、客户端拉取的订阅），**没有任何一条路径需要人读出它**，于是要求操作员自己发明、记住并保管一个密码纯属净负担。现在服务端全权持有：
+> - **生成时机 = 使用时机**：安装/改端口、渲染订阅、启动时发现已有被管理节点（`SyncSingboxConfigs`），三处任一处发现没配就现生成一份。全新实例若从不碰 sing-box，则**不会**凭空多出一个凭据。
+> - **形态**：16 位 `[A-Za-z0-9]`（≈95 bit）。选这个字符集不只是为了够随机——同一个串要原样走进 JSON 字段、第三方客户端的 URI auth 位与 Clash YAML 标量，字母数字是唯一在三种上下文里都不需要转义的集合。用拒绝采样而非 `%` 取模（62 不整除 256，取模会让字母表前 8 个字符偏多）。
+> - **落库与留痕**：AES-GCM 密文存 `settings.anytls_password`（§4.4），生成时写一条 `audit_logs`（actor=`system`、action=`anytls_password_generated`、command=`[redacted]`，值永不入审计/日志）。
+> - **代价一（可见性）**：面板**没有**任何地方回显这个密码，设置页的输入卡片随之删除（连同 `sec_proxy` 与「代理」相关文案）。要用它手配客户端，就从订阅渲染结果里取。订阅页留了一行说明"密码由面板自动生成、无需配置"，否则"哪儿能改密码"会变成一个必然会被问到的问题。
+> - **代价二（轮换入口变了）**：§10.1 的补救链路仍然成立，但触发点从设置页换成 **AI 工具 `set_anytls_password`（`password` 可留空 = 重新随机生成，属 §12.3 元操作、强制确认）** 与 **`PUT /api/settings`（`{"anytls_password":""}` 亦表示重新生成）**；两者都会立刻重推所有已启用 sing-box 的节点（不再是"等到下次重启才由 `SyncSingboxConfigs` 补上"）。**这张取舍本身没变**：全局共享仍意味着无法按订阅吊销代理访问。
+> - **不变量（别把它改回去）**：密文存在但**解不开**（换过主密钥、恢复了旧库）时**绝不当作"未配置"**去生成新密码——那等于在操作员正在处理密钥事故时静默轮换，把还能用旧密码的客户端全部打断。此时安装/配置同步直接失败并保留原值（与服务端缺主密钥时拒绝启动同一种态度）。
 
 ### 10.2 入口（entry）：中转拓扑与订阅命名（2026-09-16c 新增）
 
@@ -624,7 +632,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 | `get_singbox_status` / `tail_logs` | 只读 | 需显式开关日志 |
 | `restart_singbox` / `stop_singbox` / `start_singbox` | 变更 | 走同一闸门 |
 | `install_singbox` / `update_singbox` | 变更 | 指定版本 |
-| `set_singbox_port` / `set_anytls_password` | 变更 | 影响面大 |
+| `set_singbox_port` / `set_anytls_password` | 变更（后者 `password` 留空 = 重新随机生成） | 影响面大 |
 | `run_shell` | 变更 | 裸 shell |
 
 **不在工具集里**：§9.5 的服务端产物缓存与**一键批量更新**接口（`/api/singbox/cache*`、`/api/singbox/update*`、`DELETE /api/singbox/versions/{version}`）。它们影响面覆盖全部节点、且会写服务端缓存，不适合落进"默认放行"的执行路径；单节点更新仍走上面的 `update_singbox`（需显式版本）。
@@ -853,7 +861,7 @@ services:
 6. **接入层完全外部化**：fobe 不碰 nginx、不签发也不续期证书；README 提供可直接复制的 nginx 配置（单上游 + WS 升级 + 真实 IP + 超时 + 上传体量）。
 7. 证书 pinning 替代 `insecure`：订阅里内嵌证书 PEM。
 8. 日志默认**不进** AI 上下文，需手动开关。
-9. 节点级 anytls 密码覆盖字段：**数据模型预留**，v1 UI 不暴露。
+9. 节点级 anytls 密码覆盖字段：**数据模型预留**，v1 UI 不暴露。（2026-09-16：全局密码改由服务端自动生成、面板不再有密码输入口，见 §10.1 实现修订；覆盖字段的用途不变。）
 10. v1 不做 TOTP（按你的选择），但 `users` 表预留 `totp_secret` 字段。
 11. 首次启动密码：未设置 `FOBE_ADMIN_PASSWORD` 时生成一次性初始密码并打印到服务端日志，登录后强制修改；忘记密码用 `fobe-server admin reset-password`。**（实现修订 2026-09-14：`FOBE_ADMIN_PASSWORD` 从"仅首次生效"升级为密码准绳——每次启动都同步为该值，变更时吊销全部旧会话；不设置则不动现有密码。）**
 12. 前端形态：**React + TS + Vite**；生产镜像内置编译产物，本地开发用 Vite dev server + `go run`（`FOBE_WEB_DIR` 为空时 server 进 API-only 模式）。
@@ -865,7 +873,7 @@ services:
 
 1. ⚠ **AI 默认放行 → 间接提示注入可静默执行任意 root 命令**（§12.4）。缓解路径已设计，改一个配置项即可收紧。
 2. ⚠ **登录面只有密码 + IP 黑名单**，无第二因子。黑名单依赖你自备的 nginx 正确传递 XFF、且 `FOBE_TRUSTED_PROXIES` 与实际拓扑一致；**接 CDN 后忘记同步回源网段 = 要么封不到人，要么把真实用户全封了**。
-3. ⚠ **共享 anytls 密码**：无法按订阅吊销代理访问，泄漏只能全局轮换（会打断所有客户端）。
+3. ⚠ **共享 anytls 密码**：无法按订阅吊销代理访问，泄漏只能全局轮换（会打断所有客户端）。（2026-09-16 修订：密码由服务端自动生成、面板不提供输入框也不回显；轮换入口是 AI 工具 `set_anytls_password`（留空=重新生成）与 `PUT /api/settings`。）
 4. ⚠ **指标只存 7 天**：7 天以外的曲线不可得（月曲线依赖永久日表，可信；但"上月某天下午的 CPU"查不到）。
 5. ⚠ **不做自动停服**：配额超标不会自动止损，完全依赖告警通道可达。
 6. ⚠ **agent 自更新不留 `.prev`**（§5.5）：没有本地回滚。旁路自检把"坏产物"挡在提交之前，但**自检过、`-run` 起不来**（只有 run 路径才用到的内核特性/配置）这种残余情形只能 SSH 上去跑面板给的重装命令。你选了省下 OpenWrt overlay 上的 10MB，代价就在这里。
