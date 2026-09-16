@@ -41,7 +41,6 @@ const PROXY_KEYS = ['anytls_password'] as const;
 /** §14.1 database refresh policy; the database itself has its own endpoints. */
 const GEOIP_KEYS = ['geoip.auto_update', 'geoip.max_age_days', 'geoip.url'] as const;
 const AGENT_KEYS = ['agent.auto_update'] as const;
-const LATENCY_KEYS = ['latency.interval_seconds'] as const;
 
 function isHTTPURL(value: string): boolean {
   try {
@@ -99,7 +98,6 @@ export default function Settings() {
     for (const k of keys) {
       const v = draft[k];
       if (v !== undefined && v.trim() !== '') payload[k] = v.trim();
-      if (k === 'latency.interval_seconds' && v === undefined && !settings[k]?.value) payload[k] = '5';
     }
     // geoip.url is the one field where empty is meaningful: it means "go back
     // to the built-in mirror chain", so clearing it must reach the server even
@@ -225,15 +223,6 @@ export default function Settings() {
           {field('anytls_password', t('anytls_password'), { password: true })}
         </div>
         <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(PROXY_KEYS)} label={t('save')} />
-      </section>
-
-      <section className="card">
-        <h3>{t('sec_latency')}</h3>
-        <p className="hint">{t('latency_interval_hint')}</p>
-        <div className="form-grid">
-          {field('latency.interval_seconds', t('latency_interval_seconds'), { type: 'number', defaultValue: '5' })}
-        </div>
-        <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(LATENCY_KEYS)} label={t('save')} />
       </section>
 
       <SingboxCacheCard />

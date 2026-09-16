@@ -101,7 +101,7 @@ const zh = {
 
   // nav
   nav_overview: '概览',
-  nav_targets: '延迟目标',
+  nav_targets: '延迟测量',
   nav_alerts: '告警',
   nav_settings: '设置',
   nav_subs: '订阅',
@@ -302,8 +302,8 @@ const zh = {
   delete_node_done: '节点已删除',
 
   // targets
-  targets_title: '延迟目标',
-  targets_desc: '探针将周期性测量这些目标的延迟(ICMP / TCP 握手)。',
+  targets_title: '延迟测量',
+  targets_desc: '探针按下方测量频率周期性测量这些目标的延迟(ICMP / TCP 握手)。',
   target_new: '新增目标',
   target_kind: '类型',
   target_host: '主机 / 地址',
@@ -747,7 +747,7 @@ const en: Record<DictKey, string> = {
   cp_submit: 'Save new password',
 
   nav_overview: 'Overview',
-  nav_targets: 'Latency targets',
+  nav_targets: 'Latency measurement',
   nav_alerts: 'Alerts',
   nav_settings: 'Settings',
   nav_subs: 'Subscriptions',
@@ -945,8 +945,8 @@ const en: Record<DictKey, string> = {
   singbox: 'sing-box',
   delete_node_done: 'Node deleted',
 
-  targets_title: 'Latency targets',
-  targets_desc: 'Probes periodically measure latency towards these targets (ICMP / TCP handshake).',
+  targets_title: 'Latency measurement',
+  targets_desc: 'Probes measure latency towards these targets at the frequency configured below (ICMP / TCP handshake).',
   target_new: 'New target',
   target_kind: 'Kind',
   target_host: 'Host / address',

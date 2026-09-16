@@ -2,9 +2,18 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
-import type { LatencyTarget } from '../types';
+import type { LatencyTarget, SettingView } from '../types';
 import Modal from '../components/Modal';
+import { SaveRow, useField } from '../components/SettingsForm';
 
+/**
+ * Settings → 延迟测量 (design §16 实现修订 2026-09-16): the target list plus the
+ * global measurement cadence (`latency.interval_seconds`), which used to sit on
+ * the basic settings page. Both halves of "how latency is measured" — how often
+ * and towards what — now live on one page. The frequency card owns its own
+ * settings state (the page is a route child of Settings, so it cannot borrow
+ * the parent's draft map).
+ */
 export default function Targets() {
   const { t } = useI18n();
   const [targets, setTargets] = useState<LatencyTarget[] | null>(null);
@@ -65,11 +74,15 @@ export default function Targets() {
   };
 
   return (
-    <div>
+    // stack-lg: the page stacks three cards now (frequency / new target / list);
+    // outside a spacing container they would sit flush against one another.
+    <div className="stack-lg">
       <div className="page-head">
         <h2>{t('targets_title')}</h2>
       </div>
       <p className="hint">{t('targets_desc')}</p>
+
+      <LatencyFrequencyCard />
 
       <form className="card target-form" onSubmit={create}>
         <h3>{t('target_new')}</h3>
@@ -165,5 +178,75 @@ export default function Targets() {
         </Modal>
       )}
     </div>
+  );
+}
+
+/**
+ * Global probe cadence (§16, `latency.interval_seconds`, 1–3600s, default 5).
+ * Saving syncs online probes through the `latency_config` frame; the validation
+ * itself lives on the server (`err_bad_latency_interval`), so the field stays a
+ * plain number input.
+ */
+function LatencyFrequencyCard() {
+  const { t } = useI18n();
+  const [settings, setSettings] = useState<Record<string, SettingView>>({});
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.getSettings();
+      const map: Record<string, SettingView> = {};
+      for (const s of r.settings ?? []) map[s.key] = s;
+      setSettings(map);
+      setDraft({});
+      setErr(null);
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const field = useField({ settings, draft, setDraft });
+
+  const save = async () => {
+    if (busy) return;
+    const v = draft['latency.interval_seconds'];
+    const payload: Record<string, string> = {};
+    if (v !== undefined && v.trim() !== '') payload['latency.interval_seconds'] = v.trim();
+    // A cleared field with nothing stored yet must still land the default:
+    // sending nothing would leave the key absent and the agent on its built-in
+    // cadence without the operator ever seeing the value take effect.
+    else if (!settings['latency.interval_seconds']?.value) payload['latency.interval_seconds'] = '5';
+    if (Object.keys(payload).length === 0) return;
+    setBusy(true);
+    setSavedMsg(null);
+    try {
+      await api.putSettings(payload);
+      await load();
+      setSavedMsg(t('settings_saved'));
+      window.setTimeout(() => setSavedMsg(null), 3000);
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="card">
+      <h3>{t('sec_latency')}</h3>
+      <p className="hint">{t('latency_interval_hint')}</p>
+      {err && <div className="form-error">{err}</div>}
+      <div className="form-grid">
+        {field('latency.interval_seconds', t('latency_interval_seconds'), { type: 'number', defaultValue: '5' })}
+      </div>
+      <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void save()} label={t('save')} />
+    </section>
   );
 }
