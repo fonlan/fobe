@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/fonlan/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/server/geoip"
 	"github.com/fonlan/fobe/internal/server/hub"
 	"github.com/fonlan/fobe/internal/server/security"
 	"github.com/fonlan/fobe/internal/server/store"
@@ -23,6 +24,14 @@ import (
 )
 
 func newTestServer(t *testing.T) (*httptest.Server, *Server) {
+	t.Helper()
+	return newTestServerGeo(t, nil)
+}
+
+// newTestServerGeo is newTestServer with a §14 resolver installed in the hub:
+// country judgement lives there (primary address first, then the node's public
+// addresses), so a test that cares about the flag must stub the hub.
+func newTestServerGeo(t *testing.T, geo geoip.Resolver) (*httptest.Server, *Server) {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "test.db"))
@@ -47,7 +56,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *Server) {
 		t.Fatal(err)
 	}
 	log := testLogger()
-	h := hub.New(st, trust, log)
+	h := hub.New(st, trust, log, geo)
 	api := NewServer(st, h, trust, crypt, log)
 	srv := httptest.NewServer(api.Handler())
 	t.Cleanup(srv.Close)
@@ -510,14 +519,31 @@ func statusCode(r *http.Response) int {
 	return r.StatusCode
 }
 
-// stubResolver stands in for the §14 geoip chain; tests flip code/ok to
-// simulate a lookup hit or miss.
-type stubResolver struct {
-	code string
-	ok   bool
+// mapResolver stands in for the §14 geoip chain: it answers per address the way
+// a real database does, so a test can make the primary address unresolvable
+// while the node's public address still resolves.
+type mapResolver map[string]string
+
+func (m mapResolver) Country(ip string) (string, bool) {
+	code, ok := m[ip]
+	return code, ok
 }
 
-func (s stubResolver) Country(string) (string, bool) { return s.code, s.ok }
+// methodJSON is the PATCH/PUT common case: cookie-authenticated JSON in, JSON
+// out.
+func methodJSON(t *testing.T, method, url, cookie string, body any) (*http.Response, map[string]any) {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	req, _ := http.NewRequest(method, url, bytes.NewReader(raw))
+	req.Header.Set("Cookie", cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp, out
+}
 
 func patchJSON(t *testing.T, url, cookie string, body any) (*http.Response, map[string]any) {
 	t.Helper()
@@ -537,7 +563,8 @@ func patchJSON(t *testing.T, url, cookie string, body any) (*http.Response, map[
 // code, the pin surviving a primary-IP re-pin, rejection of malformed codes,
 // and clearing back to auto (re-derived immediately from the current IP).
 func TestNodeCountryOverride(t *testing.T) {
-	srv, api := newTestServer(t)
+	stub := mapResolver{}
+	srv, api := newTestServerGeo(t, stub)
 
 	resp, _ := postJSON(t, &http.Client{}, srv.URL+"/api/login", map[string]string{"password": "test-password-123"})
 	cookie := ""
@@ -604,7 +631,7 @@ func TestNodeCountryOverride(t *testing.T) {
 	}
 
 	// clear: manual off, immediately re-derived from the current primary IP
-	api.GeoIPResolver = stubResolver{code: "SG", ok: true}
+	stub["203.0.113.7"] = "SG"
 	if r, out := patchJSON(t, srv.URL+"/api/nodes/"+nodeID, cookie, map[string]string{"country_code": ""}); r.StatusCode != 200 {
 		t.Fatalf("clear country: %d %v", r.StatusCode, out)
 	}
@@ -613,11 +640,79 @@ func TestNodeCountryOverride(t *testing.T) {
 	}
 
 	// a lookup miss on the next clear keeps the last known value
-	api.GeoIPResolver = stubResolver{code: "", ok: false}
+	delete(stub, "203.0.113.7")
 	if r, out := patchJSON(t, srv.URL+"/api/nodes/"+nodeID, cookie, map[string]string{"country_code": ""}); r.StatusCode != 200 {
 		t.Fatalf("clear again: %d %v", r.StatusCode, out)
 	}
 	if cc, manual := getNode(); cc != "SG" || manual {
 		t.Fatalf("after clear+miss: cc=%q manual=%v, want SG/false", cc, manual)
+	}
+}
+
+// TestNodeCountryFollowsPrimaryIP covers the §14 实现修订 2026-09-16b wiring: the
+// panel hands the derivation to the hub, so re-pointing the primary address
+// re-derives the flag at once, and a LAN pick — which no database can resolve —
+// still shows the country of the node's reported public address.
+func TestNodeCountryFollowsPrimaryIP(t *testing.T) {
+	stub := mapResolver{"203.0.113.9": "JP"}
+	srv, api := newTestServerGeo(t, stub)
+	cookie := loginCookie(t, srv.URL)
+
+	token := freshToken(t, srv, cookie, "primary-flag-node")
+	_, reg := postJSON(t, &http.Client{}, srv.URL+"/api/agent/register", map[string]any{
+		"token": token, "machine_id": "m-primary-flag", "hostname": "primaryflag",
+		"os": "linux", "arch": "amd64", "version": "dev", "tz": "UTC", "cpu_cores": 1,
+	})
+	nodeID, _ := reg["node_id"].(string)
+	if nodeID == "" {
+		t.Fatalf("register failed: %v", reg)
+	}
+	if err := api.Store.ReplaceNodeIPs(nodeID, []store.IPRow{
+		{IP: "203.0.113.9", Family: 4, Scope: "public"},
+		{IP: "192.168.123.7", Family: 4, Scope: "private", IsPrimary: true},
+	}); err != nil {
+		t.Fatalf("seed ips: %v", err)
+	}
+
+	country := func() (string, bool) {
+		n, err := api.Store.GetNode(nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n.CountryCode, n.CountryManual
+	}
+
+	// pin the LAN address (the reachable one the operator wants in the list):
+	// the primary address resolves to nothing, so the flag comes from the public
+	// address the probe reports
+	if r, out := methodJSON(t, "PUT", srv.URL+"/api/nodes/"+nodeID+"/primary-ip", cookie,
+		map[string]string{"ip": "192.168.123.7"}); r.StatusCode != 200 {
+		t.Fatalf("set primary: %d %v", r.StatusCode, out)
+	}
+	if cc, manual := country(); cc != "JP" || manual {
+		t.Fatalf("after LAN primary: cc=%q manual=%v, want JP/false", cc, manual)
+	}
+
+	// re-point to the public address: the flag follows immediately
+	if r, out := methodJSON(t, "PUT", srv.URL+"/api/nodes/"+nodeID+"/primary-ip", cookie,
+		map[string]string{"ip": "203.0.113.9"}); r.StatusCode != 200 {
+		t.Fatalf("set primary back: %d %v", r.StatusCode, out)
+	}
+	if cc, _ := country(); cc != "JP" {
+		t.Fatalf("after public primary: cc=%q, want JP", cc)
+	}
+
+	// a pinned country stops following the address, and clearing the pin hands
+	// the flag back to the address — with no database entry left the stored code
+	// survives the miss instead of blanking the flag
+	if r, out := patchJSON(t, srv.URL+"/api/nodes/"+nodeID, cookie, map[string]string{"country_code": "HK"}); r.StatusCode != 200 {
+		t.Fatalf("pin: %d %v", r.StatusCode, out)
+	}
+	delete(stub, "203.0.113.9")
+	if r, out := patchJSON(t, srv.URL+"/api/nodes/"+nodeID, cookie, map[string]string{"country_code": ""}); r.StatusCode != 200 {
+		t.Fatalf("clear: %d %v", r.StatusCode, out)
+	}
+	if cc, manual := country(); cc != "HK" || manual {
+		t.Fatalf("after clear with a miss: cc=%q manual=%v, want HK/false (kept)", cc, manual)
 	}
 }

@@ -687,6 +687,12 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - 国旗 = ISO 3166-1 alpha-2 → emoji/图标资源（前端内置，不依赖 CDN）。
 - 主 IP 选择：默认第一个公网 IPv4，否则第一个公网 IPv6；面板可手动指定（`node_ips.is_primary` + `manual_primary`），订阅渲染使用主 IP（或你填的域名）。**手动主 IP 的口径（修订 2026-09-15）**：`nodes.primary_ip` 是列表/卡片/订阅实际读取的字段，手动选择必须落在它上面——`ReplaceNodeIPs` 在每次全量上报时若手动选择仍在上报集内，就把 `nodes.primary_ip` 同步写回该地址（同事务）；hub 只在当前 primary 为空或不在上报集内时才重新指认（含 agent 未标 primary 的回退分支）。此前实现只在 `node_ips` 里保住标志、不同步 `nodes.primary_ip`，被旧版覆盖逻辑带偏的值（仍在上报集内）永远不会自愈，表现为列表一直显示 agent 自选地址。
 - **手动国旗（修订 2026-09-16）**：geoip 对 CDN/中转/隧道后的机器经常判错，且主 IP 一变（换网、手动换主 IP）旗子就跟着错，所以国旗要能手动改。编辑服务器页新增「国家 / 地区」字段，走 `PATCH /api/nodes/{id}` 的 `country_code`：填两位字母即钉住（`nodes.country_manual=1`，镜像 `manual_primary` 的先例），此后主 IP 变化/重新指认**不再**回退为 IP 库结果——`countryFor` 遇 manual 直接短路，且 `SetNodePrimaryIP` 在 SQL 里 `CASE WHEN country_manual=1` 保留原值，"手动优先"是行本身的性质，不依赖每个调用方记得判；清空提交即取消钉住并**当场**用当前主 IP 重查一次（`GeoIPResolver` 未命中则保留现值），"回到自动"不用等下次 IP 变化。校验只认 `[A-Z]{2}`，其余回 `invalid_country_code`。schema 加列 `nodes.country_manual`（SchemaVersion 2→3）。
+- **国旗跟随主 IP 的口径（实现修订 2026-09-16b）**：国别判定原本只在 `onState` 的「重新指认主 IP」那一个分支里做，另外三条路径全是哑的，于是"根据主 IP 判国旗"最常见的表现就是**永远一个灰点**：
+  1. **hello 路径从不解析国别**（直接把 `n.CountryCode` 原样写回），而探针的 `primary_ip` 常常正是被首次 hello 写下的；此后每条 state 都命中「主 IP 已在上报集内」的守卫，再也不会重算 ⇒ 新装的探针一辈子没有旗子。
+  2. **手动主 IP**（`PUT /api/nodes/{id}/primary-ip` → `SetManualPrimary`）只改地址，不重算国别。
+  3. **查不到就保留旧值**的规则（本身是对的：数据库缺失不该抹掉旗子）叠加上面两条，就变成"主 IP 换成内网地址后旗子还留着上一个地址的国别"。
+  现在：hello 与 state **共用 `hub.recordIPs`**（一份「地址集入库 + 主 IP 指认 + 国别判定」的代码，两条路径不可能再走偏）；国别**每次上报都重算**（命中才写、未命中保留旧值，因此写放大被 `code == 已存值` 挡掉）；判定顺序 = **主 IP → 上报集里的公网地址（IPv4 优先，再 IPv6）**——这是操作者把主 IP 手动选成 `192.168.123.x` 这类内网地址（想显示可直连地址）时仍能出旗的原因，纯内网、又不带任何公网地址的探针仍然只能靠手动钉。`country_manual=1` 照旧短路一切重算。面板侧两处同步：手动主 IP 与「清空国家」都立刻调 `hub.RefreshCountry`（不等下一次最长 5 分钟的 state）；编辑页**只在操作者真的动过国家输入框时**才提交 `country_code`，否则保存任何其它字段都会把自动识别到的值静默钉住（此前 3 台节点全被这么钉成了手动，自动识别就此"失效"）。
+
 
 ### 14.1 数据库的自动下载与更新（实现修订 2026-09-15）
 

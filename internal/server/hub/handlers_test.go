@@ -308,3 +308,103 @@ func TestBuildDesiredStateDeclaresRemoval(t *testing.T) {
 		t.Fatalf("install declaration wrong: %+v", desired.Singbox)
 	}
 }
+
+// --- §14 country judgement (实现修订 2026-09-16b) ------------------------------
+
+// stubCountry answers for the addresses it knows; everything else misses, the
+// way a real GeoLite2 database has no entry for LAN ranges.
+type stubCountry map[string]string
+
+func (s stubCountry) Country(ip string) (string, bool) {
+	code, ok := s[ip]
+	return code, ok
+}
+
+func nodeCountry(t *testing.T, h *Hub, id string) (primary, country string) {
+	t.Helper()
+	n, err := h.store.GetNode(id)
+	if err != nil {
+		t.Fatalf("get node %s: %v", id, err)
+	}
+	return n.PrimaryIP, n.CountryCode
+}
+
+// TestOnHelloDerivesCountry pins the regression this revision fixes: hello used
+// to store the primary address without resolving its country, and the re-pin
+// guard then treated that address as "already correct" forever — a freshly
+// registered probe kept an empty (gray dot) flag for its whole life.
+func TestOnHelloDerivesCountry(t *testing.T) {
+	h := newTestHub(t)
+	h.geo = stubCountry{"203.0.113.7": "JP"}
+	mustCreateNode(t, h.store, "n1")
+
+	h.onHello(&Conn{nodeID: "n1"}, &protocol.Hello{IPs: []protocol.IPInfo{
+		{IP: "203.0.113.7", Family: 4, Scope: "public", IsPrimary: true},
+		{IP: "192.168.1.9", Family: 4, Scope: "private"},
+	}})
+
+	if primary, country := nodeCountry(t, h, "n1"); primary != "203.0.113.7" || country != "JP" {
+		t.Fatalf("after hello: primary=%q country=%q, want 203.0.113.7/JP", primary, country)
+	}
+
+	// the same report again (state frames repeat it): nothing drifts, and the
+	// country survives an idempotent re-report
+	h.recordIPs("n1", []protocol.IPInfo{
+		{IP: "203.0.113.7", Family: 4, Scope: "public", IsPrimary: true},
+		{IP: "192.168.1.9", Family: 4, Scope: "private"},
+	})
+	if primary, country := nodeCountry(t, h, "n1"); primary != "203.0.113.7" || country != "JP" {
+		t.Fatalf("after re-report: primary=%q country=%q, want 203.0.113.7/JP", primary, country)
+	}
+}
+
+// TestRecordIPsCountryFallback covers the rest of the §14 rule: an operator's
+// LAN primary pick (the reachable address, and the one they want in the list)
+// can never carry a country, so the flag falls back to the node's public
+// address; a manual pin outranks both, and a total miss must not wipe what is
+// stored.
+func TestRecordIPsCountryFallback(t *testing.T) {
+	h := newTestHub(t)
+	h.geo = stubCountry{"220.184.188.126": "CN", "240e:390:2c7:d0a0::1": "CN"}
+	mustCreateNode(t, h.store, "n1")
+
+	lanFirst := []protocol.IPInfo{
+		{IP: "220.184.188.126", Family: 4, Scope: "public"},
+		{IP: "240e:390:2c7:d0a0::1", Family: 6, Scope: "public"},
+		{IP: "192.168.123.2", Family: 4, Scope: "private", IsPrimary: true},
+	}
+	h.recordIPs("n1", lanFirst)
+	if primary, country := nodeCountry(t, h, "n1"); primary != "192.168.123.2" || country != "CN" {
+		t.Fatalf("fallback: primary=%q country=%q, want 192.168.123.2/CN", primary, country)
+	}
+
+	// the operator pins a flag: re-reports must not touch it
+	if err := h.store.SetNodeCountry("n1", "HK", true); err != nil {
+		t.Fatalf("pin country: %v", err)
+	}
+	h.recordIPs("n1", lanFirst)
+	if _, country := nodeCountry(t, h, "n1"); country != "HK" {
+		t.Fatalf("pinned country overwritten: %q, want HK", country)
+	}
+
+	// a manual primary re-point re-derives at once (the panel calls this)
+	if err := h.store.SetNodeCountry("n1", "HK", false); err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	if err := h.store.SetManualPrimary("n1", "220.184.188.126"); err != nil {
+		t.Fatalf("manual primary: %v", err)
+	}
+	h.RefreshCountry("n1")
+	if primary, country := nodeCountry(t, h, "n1"); primary != "220.184.188.126" || country != "CN" {
+		t.Fatalf("after manual re-point: primary=%q country=%q, want 220.184.188.126/CN", primary, country)
+	}
+
+	// nothing resolves any more: the primary follows the report to the only
+	// address left, and the stored code survives (a missing database must never
+	// blank the flag)
+	h.geo = stubCountry{}
+	h.recordIPs("n1", []protocol.IPInfo{{IP: "192.168.123.2", Family: 4, Scope: "private", IsPrimary: true}})
+	if primary, country := nodeCountry(t, h, "n1"); primary != "192.168.123.2" || country != "CN" {
+		t.Fatalf("miss wiped state: primary=%q country=%q, want 192.168.123.2/CN", primary, country)
+	}
+}

@@ -38,22 +38,7 @@ func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 		h.agentUp.Reconcile(c.nodeID)
 	}
 	if len(hello.IPs) > 0 {
-		rows := make([]store.IPRow, 0, len(hello.IPs))
-		primary := ""
-		for _, ip := range hello.IPs {
-			rows = append(rows, store.IPRow{
-				IP: ip.IP, Family: ip.Family, Scope: ip.Scope, IsPrimary: ip.IsPrimary,
-			})
-			if ip.IsPrimary && primary == "" {
-				primary = ip.IP
-			}
-		}
-		_ = h.store.ReplaceNodeIPs(c.nodeID, rows)
-		if primary != "" {
-			if n, err := h.store.GetNode(c.nodeID); err == nil && (n.PrimaryIP == "" || !ipInRows(hello.IPs, n.PrimaryIP)) {
-				_ = h.store.SetNodePrimaryIP(c.nodeID, primary, n.CountryCode)
-			}
-		}
+		h.recordIPs(c.nodeID, hello.IPs)
 	}
 	h.replaceInterfaces(c.nodeID, hello.Interfaces)
 	_ = h.store.RecoverAlert("node_offline", c.nodeID)
@@ -209,35 +194,7 @@ func (h *Hub) onLatency(nodeID string, b *protocol.LatencyBatch) {
 
 func (h *Hub) onState(nodeID string, st *protocol.State) {
 	if len(st.IPs) > 0 {
-		rows := make([]store.IPRow, 0, len(st.IPs))
-		primary := ""
-		for _, ip := range st.IPs {
-			rows = append(rows, store.IPRow{
-				IP: ip.IP, Family: ip.Family, Scope: ip.Scope, IsPrimary: ip.IsPrimary,
-			})
-			if ip.IsPrimary && primary == "" {
-				primary = ip.IP
-			}
-		}
-		if err := h.store.ReplaceNodeIPs(nodeID, rows); err != nil {
-			h.log.Warn("replace node ips", "node", nodeID, "err", err)
-		}
-		// primary pinned server-side only when the agent didn't mark one; even
-		// then a still-reported primary (e.g. a §14 manual pick) is left alone —
-		// unconditionally re-pinning here would fight the store's manual-pick
-		// sync and flip the list column back and forth on every report.
-		if primary != "" {
-			if n, err := h.store.GetNode(nodeID); err == nil && (n.PrimaryIP == "" || !ipInRows(st.IPs, n.PrimaryIP)) {
-				_ = h.store.SetNodePrimaryIP(nodeID, primary, h.countryFor(n, primary))
-			}
-		} else if n, err := h.store.GetNode(nodeID); err == nil && (n.PrimaryIP == "" || !ipInRows(st.IPs, n.PrimaryIP)) {
-			for _, ip := range st.IPs {
-				if ip.Scope == "public" && ip.Family == 4 {
-					_ = h.store.SetNodePrimaryIP(nodeID, ip.IP, h.countryFor(n, ip.IP))
-					break
-				}
-			}
-		}
+		h.recordIPs(nodeID, st.IPs)
 	}
 	h.replaceInterfaces(nodeID, st.Interfaces)
 	if st.Singbox != nil {
@@ -247,6 +204,125 @@ func (h *Hub) onState(nodeID string, st *protocol.State) {
 	// inventory instead of wiping rows for rules that are still on the probe.
 	if st.Forwards != nil {
 		h.RecordForwardState(nodeID, st.Forwards)
+	}
+}
+
+// recordIPs stores one full address report and keeps nodes.primary_ip and
+// nodes.country_code in step with it (design §14). hello and state both funnel
+// through here on purpose: they used to carry copies of this logic, and the
+// hello copy resolved no country at all — so a probe whose primary_ip was first
+// written by its hello kept an empty flag forever, because the re-pin guard
+// skips exactly that state (the stored address is already the reported one).
+func (h *Hub) recordIPs(nodeID string, ips []protocol.IPInfo) {
+	rows := make([]store.IPRow, 0, len(ips))
+	primary := ""
+	for _, ip := range ips {
+		rows = append(rows, store.IPRow{
+			IP: ip.IP, Family: ip.Family, Scope: ip.Scope, IsPrimary: ip.IsPrimary,
+		})
+		if ip.IsPrimary && primary == "" {
+			primary = ip.IP
+		}
+	}
+	if err := h.store.ReplaceNodeIPs(nodeID, rows); err != nil {
+		h.log.Warn("replace node ips", "node", nodeID, "err", err)
+		return
+	}
+	if primary == "" {
+		// The agent marks a suggestion; without one (or from a build that did
+		// not), fall back to the first public IPv4 like the store's heuristic.
+		for _, ip := range ips {
+			if ip.Scope == "public" && ip.Family == 4 {
+				primary = ip.IP
+				break
+			}
+		}
+	}
+	n, err := h.store.GetNode(nodeID)
+	if err != nil {
+		return
+	}
+	// Re-pin only when the stored address is gone (or was never set). A §14
+	// manual pick that is still reported must survive: unconditional re-pinning
+	// would fight the store's manual-pick sync and flip the list column back to
+	// the agent's suggestion on every report.
+	if primary != "" && (n.PrimaryIP == "" || !ipInRows(ips, n.PrimaryIP)) {
+		code, _ := h.resolveCountry(n, ips, primary) // a miss keeps the stored code
+		if err := h.store.SetNodePrimaryIP(nodeID, primary, code); err != nil {
+			h.log.Warn("set node primary ip", "node", nodeID, "err", err)
+		}
+		n.PrimaryIP, n.CountryCode = primary, code
+	}
+	h.applyCountry(n, ips, n.PrimaryIP)
+}
+
+// RefreshCountry re-derives nodes.country_code from the addresses the node
+// currently reports (§14). The panel calls it after an operator action that
+// changes what the flag must follow — a manual primary pick, or clearing the pin
+// back to auto — so the flag lands at once instead of at the next state report
+// (up to 5 minutes).
+func (h *Hub) RefreshCountry(nodeID string) {
+	if h.geo == nil {
+		return
+	}
+	n, err := h.store.GetNode(nodeID)
+	if err != nil {
+		return
+	}
+	rows, err := h.store.ListNodeIPs(nodeID)
+	if err != nil {
+		return
+	}
+	ips := make([]protocol.IPInfo, 0, len(rows))
+	for _, r := range rows {
+		ips = append(ips, protocol.IPInfo{IP: r.IP, Family: r.Family, Scope: r.Scope, IsPrimary: r.IsPrimary})
+	}
+	h.applyCountry(n, ips, n.PrimaryIP)
+}
+
+// resolveCountry maps a node's addresses to a §14 country: the primary address
+// first, then the node's other public addresses (IPv4 before IPv6). The fallback
+// is what keeps a LAN primary pick harmless — a private address can never carry
+// a country, so judging the flag by the primary address alone left every NAT'd
+// probe blank. A manually pinned country short-circuits the lookup entirely;
+// ok=false means "nothing resolved, keep the stored code" so a missing or
+// unhelpful database never wipes a flag.
+func (h *Hub) resolveCountry(n *store.Node, ips []protocol.IPInfo, primary string) (string, bool) {
+	if h.geo == nil || n.CountryManual {
+		return n.CountryCode, false
+	}
+	if primary != "" {
+		if code, ok := h.geo.Country(primary); ok {
+			return code, true
+		}
+	}
+	for _, family := range []int{4, 6} {
+		for _, ip := range ips {
+			if ip.Scope != "public" || ip.Family != family || ip.IP == primary {
+				continue
+			}
+			if code, ok := h.geo.Country(ip.IP); ok {
+				return code, true
+			}
+		}
+	}
+	return n.CountryCode, false
+}
+
+// applyCountry writes the resolved country when it differs from the stored one.
+// It runs on every report rather than only when the primary address changes:
+// flags have to heal by themselves for rows whose primary_ip was stored without
+// a lookup (a hello before this revision, a manual primary pick).
+func (h *Hub) applyCountry(n *store.Node, ips []protocol.IPInfo, primary string) {
+	if h.geo == nil || n.CountryManual {
+		return
+	}
+	code, ok := h.resolveCountry(n, ips, primary)
+	if !ok || code == n.CountryCode {
+		return
+	}
+	if err := h.store.SetNodeCountry(n.ID, code, false); err != nil {
+		h.log.Warn("set node country", "node", n.ID, "err", err)
 	}
 }
 
@@ -302,21 +378,6 @@ func ipInRows(ips []protocol.IPInfo, want string) bool {
 		}
 	}
 	return false
-}
-
-// countryFor resolves the country of the node's primary IP (design §14):
-// local MMDB first, online fallback when configured. A nil resolver or a
-// lookup miss returns prev so an existing country_code survives. A §14
-// manually pinned country short-circuits the lookup entirely — the operator's
-// pick survives primary-IP changes until it is cleared from the edit page.
-func (h *Hub) countryFor(n *store.Node, ip string) string {
-	if n.CountryManual || h.geo == nil || ip == "" {
-		return n.CountryCode
-	}
-	if code, ok := h.geo.Country(ip); ok {
-		return code
-	}
-	return n.CountryCode
 }
 
 func (h *Hub) recordSingboxState(nodeID string, s *protocol.SingboxState) {

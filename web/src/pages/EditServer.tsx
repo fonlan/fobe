@@ -20,6 +20,7 @@ import type {
   SingboxStatus,
   SingboxVersion,
 } from '../types';
+import type { UpdateNodeBody } from '../api';
 import Flag from '../components/Flag';
 import Tile from '../components/Tile';
 
@@ -280,6 +281,13 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
   const [subName, setSubName] = useState(node.sub_name ?? '');
   const [note, setNote] = useState(node.note);
   const [country, setCountry] = useState(node.country_code);
+  /**
+   * §14: the field is pre-filled with the auto-detected flag, so sending it on
+   * every save would pin that value as soon as the operator touches anything
+   * else — and a pinned flag stops following the primary IP. Only an edit the
+   * operator actually made is submitted ('' = back to auto).
+   */
+  const [countryTouched, setCountryTouched] = useState(false);
   const [iface, setIface] = useState(net?.iface ?? '');
   const [mode, setMode] = useState<string>(net?.mode ?? 'both');
   const [quotaGb, setQuotaGb] = useState(
@@ -305,11 +313,10 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
     setMsg(null);
     const quotaBytes = quotaGb.trim() === '' ? null : Math.round(parseFloat(quotaGb) * 2 ** 30);
     try {
-      await api.updateNode(node.id, {
+      const body: UpdateNodeBody = {
         name,
         sub_name: subName.trim(),
         note,
-        country_code: country.trim().toUpperCase(),
         network: {
           iface: iface.trim(),
           mode,
@@ -325,7 +332,10 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
           next_due_at: nextDue.trim() === '' ? null : dateStrToUnix(nextDue),
           note: billingNote,
         },
-      });
+      };
+      // untouched → leave the flag alone (an absent field keeps auto/pin as is)
+      if (countryTouched) body.country_code = country.trim().toUpperCase();
+      await api.updateNode(node.id, body);
       setMsg(t('server_edit_saved'));
       onSaved();
     } catch (ex) {
@@ -356,7 +366,10 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
               value={country}
               maxLength={2}
               placeholder="HK"
-              onChange={(e) => setCountry(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))}
+              onChange={(e) => {
+                setCountry(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''));
+                setCountryTouched(true);
+              }}
             />
           </div>
           <small className="hint">

@@ -433,20 +433,31 @@ func isValidCountryCode(cc string) bool {
 
 // setNodeCountry applies one PATCH country_code value. Non-empty pins the
 // code (country_manual=1, hub stops re-deriving); empty clears the pin and
-// re-derives from the current primary IP best-effort so "回到自动" takes
-// effect immediately instead of waiting for the next IP change.
+// re-derives right away so "回到自动" takes effect without waiting for the next
+// state report. A resolution miss keeps the stored code.
 func (s *Server) setNodeCountry(id, cc string) error {
-	code := cc
-	if cc == "" {
-		if n, err := s.Store.GetNode(id); err == nil && n.PrimaryIP != "" && s.GeoIPResolver != nil {
-			if derived, ok := s.GeoIPResolver.Country(n.PrimaryIP); ok {
-				code = derived
-			} else {
-				code = n.CountryCode
-			}
-		}
+	if cc != "" {
+		return s.Store.SetNodeCountry(id, cc, true)
 	}
-	return s.Store.SetNodeCountry(id, code, cc != "")
+	n, err := s.Store.GetNode(id)
+	if err != nil {
+		return err
+	}
+	// Unpin first, keeping the current value: the pin is a property of the row,
+	// and the hub refuses to touch a pinned one.
+	if err := s.Store.SetNodeCountry(id, n.CountryCode, false); err != nil {
+		return err
+	}
+	s.refreshCountry(id)
+	return nil
+}
+
+// refreshCountry re-derives the §14 flag through the hub, which owns that rule
+// (primary address first, then the node's public addresses).
+func (s *Server) refreshCountry(id string) {
+	if s.Hub != nil {
+		s.Hub.RefreshCountry(id)
+	}
 }
 
 func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
@@ -666,6 +677,9 @@ func (s *Server) handleSetPrimaryIP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// §14: the flag follows the primary address, so re-point it now instead of
+	// leaving the old country on screen until the next state report.
+	s.refreshCountry(id)
 	s.Store.InsertAudit(&store.AuditEntry{Actor: "panel", NodeID: id, Action: "primary_ip_set", Command: ip, SourceIP: s.Trust.RealIP(r)})
 	s.publishEvent("node_updated", id)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
