@@ -1,7 +1,7 @@
 // Tests for design.md §10 实现修订 2026-09-16: the subscription URL stays
-// copyable (encrypted token next to the hash), {{rules}} is filled from the
-// per-format rules settings instead of being preserved verbatim, and the node
-// picker offers exactly the nodes that would render.
+// copyable (encrypted token next to the hash), and the node picker offers
+// exactly the nodes that would render. §10 实现修订 2026-09-16b (deleting the
+// {{rules}} placeholder) is covered at the bottom of this file.
 package httpapi
 
 import (
@@ -84,7 +84,12 @@ func TestSubscriptionLinkStaysCopyable(t *testing.T) {
 	}
 }
 
-func TestSubscriptionRulesInjection(t *testing.T) {
+// TestSubscriptionRulesLiveInTemplate replaces the old {{rules}} injection test:
+// the placeholder and the two settings behind it were deleted (§10 实现修订
+// 2026-09-16b), so a template's rules are simply part of the template — and both
+// halves of the old feature now fail loudly instead of silently rendering
+// garbage.
+func TestSubscriptionRulesLiveInTemplate(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
 	client := &http.Client{}
@@ -93,9 +98,10 @@ func TestSubscriptionRulesInjection(t *testing.T) {
 	nodeID, _ := seedNode(t, api, "probe-rules", "m-rules-1", "203.0.113.20")
 	seedSingbox(t, api, nodeID, 25000)
 
-	// one template per format, both splicing {{rules}} where the snippet belongs
-	sbTpl := `{"outbounds": [{{nodes}}], "route": {"rules": [{{rules}}]}}`
-	clashTpl := "mode: rule\nproxies:\n{{nodes}}\nrules:\n{{rules}}\n"
+	// one template per format, rules written in where they belong
+	sbTpl := `{"outbounds": [{{nodes}}], "route": {"rules": [` +
+		`{"protocol":"dns","action":"hijack-dns"},{"ip_is_private":true,"outbound":"direct"}]}}`
+	clashTpl := "mode: rule\nproxies:\n{{nodes}}\nrules:\n  - DOMAIN-SUFFIX,example.com,DIRECT\n  - MATCH,PROXY\n"
 	sbTplID, clashTplID := "", ""
 	for i, tc := range []struct{ format, content string }{
 		{FormatSingbox, sbTpl}, {FormatClash, clashTpl},
@@ -113,6 +119,26 @@ func TestSubscriptionRulesInjection(t *testing.T) {
 		}
 	}
 
+	// a template still carrying the removed placeholder is refused — the panel
+	// must not let an operator paste back the very thing that used to render as
+	// a literal "{{rules}}" (stored legacy templates are upgraded on startup)
+	r := doReq(t, client, "POST", srv.URL+"/api/templates", cookie,
+		map[string]any{"name": "legacy", "format": FormatSingbox,
+			"content": `{"outbounds": [{{nodes}}], "route": {"rules": [{{rules}}]}}`})
+	if r.Status != http.StatusBadRequest || r.errCode(t) != "obsolete_placeholder" {
+		t.Fatalf("obsolete placeholder accepted: %d %s", r.Status, r.Body)
+	}
+
+	// and the deleted settings keys are no longer writable (§17 imports skip
+	// them for the same reason: they are not in allowedKeys any more)
+	for _, key := range []string{legacySettingRulesSingbox, legacySettingRulesClash} {
+		r := doReq(t, client, "PUT", srv.URL+"/api/settings", cookie,
+			map[string]any{"settings": map[string]string{key: "- MATCH,PROXY"}})
+		if r.Status != http.StatusBadRequest || r.errCode(t) != "unknown_key" {
+			t.Fatalf("%s still writable: %d %s", key, r.Status, r.Body)
+		}
+	}
+
 	subID, token := createSubscription(t, srv, cookie, "rules")
 	if r := doReq(t, client, "PUT", srv.URL+"/api/subscriptions/"+subID, cookie,
 		map[string]any{"template_id": sbTplID}); r.Status != 200 {
@@ -123,32 +149,27 @@ func TestSubscriptionRulesInjection(t *testing.T) {
 		t.Fatalf("bind nodes: %d %s", r.Status, r.Body)
 	}
 
-	sbRules := `{"protocol":"dns","action":"hijack-dns"},{"ip_is_private":true,"outbound":"direct"}`
-	clashRules := "  - DOMAIN-SUFFIX,example.com,DIRECT\n  - MATCH,PROXY"
-	r := doReq(t, client, "PUT", srv.URL+"/api/settings", cookie,
-		map[string]any{"settings": map[string]string{SettingRulesSingbox: sbRules, SettingRulesClash: clashRules}})
-	if r.Status != http.StatusOK {
-		t.Fatalf("save rules: %d %s", r.Status, r.Body)
-	}
-
-	// sing-box: the snippet lands as route.rules entries and no placeholder survives
+	// sing-box: the template's rules come out verbatim, nodes injected
 	body := fetchSub(t, srv, token, "?format=singbox", "")
 	if body.Status != http.StatusOK {
 		t.Fatalf("singbox fetch: %d %s", body.Status, body.Body)
-	}
-	if strings.Contains(string(body.Body), "{{rules}}") {
-		t.Fatalf("{{rules}} leaked into the rendered config:\n%s", body.Body)
 	}
 	var cfg struct {
 		Route struct {
 			Rules []map[string]any `json:"rules"`
 		} `json:"route"`
+		Outbounds []struct {
+			Type string `json:"type"`
+		} `json:"outbounds"`
 	}
 	if err := json.Unmarshal(body.Body, &cfg); err != nil {
 		t.Fatalf("rendered singbox config is not JSON: %v\n%s", err, body.Body)
 	}
 	if len(cfg.Route.Rules) != 2 || cfg.Route.Rules[0]["action"] != "hijack-dns" {
-		t.Fatalf("rules not injected: %s", body.Body)
+		t.Fatalf("template rules did not survive rendering: %s", body.Body)
+	}
+	if len(cfg.Outbounds) != 1 || cfg.Outbounds[0].Type != "anytls" {
+		t.Fatalf("nodes not injected: %s", body.Body)
 	}
 
 	// clash: list items keep their own indentation and markers
@@ -165,48 +186,108 @@ func TestSubscriptionRulesInjection(t *testing.T) {
 			t.Fatalf("clash rules missing %q:\n%s", want, y.Body)
 		}
 	}
-	if strings.Contains(string(y.Body), "{{rules}}") {
-		t.Fatalf("{{rules}} leaked into the clash config:\n%s", y.Body)
+}
+
+// TestMigrateLegacyRules pins the one-time upgrade path: templates written while
+// {{rules}} still existed keep rendering valid configs after the placeholder was
+// deleted, and the dead settings are consumed exactly once.
+func TestMigrateLegacyRules(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+	client := &http.Client{}
+	setAnytlsPassword(t, srv, cookie)
+
+	// what the old panel wrote into the two settings
+	if err := api.Store.SetSetting(legacySettingRulesSingbox, `{"protocol":"dns","action":"hijack-dns"}`, false); err != nil {
+		t.Fatalf("seed singbox snippet: %v", err)
+	}
+	if err := api.Store.SetSetting(legacySettingRulesClash, "  - MATCH,PROXY", false); err != nil {
+		t.Fatalf("seed clash snippet: %v", err)
 	}
 
-	// a fragment that cannot be spliced in is refused, and the stored one stays
-	for _, bad := range []struct{ key, value string }{
-		{SettingRulesSingbox, "not json"},
-		{SettingRulesSingbox, `{"protocol":"dns"},`},
-		{SettingRulesClash, "MATCH,PROXY"}, // missing the list marker
+	// templates straight from that era: the API refuses them now, the DB does
+	// not, which is exactly what an upgrade from the previous version looks like
+	for _, tpl := range []store.Template{
+		{ID: "t-sb", Name: "legacy-sb", Format: FormatSingbox,
+			Content: `{"outbounds": [{{nodes}}], "route": {"rules": [{{rules}}]}}`},
+		{ID: "t-clash", Name: "legacy-clash", Format: FormatClash,
+			Content: "proxies:\n{{nodes}}\nrules:\n{{rules}}\n"},
+		{ID: "t-plain", Name: "already-fine", Format: FormatSingbox,
+			Content: `{"outbounds": [{{nodes}}]}`},
 	} {
-		r := doReq(t, client, "PUT", srv.URL+"/api/settings", cookie,
-			map[string]any{"settings": map[string]string{bad.key: bad.value}})
-		if r.Status != http.StatusBadRequest || r.errCode(t) != "bad_rules" {
-			t.Fatalf("%s=%q: %d %s (want 400 bad_rules)", bad.key, bad.value, r.Status, r.Body)
+		seed := tpl
+		if err := api.Store.InsertTemplate(&seed); err != nil {
+			t.Fatalf("seed template %s: %v", tpl.ID, err)
 		}
 	}
 
-	// clearing is allowed and expands the placeholder to nothing
-	r = doReq(t, client, "PUT", srv.URL+"/api/settings", cookie,
-		map[string]any{"settings": map[string]string{SettingRulesSingbox: "", SettingRulesClash: ""}})
-	if r.Status != http.StatusOK {
-		t.Fatalf("clear rules: %d %s", r.Status, r.Body)
+	if n := api.MigrateLegacyRules(); n != 2 {
+		t.Fatalf("migrated %d templates, want 2 (the one without the placeholder is untouched)", n)
 	}
-	body = fetchSub(t, srv, token, "?format=clash", "")
-	if strings.Contains(string(body.Body), "{{rules}}") {
-		t.Fatalf("{{rules}} survived an empty rules setting:\n%s", body.Body)
+
+	sb, err := api.Store.GetTemplate("t-sb")
+	if err != nil {
+		t.Fatalf("read migrated template: %v", err)
 	}
+	if strings.Contains(sb.Content, legacyRulesPlaceholder) || !strings.Contains(sb.Content, "hijack-dns") {
+		t.Fatalf("sing-box snippet not inlined: %s", sb.Content)
+	}
+	cl, err := api.Store.GetTemplate("t-clash")
+	if err != nil {
+		t.Fatalf("read migrated template: %v", err)
+	}
+	if strings.Contains(cl.Content, legacyRulesPlaceholder) || !strings.Contains(cl.Content, "  - MATCH,PROXY") {
+		t.Fatalf("clash snippet not inlined: %s", cl.Content)
+	}
+	plain, err := api.Store.GetTemplate("t-plain")
+	if err != nil {
+		t.Fatalf("read untouched template: %v", err)
+	}
+	if plain.Content != `{"outbounds": [{{nodes}}]}` {
+		t.Fatalf("template without the placeholder was rewritten: %s", plain.Content)
+	}
+
+	// the snippets are consumed with the migration...
+	for _, key := range []string{legacySettingRulesSingbox, legacySettingRulesClash} {
+		if _, err := api.Store.GetSetting(key); err == nil {
+			t.Fatalf("dead setting %s survived the migration", key)
+		}
+	}
+	// ...so a second startup has nothing left to do (idempotent)
+	if n := api.MigrateLegacyRules(); n != 0 {
+		t.Fatalf("second migration rewrote %d templates, want 0", n)
+	}
+
+	// and the upgraded subscription actually renders — nodes injected, rules in
+	// place, no placeholder text anywhere
+	nodeID, _ := seedNode(t, api, "probe-legacy", "m-legacy-1", "203.0.113.21")
+	seedSingbox(t, api, nodeID, 25001)
+	subID, token := createSubscription(t, srv, cookie, "legacy")
 	if r := doReq(t, client, "PUT", srv.URL+"/api/subscriptions/"+subID, cookie,
-		map[string]any{"template_id": sbTplID}); r.Status != 200 {
-		t.Fatalf("rebind singbox template: %d %s", r.Status, r.Body)
+		map[string]any{"template_id": "t-sb"}); r.Status != 200 {
+		t.Fatalf("bind upgraded template: %d %s", r.Status, r.Body)
 	}
-	body = fetchSub(t, srv, token, "?format=singbox", "")
-	var empty struct {
+	if r := doReq(t, client, "PUT", srv.URL+"/api/subscriptions/"+subID+"/nodes", cookie,
+		map[string]any{"node_ids": []string{nodeID}}); r.Status != 200 {
+		t.Fatalf("bind nodes: %d %s", r.Status, r.Body)
+	}
+	body := fetchSub(t, srv, token, "?format=singbox", "")
+	if body.Status != http.StatusOK {
+		t.Fatalf("fetch upgraded template: %d %s", body.Status, body.Body)
+	}
+	if strings.Contains(string(body.Body), legacyRulesPlaceholder) {
+		t.Fatalf("placeholder leaked into the rendered config:\n%s", body.Body)
+	}
+	var cfg struct {
 		Route struct {
 			Rules []map[string]any `json:"rules"`
 		} `json:"route"`
 	}
-	if err := json.Unmarshal(body.Body, &empty); err != nil {
-		t.Fatalf("empty-rules render is not JSON: %v\n%s", err, body.Body)
+	if err := json.Unmarshal(body.Body, &cfg); err != nil {
+		t.Fatalf("upgraded render is not JSON: %v\n%s", err, body.Body)
 	}
-	if len(empty.Route.Rules) != 0 {
-		t.Fatalf("cleared rules must render as an empty array: %s", body.Body)
+	if len(cfg.Route.Rules) != 1 || cfg.Route.Rules[0]["action"] != "hijack-dns" {
+		t.Fatalf("inlined rules did not render: %s", body.Body)
 	}
 }
 
@@ -296,7 +377,7 @@ func TestSubscriptionFormatResolution(t *testing.T) {
 	clashTplID := ""
 	r := doReq(t, client, "POST", srv.URL+"/api/templates", cookie,
 		map[string]any{"name": "fmt-clash", "format": FormatClash,
-			"content": "proxies:\n{{nodes}}\nrules:\n{{rules}}\n"})
+			"content": "proxies:\n{{nodes}}\nrules:\n  - MATCH,PROXY\n"})
 	if r.Status != http.StatusOK {
 		t.Fatalf("create clash template: %d %s", r.Status, r.Body)
 	}

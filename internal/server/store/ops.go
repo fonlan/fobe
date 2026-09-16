@@ -660,7 +660,7 @@ type Template struct {
 	ID        string
 	Name      string
 	Format    string // singbox | clash
-	Content   string // must contain {{nodes}} and {{rules}}
+	Content   string // must contain {{nodes}}; routing rules are written in directly (§10)
 	CreatedAt int64
 	UpdatedAt int64
 }

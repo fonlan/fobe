@@ -137,8 +137,8 @@ func yamlQuote(s string) string {
 
 // --- built-in default templates (§10: complete, usable configs) ---
 //
-// The renderer substitutes {{nodes}} only; {{rules}} is preserved verbatim
-// for template authors. The defaults therefore keep their rules static.
+// The renderer substitutes {{nodes}} and nothing else: routing rules are part of
+// the template (§10 实现修订 2026-09-16b), so the defaults carry theirs statically.
 
 const DefaultTemplateSingbox = `{
   "log": {

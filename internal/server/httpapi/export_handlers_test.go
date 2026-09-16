@@ -179,7 +179,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("latency target create: %d %s", resp.StatusCode, raw)
 	}
-	resp, raw = doAuthed(t, "POST", srv1.URL+"/api/templates", cookie1, []byte(`{"name":"base","format":"singbox","content":"{{nodes}}\n{{rules}}"}`))
+	resp, raw = doAuthed(t, "POST", srv1.URL+"/api/templates", cookie1, []byte(`{"name":"base","format":"singbox","content":"{\"outbounds\": [{{nodes}}]}"}`))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("template create: %d %s", resp.StatusCode, raw)
 	}

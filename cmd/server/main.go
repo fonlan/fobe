@@ -293,6 +293,15 @@ func runServer() {
 	// no longer matches the current template, before anyone can be served.
 	api.SyncSingboxConfigs()
 
+	// §10 实现修订 2026-09-16b: the {{rules}} placeholder and the settings that
+	// filled it are gone — rules live in the template now. Templates written
+	// before that still carry the token, so inline the old snippets once here:
+	// a subscription that rendered fine yesterday must not start serving a
+	// literal "{{rules}}" today. Idempotent, and it drops the dead settings.
+	if n := api.MigrateLegacyRules(); n > 0 {
+		log.Info("inlined legacy {{rules}} snippets into templates", "templates", n)
+	}
+
 	addr := env("FOBE_LISTEN", "0.0.0.0:8080")
 	srv := &http.Server{
 		Addr:              addr,

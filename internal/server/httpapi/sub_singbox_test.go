@@ -170,32 +170,32 @@ func TestTemplatePlaceholderValidation(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
 
-	// missing {{rules}} → 400
+	// missing {{nodes}} → 400 ({{rules}} is no longer required — or allowed)
 	r := doReq(t, &http.Client{}, "POST", srv.URL+"/api/templates", cookie, map[string]string{
-		"name": "bad", "format": "singbox", "content": `{"outbounds": [{{nodes}}]}`,
-	})
-	if r.Status != http.StatusBadRequest || r.errCode(t) != "missing_placeholder" {
-		t.Fatalf("missing {{rules}}: %d %s", r.Status, r.Body)
-	}
-	// missing {{nodes}} → 400
-	r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/templates", cookie, map[string]string{
-		"name": "bad", "format": "clash", "content": "rules:\n  - {{rules}}\n",
+		"name": "bad", "format": "singbox", "content": `{"outbounds": []}`,
 	})
 	if r.Status != http.StatusBadRequest || r.errCode(t) != "missing_placeholder" {
 		t.Fatalf("missing {{nodes}}: %d %s", r.Status, r.Body)
 	}
+	// the removed {{rules}} placeholder is refused, not silently preserved
+	r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/templates", cookie, map[string]string{
+		"name": "bad", "format": "clash", "content": "rules:\n  - {{rules}}\nproxies:\n{{nodes}}\n",
+	})
+	if r.Status != http.StatusBadRequest || r.errCode(t) != "obsolete_placeholder" {
+		t.Fatalf("obsolete {{rules}}: %d %s", r.Status, r.Body)
+	}
 	// bad format → 400
 	r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/templates", cookie, map[string]string{
-		"name": "bad", "format": "surge", "content": "{{nodes}} {{rules}}",
+		"name": "bad", "format": "surge", "content": "rules:\n  - MATCH,PROXY\nproxies:\n{{nodes}}\n",
 	})
 	if r.Status != http.StatusBadRequest || r.errCode(t) != "bad_format" {
 		t.Fatalf("bad format: %d %s", r.Status, r.Body)
 	}
 
-	// valid template lands
+	// a template with its rules written in and {{nodes}} lands
 	r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/templates", cookie, map[string]string{
 		"name": "ok", "format": "singbox",
-		"content": "{\n  \"outbounds\": [\n{{nodes}}\n  ],\n  \"route\": {\"rules\": [{{rules}}]}\n}",
+		"content": "{\n  \"outbounds\": [\n{{nodes}}\n  ],\n  \"route\": {\"rules\": [{\"ip_is_private\": true, \"outbound\": \"direct\"}]}\n}",
 	})
 	if r.Status != 200 {
 		t.Fatalf("valid template rejected: %d %s", r.Status, r.Body)

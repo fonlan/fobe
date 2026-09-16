@@ -7,38 +7,15 @@ import type { NodeView, SubAccessRow, SubscriptionRow, SubscriptionToken, Templa
 import Modal from '../components/Modal';
 import { useToast } from '../components/Toast';
 
-/** Placeholder pair every template must carry (server validates too). */
+/** The only placeholder a template must carry (server validates too). */
 const NODES_PH = '{{nodes}}';
-const RULES_PH = '{{rules}}';
-
-/** Settings keys behind {@link RulesCard} (mirrors httpapi.SettingRules*). */
-const RULES_SINGBOX_KEY = 'sub.rules_singbox';
-const RULES_CLASH_KEY = 'sub.rules_clash';
 
 /**
- * Mirrors validateRulesFragment on the server: catching a broken snippet here
- * just saves a round trip — the server still refuses it, because a fragment
- * that cannot be spliced in would hand every client an unloadable config.
+ * The removed routing-rules placeholder (§10 实现修订 2026-09-16b): rules now
+ * live in the template itself, so the editor flags the token instead of letting
+ * the server reject it after a round trip.
  */
-function rulesSingboxValid(value: string): boolean {
-  if (value.trim() === '') return true;
-  try {
-    const parsed: unknown = JSON.parse('[' + value + ']');
-    return (
-      Array.isArray(parsed) &&
-      parsed.every((r) => r !== null && typeof r === 'object' && !Array.isArray(r))
-    );
-  } catch {
-    return false;
-  }
-}
-
-function rulesClashValid(value: string): boolean {
-  return value.split('\n').every((line) => {
-    const l = line.trim();
-    return l === '' || l.startsWith('#') || l.startsWith('-');
-  });
-}
+const LEGACY_RULES_PH = '{{rules}}';
 
 export default function Subscriptions() {
   const { t } = useI18n();
@@ -71,7 +48,6 @@ export default function Subscriptions() {
       </div>
       <SubscriptionsCard templates={templates} onToast={showToast} />
       <TemplatesCard templates={templates} loadError={tplErr} onReload={loadTemplates} />
-      <RulesCard />
       {toastNode}
     </div>
   );
@@ -740,7 +716,8 @@ function TemplatesCard({
     }
   };
 
-  const placeholdersMissing = !content.includes(NODES_PH) || !content.includes(RULES_PH);
+  const placeholdersMissing = !content.includes(NODES_PH);
+  const legacyRulesPh = content.includes(LEGACY_RULES_PH);
 
   return (
     <section className="card" style={{ marginTop: 16 }}>
@@ -815,8 +792,12 @@ function TemplatesCard({
               onChange={(e) => setContent(e.target.value)}
             />
           </label>
-          <p className={'hint' + (placeholdersMissing ? ' form-error' : '')}>
-            {placeholdersMissing ? t('tpl_placeholders_missing') : t('tpl_placeholders_ok')}
+          <p className={'hint' + (placeholdersMissing || legacyRulesPh ? ' form-error' : '')}>
+            {legacyRulesPh
+              ? t('tpl_obsolete_placeholder')
+              : placeholdersMissing
+                ? t('tpl_placeholders_missing')
+                : t('tpl_placeholders_ok')}
           </p>
           <div className="row-end">
             <button type="button" className="btn" onClick={() => setEditing(null)}>
@@ -846,104 +827,3 @@ function TemplatesCard({
   );
 }
 
-// --- routing rules (§10 实现修订 2026-09-16) ---------------------------------
-
-/**
- * The panel-side home of {{rules}}. Two snippets (one per output format,
- * because a subscription's format is chosen per request) that the renderer
- * splices into the template verbatim — so, exactly like {{nodes}}, the snippet
- * carries its own list markers and indentation and the template owns the
- * surrounding key.
- */
-function RulesCard() {
-  const { t } = useI18n();
-  const [singbox, setSingbox] = useState('');
-  const [clash, setClash] = useState('');
-  const [loaded, setLoaded] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      const r = await api.getSettings();
-      const map: Record<string, string> = {};
-      for (const s of r.settings ?? []) map[s.key] = s.value;
-      setSingbox(map[RULES_SINGBOX_KEY] ?? '');
-      setClash(map[RULES_CLASH_KEY] ?? '');
-      setLoaded(true);
-      setErr(null);
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    }
-  }, [t]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const save = async () => {
-    if (busy) return;
-    // Client-side pre-check only: the server validates again and owns the verdict.
-    if (!rulesSingboxValid(singbox)) {
-      setErr(t('rules_bad_singbox'));
-      return;
-    }
-    if (!rulesClashValid(clash)) {
-      setErr(t('rules_bad_clash'));
-      return;
-    }
-    setBusy(true);
-    setErr(null);
-    setSaved(false);
-    try {
-      await api.putSettings({ [RULES_SINGBOX_KEY]: singbox, [RULES_CLASH_KEY]: clash });
-      setSaved(true);
-      window.setTimeout(() => setSaved(false), 3000);
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <section className="card" style={{ marginTop: 16 }}>
-      <h3>{t('rules_section')}</h3>
-      <p className="hint">{t('rules_desc')}</p>
-
-      {err && <div className="form-error">{err}</div>}
-      {saved && <div className="form-ok">{t('settings_saved')}</div>}
-
-      <label className="field">
-        <span>{t('rules_singbox')}</span>
-        <textarea
-          className="code-area"
-          rows={5}
-          spellCheck={false}
-          disabled={!loaded}
-          placeholder={t('rules_singbox_ph')}
-          value={singbox}
-          onChange={(e) => setSingbox(e.target.value)}
-        />
-      </label>
-      <label className="field">
-        <span>{t('rules_clash')}</span>
-        <textarea
-          className="code-area"
-          rows={5}
-          spellCheck={false}
-          disabled={!loaded}
-          placeholder={t('rules_clash_ph')}
-          value={clash}
-          onChange={(e) => setClash(e.target.value)}
-        />
-      </label>
-      <div className="row-end">
-        <button type="button" className="btn primary" disabled={busy || !loaded} onClick={() => void save()}>
-          {busy ? t('loading') : t('save')}
-        </button>
-      </div>
-    </section>
-  );
-}

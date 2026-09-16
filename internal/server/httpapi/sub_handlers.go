@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -22,75 +21,90 @@ const (
 
 func validFormat(f string) bool { return f == FormatSingbox || f == FormatClash }
 
-// Placeholders every stored template must contain (§10): {{nodes}} is where
-// the renderer injects the anytls outbound list; {{rules}} is where it injects
-// the operator's routing rules (see the rules settings below).
-const (
-	placeholderNodes = "{{nodes}}"
-	placeholderRules = "{{rules}}"
-)
+// Placeholder every stored template must contain (§10): {{nodes}} is where the
+// renderer injects the anytls outbound list. Routing rules are written straight
+// into the template — the {{rules}} placeholder and the two settings that used
+// to fill it were removed (§10 实现修订 2026-09-16b).
+const placeholderNodes = "{{nodes}}"
 
 func templatePlaceholdersOK(content string) bool {
-	return strings.Contains(content, placeholderNodes) && strings.Contains(content, placeholderRules)
+	return strings.Contains(content, placeholderNodes)
 }
 
-// --- routing rules (§10 实现修订 2026-09-16) ---
+// --- legacy {{rules}} upgrade (§10 实现修订 2026-09-16b) ---
 //
-// Rules for {{rules}} are two panel settings instead of free text inside every
-// template: one snippet per output format, because a subscription's format is
-// chosen per request (?format= / UA sniffing) and sing-box rules are JSON
-// while Clash rules are YAML list items. The renderer splices the snippet in
-// verbatim, so — exactly like {{nodes}} — the snippet owns its own list
-// markers and indentation and the template owns only the surrounding key.
+// legacyRulesPlaceholder is the deleted placeholder. It survives in code only to
+// upgrade data written before the removal: a stored template that still carries
+// it gets the snippet from the (equally deleted) settings inlined once at
+// startup, so an upgrade cannot turn a working subscription into a config with a
+// literal "{{rules}}" in it. New and edited templates are *refused* instead —
+// an operator who pastes an old template deserves an error, not a broken client.
+const legacyRulesPlaceholder = "{{rules}}"
+
+// Dead keys: removed from allowedKeys, readable/writable nowhere, kept only as
+// the source text of the one-time inlining and dropped once it has run.
 const (
-	SettingRulesSingbox = "sub.rules_singbox"
-	SettingRulesClash   = "sub.rules_clash"
+	legacySettingRulesSingbox = "sub.rules_singbox"
+	legacySettingRulesClash   = "sub.rules_clash"
 )
 
-func rulesSettingKey(format string) string {
-	if format == FormatClash {
-		return SettingRulesClash
-	}
-	return SettingRulesSingbox
+// legacyRuleSnippets returns the two snippets the deleted settings used to
+// hold (both empty once the migration below has consumed them).
+func (s *Server) legacyRuleSnippets() (singbox, clash string) {
+	sb, _ := s.Store.GetSetting(legacySettingRulesSingbox)
+	cl, _ := s.Store.GetSetting(legacySettingRulesClash)
+	return sb, cl
 }
 
-// validateRulesFragment rejects snippets that cannot possibly render: an empty
-// value is fine (the placeholder expands to nothing), otherwise the text must
-// parse as the array elements it will be spliced between.
-func validateRulesFragment(format, value string) bool {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return true
+// inlineLegacyRules replaces the removed placeholder with the snippet the old
+// settings held for that format — the exact substitution the renderer used to
+// do, just performed once against the stored template instead of on every
+// fetch. An empty snippet (or no placeholder at all) leaves the text alone.
+func inlineLegacyRules(content, format, sbSnippet, clashSnippet string) string {
+	if !strings.Contains(content, legacyRulesPlaceholder) {
+		return content
 	}
+	snippet := sbSnippet
 	if format == FormatClash {
-		// YAML sequence entries: "  - MATCH,PROXY". Comments and blank lines
-		// are allowed so an operator can annotate the fragment.
-		for _, line := range strings.Split(value, "\n") {
-			l := strings.TrimSpace(line)
-			if l == "" || strings.HasPrefix(l, "#") {
-				continue
-			}
-			if !strings.HasPrefix(l, "-") {
-				return false
-			}
-		}
-		return true
+		snippet = clashSnippet
 	}
-	// sing-box: the elements of a route.rules array. Wrapping them in [] has to
-	// yield valid JSON of objects — this is the check that catches a half-typed
-	// rule before it reaches every client.
-	var rules []map[string]any
-	return json.Unmarshal([]byte("["+value+"]"), &rules) == nil
+	return strings.ReplaceAll(content, legacyRulesPlaceholder, snippet)
 }
 
-// subscriptionRules returns the configured snippet for one format (” when the
-// operator never configured rules for it).
-func (s *Server) subscriptionRules(format string) string {
-	val, err := s.Store.GetSetting(rulesSettingKey(format))
+// MigrateLegacyRules is the one-time upgrade: every stored template still
+// carrying {{rules}} gets the old snippet inlined, then the two dead settings
+// are dropped. Returns the number of templates rewritten.
+//
+// The settings are deleted only when every rewrite succeeded: a failed one keeps
+// the source snippet around so the next startup can retry instead of
+// irretrievably replacing rules with nothing.
+func (s *Server) MigrateLegacyRules() int {
+	sb, cl := s.legacyRuleSnippets()
+	tpls, err := s.Store.ListTemplates()
 	if err != nil {
-		return ""
+		s.Log.Warn("legacy rules migration: list templates", "err", err)
+		return 0
 	}
-	return val
+	migrated, failed := 0, 0
+	for i := range tpls {
+		t := &tpls[i]
+		next := inlineLegacyRules(t.Content, t.Format, sb, cl)
+		if next == t.Content {
+			continue
+		}
+		t.Content = next
+		if err := s.Store.UpdateTemplate(t); err != nil {
+			s.Log.Warn("legacy rules migration: update template", "template", t.Name, "err", err)
+			failed++
+			continue
+		}
+		migrated++
+	}
+	if failed == 0 {
+		_ = s.Store.DeleteSetting(legacySettingRulesSingbox)
+		_ = s.Store.DeleteSetting(legacySettingRulesClash)
+	}
+	return migrated
 }
 
 // --- subscriptions API ---
@@ -459,6 +473,11 @@ func (s *Server) validateTemplateReq(req *saveTemplateReq) (string, bool) {
 	if !templatePlaceholdersOK(req.Content) {
 		return "missing_placeholder", false
 	}
+	// The removed placeholder is refused rather than silently preserved: rules
+	// flagged this way would reach every client as a literal "{{rules}}".
+	if strings.Contains(req.Content, legacyRulesPlaceholder) {
+		return "obsolete_placeholder", false
+	}
 	return "", true
 }
 
@@ -654,8 +673,10 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 
 // renderSubscription produces the final config body for the chosen format:
 // the subscription's template when it matches the format, otherwise the
-// built-in default; {{nodes}} and {{rules}} are substituted with the rendered
-// outbounds and the format's configured routing rules.
+// built-in default; {{nodes}} is substituted with the rendered outbounds.
+// Routing rules are part of the template itself (§10 实现修订 2026-09-16b) — the
+// renderer substitutes nothing else, so what the operator wrote is what the
+// client gets, byte for byte.
 func (s *Server) renderSubscription(sub *store.Subscription, format string, nodes []singbox.ProxyNode) (string, error) {
 	tmpl := ""
 	if sub.TemplateID.Valid && sub.TemplateID.String != "" {
@@ -681,10 +702,7 @@ func (s *Server) renderSubscription(sub *store.Subscription, format string, node
 			return "", err
 		}
 	}
-	// {{nodes}} first, then {{rules}}: a rules fragment is operator text and
-	// must never be re-scanned for the node placeholder.
-	body := strings.ReplaceAll(tmpl, placeholderNodes, injected)
-	return strings.ReplaceAll(body, placeholderRules, s.subscriptionRules(format)), nil
+	return strings.ReplaceAll(tmpl, placeholderNodes, injected), nil
 }
 
 // handleSubscription serves GET /sub/<token> (design §10): token in URL,

@@ -385,14 +385,21 @@ func (s *Server) importTemplates(tpls []exportTemplate, stats *importStats) erro
 	for _, t := range existing {
 		byName[t.Name] = t
 	}
+	// A snapshot written before {{rules}} was removed still carries the
+	// placeholder in its templates (the snippets themselves are no longer an
+	// importable setting). Inline them exactly like the startup migration does,
+	// so an old backup restores a renderable template instead of one with a
+	// literal "{{rules}}" in it (§10 实现修订 2026-09-16b).
+	sbSnippet, clashSnippet := s.legacyRuleSnippets()
 	for _, et := range tpls {
 		name := strings.TrimSpace(et.Name)
+		content := inlineLegacyRules(et.Content, et.Format, sbSnippet, clashSnippet)
 		// skip entries the template editor would reject anyway
-		if name == "" || !validFormat(et.Format) || !templatePlaceholdersOK(et.Content) {
+		if name == "" || !validFormat(et.Format) || !templatePlaceholdersOK(content) {
 			continue
 		}
 		if t, ok := byName[name]; ok {
-			t.Format, t.Content = et.Format, et.Content
+			t.Format, t.Content = et.Format, content
 			if err := s.Store.UpdateTemplate(&t); err != nil {
 				return err
 			}
@@ -403,7 +410,7 @@ func (s *Server) importTemplates(tpls []exportTemplate, stats *importStats) erro
 		if err != nil {
 			return err
 		}
-		t := store.Template{ID: id, Name: name, Format: et.Format, Content: et.Content}
+		t := store.Template{ID: id, Name: name, Format: et.Format, Content: content}
 		if err := s.Store.InsertTemplate(&t); err != nil {
 			return err
 		}
@@ -576,14 +583,6 @@ func (s *Server) importSettings(settings map[string]string, stats *importStats) 
 		// A hand-edited snapshot must not install a §14.1 policy the API would
 		// have rejected (a nonsense threshold or a non-URL source).
 		if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {
-			continue
-		}
-		// Same reasoning for the §10 rules snippets: a fragment that cannot be
-		// spliced into a template would break every subscription fetch.
-		if key == SettingRulesSingbox && !validateRulesFragment(FormatSingbox, value) {
-			continue
-		}
-		if key == SettingRulesClash && !validateRulesFragment(FormatClash, value) {
 			continue
 		}
 		if err := s.Store.SetSetting(key, value, false); err != nil {
