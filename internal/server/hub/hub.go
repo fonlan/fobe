@@ -39,6 +39,9 @@ type Hub struct {
 
 	mu    sync.RWMutex
 	conns map[string]*Conn
+	// wake nudges PumpCommands (buffered 1: more requests while a drain is in
+	// flight are already covered by that drain).
+	wake chan struct{}
 
 	// terminalSubs routes agent terminal frames to browser sessions.
 	termMu   sync.Mutex
@@ -73,6 +76,7 @@ func New(st *store.Store, trust *security.TrustChain, log *slog.Logger, geo ...g
 		log:      log,
 		conns:    map[string]*Conn{},
 		termSubs: map[string]chan protocol.Envelope{},
+		wake:     make(chan struct{}, 1),
 	}
 	for _, r := range geo {
 		if r != nil {
@@ -88,7 +92,6 @@ type Conn struct {
 	nodeID string
 	ws     *websocket.Conn
 	send   chan protocol.Envelope
-	notify chan struct{} // nudges the command pump
 	done   chan struct{}
 	once   sync.Once
 }
@@ -123,7 +126,6 @@ func (h *Hub) HandleAgentWS(w http.ResponseWriter, r *http.Request, nodeID strin
 		nodeID: nodeID,
 		ws:     ws,
 		send:   make(chan protocol.Envelope, 64),
-		notify: make(chan struct{}, 8),
 		done:   make(chan struct{}),
 	}
 
@@ -373,16 +375,14 @@ func (h *Hub) PushDesired(nodeID string) bool {
 	return h.Send(nodeID, protocol.NewEnvelope(protocol.TypeDesired, "", desired))
 }
 
-// NotifyCommand wakes the command pump after the API enqueues something.
-func (h *Hub) NotifyCommand(nodeID string) {
-	h.mu.RLock()
-	c, ok := h.conns[nodeID]
-	h.mu.RUnlock()
-	if !ok {
-		return
-	}
+// NotifyCommand wakes the command pump after the API enqueues something, so a
+// panel action reaches an online probe now instead of at the next pump tick.
+// It signals the hub-wide wake channel rather than a per-connection one: the
+// pump drains every connection anyway, and a single buffered token cannot
+// deadlock behind a slow probe.
+func (h *Hub) NotifyCommand(string) {
 	select {
-	case c.notify <- struct{}{}:
+	case h.wake <- struct{}{}:
 	default:
 	}
 }
@@ -408,9 +408,16 @@ func mustMarshal(v any) json.RawMessage {
 }
 
 // PumpCommands periodically drains the queue for a connected agent so that
-// offline-queued commands arrive even without an API nudge.
+// offline-queued commands arrive even without an API nudge, and immediately
+// when NotifyCommand says something was just enqueued.
 func (h *Hub) PumpCommands(interval time.Duration) {
-	for range time.Tick(interval) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+		case <-h.wake:
+		}
 		h.mu.RLock()
 		conns := make([]*Conn, 0, len(h.conns))
 		for _, c := range h.conns {
