@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom';
 import { useI18n } from '../i18n';
 import { fmtBytes, fmtPct } from '../format';
 import type { NodeView } from '../types';
+import DistroLogo, { distroName } from './DistroLogo';
 import Flag from './Flag';
 import ProgressBar from './ProgressBar';
 
@@ -22,13 +23,20 @@ export default function NodeCard({ node }: { node: NodeView }) {
   })();
 
   return (
-    <Link className="card node-card" to={`/nodes/${encodeURIComponent(node.id)}`}>
+    // Connectivity is carried by the card itself (.offline: red border +
+    // hazard stripes); the head's right slot shows the distro badge instead.
+    <Link
+      className={'card node-card' + (node.online ? '' : ' offline')}
+      to={`/nodes/${encodeURIComponent(node.id)}`}
+      title={t(node.online ? 'online' : 'offline')}
+    >
       <div className="node-card-head">
         <Flag cc={node.country_code} />
         <span className="node-card-name">{node.name || node.hostname || node.id}</span>
-        <span
-          className={'dot ' + (node.online ? 'on' : 'off')}
-          title={t(node.online ? 'online' : 'offline')}
+        <DistroLogo
+          id={node.distro_id}
+          size={18}
+          title={node.distro_id ? distroName(node.distro_id) : undefined}
         />
       </div>
       <div className="node-card-ip mono">{node.primary_ip || t('unknown')}</div>

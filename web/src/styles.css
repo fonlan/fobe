@@ -14,6 +14,7 @@
   --green: #16a34a;
   --amber: #d97706;
   --red: #dc2626;
+  --red-weak: rgba(220, 38, 38, 0.08);
   --shadow: 0 1px 3px rgba(16, 24, 40, 0.07), 0 1px 2px rgba(16, 24, 40, 0.05);
   --radius: 12px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -33,6 +34,7 @@
   --green: #34d399;
   --amber: #fbbf24;
   --red: #f87171;
+  --red-weak: rgba(248, 113, 113, 0.1);
   --shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
 }
 
@@ -361,6 +363,15 @@ section.card { margin-bottom: 0; }
 
 .node-card { display: flex; flex-direction: column; gap: 8px; color: var(--text); }
 .node-card:hover { text-decoration: none; border-color: var(--accent); }
+/* Offline cards carry the status themselves (the head's right slot is the
+   distro badge now): red border + faint red hazard stripes over the panel. */
+.node-card.offline {
+  border-color: var(--red);
+  background:
+    repeating-linear-gradient(-45deg, var(--red-weak) 0 8px, transparent 8px 16px),
+    var(--panel);
+}
+.node-card.offline:hover { border-color: var(--red); }
 
 .node-card-head { display: flex; align-items: center; gap: 8px; }
 .node-card-name { font-weight: 600; font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -46,14 +46,25 @@ export function distroName(id: string): string {
   return KNOWN_DISTROS[key] ?? (id ? id.charAt(0).toUpperCase() + id.slice(1) : '-');
 }
 
-export default function DistroLogo({ id, size = 18 }: { id: string; size?: number }) {
+export default function DistroLogo({
+  id,
+  size = 18,
+  title,
+}: {
+  id: string;
+  size?: number;
+  /** Optional <title> child: native hover tooltip + accessible name. */
+  title?: string;
+}) {
   const key = ALIASES[id.toLowerCase()] ?? id.toLowerCase();
   const mark = MARKS[key];
   const style = { width: size, height: size, flex: 'none' } as const;
+  const tip = title ? <title>{title}</title> : null;
   if (!mark) {
     const letter = (id || '?').charAt(0).toUpperCase();
     return (
-      <svg viewBox="0 0 24 24" style={style} role="img" aria-label={id}>
+      <svg viewBox="0 0 24 24" style={style} role="img" aria-label={title ?? id}>
+        {tip}
         <rect x="1" y="1" width="22" height="22" rx="6" fill="#546E7A" />
         <text x="12" y="16.5" textAnchor="middle" fontSize="12" fontWeight="700" fill="#fff">
           {letter}
@@ -62,7 +73,8 @@ export default function DistroLogo({ id, size = 18 }: { id: string; size?: numbe
     );
   }
   return (
-    <svg viewBox="0 0 24 24" style={style} role="img" aria-label={distroName(id)}>
+    <svg viewBox="0 0 24 24" style={style} role="img" aria-label={title ?? distroName(id)}>
+      {tip}
       <rect x="1" y="1" width="22" height="22" rx="6" fill={mark.bg} />
       {mark.paths}
     </svg>
