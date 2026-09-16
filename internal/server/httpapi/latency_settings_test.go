@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -128,3 +129,28 @@ func TestNodeListExposesBillingConfiguredAndDueTime(t *testing.T) {
 }
 
 func ptrInt64(value int64) *int64 { return &value }
+
+// Regression: NodeBilling used to marshal with Go field names (no json tags),
+// so the edit form read back blank right after a successful save.
+func TestNodeDetailBillingRoundTripsThroughAPI(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+	nodeID, _ := seedNode(t, api, "billing-rt", "m-billing-rt", "198.51.100.8")
+	due := time.Now().Add(72 * time.Hour).Unix()
+
+	body := fmt.Sprintf(
+		`{"billing":{"cycle_type":"month","cycle_days":3,"next_due_at":%d,"note":"renew"}}`, due)
+	if resp, _ := doAuthed(t, http.MethodPatch, srv.URL+"/api/nodes/"+nodeID, cookie, []byte(body)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("update node: %d", resp.StatusCode)
+	}
+
+	_, out := authedGet(t, srv, cookie, "/api/nodes/"+nodeID)
+	b, ok := out["billing"].(map[string]any)
+	if !ok {
+		t.Fatalf("billing missing from node detail: %#v", out["billing"])
+	}
+	if b["cycle_type"] != "month" || int64(b["cycle_days"].(float64)) != 3 ||
+		int64(b["next_due_at"].(float64)) != due || b["note"] != "renew" {
+		t.Fatalf("billing keys/values wrong: %#v", b)
+	}
+}

@@ -114,12 +114,15 @@ func (s *Store) ListNodeInterfaces(nodeID string) ([]NodeInterface, error) {
 	return out, nil
 }
 
+// NodeBilling is serialized straight into the node-detail response
+// (httpapi), so the json tags are wire contract, not decoration — without
+// them the keys marshal as Go field names and the web form reads back blank.
 type NodeBilling struct {
-	NodeID    string
-	CycleType string
-	CycleDays *int64
-	NextDueAt *int64
-	Note      string
+	NodeID    string `json:"node_id"`
+	CycleType string `json:"cycle_type"`
+	CycleDays *int64 `json:"cycle_days"`
+	NextDueAt *int64 `json:"next_due_at"`
+	Note      string `json:"note"`
 }
 
 func (s *Store) GetNodeBilling(nodeID string) (*NodeBilling, error) {
