@@ -132,7 +132,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 const apiOnlyHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><title>fobe</title></head>
+<html><head><meta charset="utf-8"><title>Fobe</title></head>
 <body style="font-family:system-ui;max-width:40rem;margin:4rem auto;line-height:1.6">
 <h1>fobe API-only 模式</h1>
 <p>未设置 <code>FOBE_WEB_DIR</code>,server 只提供 API。</p>

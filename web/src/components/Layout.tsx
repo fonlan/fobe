@@ -76,7 +76,7 @@ export default function Layout() {
         <header className="topbar">
           <Link to="/" className="topbar-brand" aria-label={t('app_name')}>
             <img src="/logo.svg" alt="" className="logo-img" />
-            <span>fobe</span>
+            <span>Fobe</span>
           </Link>
           <div className="topbar-actions">
             <NavLink to="/alerts" className="btn ghost small icon-link" title={t('nav_alerts')} aria-label={t('nav_alerts')}>
