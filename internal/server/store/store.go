@@ -24,7 +24,7 @@ var schemaFS embed.FS
 // and idempotent, so forgetting a bump only loses the backup-on-change
 // guarantee, never correctness. Upgrade and downgrade semantics: §6 "schema
 // 兼容策略" in design.md.
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // Store is the database handle. Safe for concurrent use.
 type Store struct {
@@ -238,6 +238,25 @@ func (s *Store) migrateAdditive() error {
 	if _, err := s.db.Exec(`UPDATE node_network SET cycle_type = 'month', next_reset_at = anchor_at
 		WHERE cycle_type = 'none' AND next_reset_at IS NULL AND anchor_at IS NOT NULL`); err != nil {
 		return fmt.Errorf("migrate legacy traffic cycles: %w", err)
+	}
+
+	// Column removals. A removal is *not* downgrade-safe — an older binary
+	// selects the column by name (§6: 查询显式列名), so "schema only grows" is
+	// the rule that normally forbids this. node_singbox.rollback_version is a
+	// deliberate one-off: no code path ever wrote it (the UI rendered a hint
+	// that could not appear), and a dead field left in the struct is worse than
+	// the exception, which the SchemaVersion bump pays for by making every
+	// existing database take its pre-migration snapshot first.
+	drops := []struct{ table, column string }{
+		{"node_singbox", "rollback_version"},
+	}
+	for _, d := range drops {
+		if !s.columnExists(d.table, d.column) {
+			continue
+		}
+		if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`, d.table, d.column)); err != nil {
+			return fmt.Errorf("drop %s.%s: %w", d.table, d.column, err)
+		}
 	}
 	return nil
 }

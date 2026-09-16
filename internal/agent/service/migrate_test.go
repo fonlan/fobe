@@ -125,12 +125,10 @@ func TestMigrateSingboxLayoutOnCleanProbe(t *testing.T) {
 	}
 }
 
-// TestAdoptForeignSingboxService covers the one-sing.sh takeover: a foreign
-// unit is stopped and disabled exactly once, and everything else is a no-op.
-func TestAdoptForeignSingboxService(t *testing.T) {
-	unit := filepath.Join(t.TempDir(), "one-sing.service")
-	write(t, unit, "[Unit]\nDescription=one-sing service\n", 0o644)
-
+// TestRetireLegacySingboxUnit covers the §9.3 rename: fobe's own old unit is
+// stopped, disabled and deleted exactly once, the init script is only removed
+// when it is fobe's, and everything else is a no-op.
+func TestRetireLegacySingboxUnit(t *testing.T) {
 	var calls [][]string
 	old := serviceRun
 	serviceRun = func(name string, args ...string) error {
@@ -139,24 +137,46 @@ func TestAdoptForeignSingboxService(t *testing.T) {
 	}
 	t.Cleanup(func() { serviceRun = old })
 
-	adopted, err := adoptForeignSingboxService(KindSystemd, unit)
-	if err != nil || !adopted {
-		t.Fatalf("adopt = %v, %v", adopted, err)
+	// systemd: our own old unit file is unambiguously ours — retire it.
+	unit := filepath.Join(t.TempDir(), legacySingboxUnitName)
+	write(t, unit, "[Unit]\nDescription=sing-box (managed by fobe-agent)\n", 0o644)
+	retired, err := retireSystemdUnit(unit, legacySingboxUnitName)
+	if err != nil || !retired {
+		t.Fatalf("retire = %v, %v", retired, err)
 	}
-	if len(calls) != 1 || calls[0][0] != "systemctl" || calls[0][1] != "disable" || calls[0][2] != "--now" || calls[0][3] != "one-sing.service" {
+	if fileExists(unit) {
+		t.Fatalf("legacy unit file survived retirement")
+	}
+	if len(calls) != 2 || calls[0][3] != legacySingboxUnitName ||
+		calls[1][0] != "systemctl" || calls[1][1] != "daemon-reload" {
 		t.Fatalf("calls = %v", calls)
 	}
 
-	// procd/fallback hosts have no systemd unit to adopt …
-	if adopted, err := adoptForeignSingboxService(KindProcd, unit); adopted || err != nil {
-		t.Fatalf("procd adopt = %v, %v", adopted, err)
-	}
-	// … and a missing unit is not an adoption either.
+	// A missing unit is not a retirement.
 	missing := filepath.Join(t.TempDir(), "absent.service")
-	if adopted, err := adoptForeignSingboxService(KindSystemd, missing); adopted || err != nil {
-		t.Fatalf("missing unit adopt = %v, %v", adopted, err)
+	if retired, err := retireSystemdUnit(missing, legacySingboxUnitName); retired || err != nil {
+		t.Fatalf("missing unit = %v, %v", retired, err)
 	}
-	if len(calls) != 1 {
+	if len(calls) != 2 {
 		t.Fatalf("unexpected extra systemctl calls: %v", calls)
+	}
+}
+
+// The procd half must never delete a stranger's /etc/init.d/sing-box: on
+// OpenWrt that name usually belongs to the distribution's own sing-box package.
+func TestOwnsLegacyInitScript(t *testing.T) {
+	ours := filepath.Join(t.TempDir(), "sing-box")
+	write(t, ours, "#!/bin/sh /etc/rc.common\nUSE_PROCD=1\nprocd_set_param command /etc/one-sing/sing-box run -c /etc/one-sing/config.json\n", 0o755)
+	if !ownsLegacyInitScript(ours) {
+		t.Fatalf("fobe's own generated init script not recognised")
+	}
+
+	distro := filepath.Join(t.TempDir(), "sing-box")
+	write(t, distro, "#!/bin/sh /etc/rc.common\nUSE_PROCD=1\nprocd_set_param command /usr/bin/sing-box run -c /etc/sing-box/config.json\n", 0o755)
+	if ownsLegacyInitScript(distro) {
+		t.Fatalf("a distribution's sing-box init script must not be claimed as ours")
+	}
+	if ownsLegacyInitScript(filepath.Join(t.TempDir(), "absent")) {
+		t.Fatalf("a missing init script is not ours")
 	}
 }

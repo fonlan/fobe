@@ -158,3 +158,36 @@ func TestBackupDirSnapshotsAndPrunes(t *testing.T) {
 		t.Fatal("fresh snapshot missing after prune")
 	}
 }
+
+// §6 的唯一例外：删列。node_singbox.rollback_version 从来没有写入方，留着一个
+// 死字段比破一次「只做增量」更糟；这条测试钉住「老库升级后列真的没了、干净库
+// 本来就没有」，以及重复 Open 是幂等的。
+func TestMigrationDropsDeadRollbackVersionColumn(t *testing.T) {
+	st, path := openTemp(t)
+	// Simulate a database written before the removal: re-add the column.
+	if _, err := st.db.Exec(`ALTER TABLE node_singbox ADD COLUMN rollback_version TEXT NOT NULL DEFAULT ''`); err != nil {
+		t.Fatal(err)
+	}
+	if !st.columnExists("node_singbox", "rollback_version") {
+		t.Fatal("fixture failed to add the legacy column")
+	}
+	if _, err := st.db.Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	for _, want := range []bool{false, false} { // second pass proves idempotence
+		st2, err := Open(path)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		if got := st2.columnExists("node_singbox", "rollback_version"); got != want {
+			t.Fatalf("column present = %v, want %v", got, want)
+		}
+		v, err := st2.userVersion()
+		if err != nil || v != SchemaVersion {
+			t.Fatalf("schema version = %d (%v), want %d", v, err, SchemaVersion)
+		}
+		st2.Close()
+	}
+}

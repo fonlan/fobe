@@ -217,7 +217,6 @@ CREATE TABLE IF NOT EXISTS node_singbox (
     config_hash      TEXT NOT NULL DEFAULT '',
     status           TEXT NOT NULL DEFAULT 'absent', -- absent|installing|running|degraded|rolled_back
     last_error       TEXT NOT NULL DEFAULT '',
-    rollback_version TEXT NOT NULL DEFAULT '',
     cert_pem         TEXT NOT NULL DEFAULT '',
     cert_sha256      TEXT NOT NULL DEFAULT '',
     cert_not_after   INTEGER NOT NULL DEFAULT 0,

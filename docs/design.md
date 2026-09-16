@@ -171,7 +171,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 6. 安装并启动系统服务；
 7. 立即上报一次完整信息（IP、系统、CPU 核数、版本）。
 
-`--unprivileged` 是可选的 systemd-only 分支：引导阶段仍需 root/sudo，脚本创建 `fobe-agent` 系统用户、将二进制与本地状态装入 `/opt/fobe-agent/`（0750，用户所有），生成 `User=fobe-agent` 且仅带 `CAP_NET_RAW` ambient capability 的 `fobe-agent.service`。已有 root 安装切换时复制 config/machine-id/update-state 以保留同一节点，并停用旧 `fobe-singbox.service`，避免它和非特权 fallback child 抢端口；procd/fallback 明确拒绝此模式。
+`--unprivileged` 是可选的 systemd-only 分支：引导阶段仍需 root/sudo，脚本创建 `fobe-agent` 系统用户、将二进制与本地状态装入 `/opt/fobe-agent/`（0750，用户所有），生成 `User=fobe-agent` 且仅带 `CAP_NET_RAW` ambient capability 的 `fobe-agent.service`。已有 root 安装切换时复制 config/machine-id/update-state 以保留同一节点，并停用旧 sing-box 单元（`one-sing.service` 与改名前的 `fobe-singbox.service` 都停，非特权 agent 自己没有 systemctl 权限去清理后者），避免它和非特权 fallback child 抢端口；procd/fallback 明确拒绝此模式。
 
 > **实现修订 2026-09-16（OpenWrt 实机首装暴露，三处）**：① 落盘一律走 `put_file`（`rm -f` + `cp` + `chmod`）而不是 `install -m`——实测 Kwrt 的 busybox 没编 `install` applet，首装在第 3 步直接 `sh: install: not found`；先 unlink 还避开重装时的 `ETXTBSY`（`cp` 原地写正在运行的二进制会被内核拒绝；unlink 让活进程留在旧 inode，由随后的服务 restart 换入新二进制，与上文 enable/restart 陷阱同一语义）。② procd 分支曾把**二进制**误装到 `/etc/init.d/fobe-agent`（`$TMP/fobe-agent` 手误，写出来的 initd 脚本是死代码）——真机后果是拿 ELF 覆盖 init 脚本、`enable`/`restart` 变成带怪参数跑 agent、procd 服务管理整体失效。已改为安装 `$TMP/fobe-agent.initd`，heredoc 去引号让 initd 里的 agent 路径跟随 `$BIN_DIR` 探测结果，不再可能与它分叉。③ procd 分支收尾 `restart` 在**首装**时会打印 `Command failed: Not found`——rc.common 的 restart 就是 stop+start，而 procd 从没见过这个服务，stop 步骤的 `ubus call service delete` 回 `NOT_FOUND`（退出码仍是 0，纯化妆性噪音，agent 实际正常上线）。改为 `stop >/dev/null 2>&1 || true` + `start`：首装输出干净，start 的真实错误仍然可见，重装时依旧真的停掉旧进程。三分支已在 busybox 容器（stub procd/systemd/fallback）里做过首装+重装实跑验证。
 
@@ -179,7 +179,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 | 平台 | 检测 | 服务形态 |
 |---|---|---|
-| 常规 Linux | 存在 `/run/systemd/system` | systemd unit（`fobe-agent.service` / `fobe-singbox.service`） |
+| 常规 Linux | 存在 `/run/systemd/system` | systemd unit（`fobe-agent.service` / `one-sing.service`，后者与 one-sing.sh 同名，§9.3） |
 | x86 OpenWrt | 存在 `/sbin/procd` 或 `/etc/rc.common` | `/etc/init.d/fobe-agent`、`/etc/init.d/sing-box`（procd，`USE_PROCD=1`） |
 | 兜底（容器/WSL） | 两者皆无 | 前台进程 + pidfile + 看门狗 |
 
@@ -187,7 +187,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 > **实现修订 2026-09-15（检测谓词用错，systemd 全被误判为 fallback）**：`service.Detect()` 用 `fileExists("/run/systemd/system")` 检测第一行，而同一个包里的 `fileExists` 语义是"存在**且不是目录**"（它对 unit 文件/二进制/配置是对的）——`/run/systemd/system` 恰恰是 systemd 自己建的**目录**，于是**每一台 systemd 机器（所有常规 Debian/Ubuntu VPS）都返回 `KindFallback`**。这不是"这台没有 supervisor"，是压根没检测到 supervisor，症状分散在三处、互相看起来无关：
 > - 当时的 `hello.Caps` 报 `systemd=false / fallback=true`，旧版 §5.5 又把自更新错误绑定到 supervisor，于是 `self_update=false`，面板把这台"其实一直跑在 systemd 下"的探针标成"不支持自更新 / no service manager to restart the agent"；2026-09-16 改为 `exec` 后能力位已只看 Linux、可解析自身路径和二进制目录可写；
-> - sing-box 落到 **spawn 兜底分支**（agent 自己 fork + reap）而不是自己写的 `fobe-singbox.service`，于是它不受 systemd 管、开机不自动起；
+> - sing-box 落到 **spawn 兜底分支**（agent 自己 fork + reap）而不是自己写的 systemd 单元（当时的 `fobe-singbox.service`，2026-09-16 起叫 `one-sing.service`，见 §9.3），于是它不受 systemd 管、开机不自动起；
 > - 面板的 sing-box 启停/重启（`commands.go` 与 §9.x 动作）一律回 `no service manager detected`。
 >
 > 修法：检测存在性用新加的 `pathExists()`（`os.Stat` 成功即可，文件或目录都算），`fileExists()` 保持"文件"语义并只用于它该用的地方；`Detect()` 拆出 `detectAt(root)` 以便用假根目录单测（`internal/agent/service/detect_test.go` 钉住"目录必须算存在"）。**同批修掉被这次修正才第一次走到的 native 分支的两个潜伏问题**：① `singboxManager.start` 改用 `restart`（`systemctl start` 对已在跑的服务是 no-op，改了 config 也不会重载，而闸门③只看到"端口有人应答"；这与 §5.5 里 install.sh 的 `enable --now` 陷阱是同一类）；② 迁移到 native 前用 `dropOrphan()` 清掉 fallback 分支遗留的孤儿 sing-box——它被 reparent 到 init 后仍占着入站端口，会让新 unit 起不来、`Restart=always` 反复重启，闸门③却去怪新版本。另外 `InstallSingbox` 补上 `systemctl enable`：unit 文件里的 `WantedBy` 不会自己创建 `multi-user.target.wants` 符号链接。
@@ -263,7 +263,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `subscriptions` | id, name, token_hash, format, template_id, enabled, ua_filter | 多订阅 |
 | `subscription_nodes` | subscription_id, node_id | |
 | `templates` | id, name, format(singbox/clash), content | 完整配置模板 |
-| `node_singbox` | node_id, version, desired_version, config_hash, status, last_error, rollback_version, cert_pem, cert_sha256, port | sing-box 期望/实际状态 |
+| `node_singbox` | node_id, version, desired_version, config_hash, status, last_error, cert_pem, cert_sha256, port | sing-box 期望/实际状态 |
 | `commands` | id, node_id, kind, payload, status, created_at, sent_at, finished_at, result | 指令队列 |
 | `audit_logs` | ts, actor, node_id, action, command, risk, source_ip, ai_session_id | |
 | `alerts` | id, kind, node_id, payload, created_at, delivered_at | |
@@ -274,6 +274,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 > **Schema 兼容策略（实现修订 2026-09-16，起因是宿主机重启导致主库页级损坏、settings 全丢的事故）**：
 > - **只做增量是铁律**：schema 变更只允许「新表 / 带默认值的新列 / 新索引」（`schema.sql` 的 `IF NOT EXISTS` + `migrateAdditive`，幂等）。所有查询**显式列名**，这样新表/新列对旧二进制是惰性的——旧版本直接打开新库也能服务，**降级不需要迁移**。
+>   **唯一的例外（2026-09-16）**：删掉 `node_singbox.rollback_version`。它从来没有任何写入方（面板渲染的「可回滚到 v」永远不可能出现），留着一个死字段比破一次铁律更糟。代价写清楚：跨过这条线**降级不安全**——旧二进制按名字 SELECT 这一列会直接报错，而 `SchemaVersion` 3→4 的 bump 保证每个现有库在迁移前先拍一张快照（§19.3），操作员要回退就用那张。`migrateAdditive` 里删列单独成段并注明原因，别把它当常规手段。
 > - **版本追踪**：`PRAGMA user_version` ↔ `store.SchemaVersion`，改 schema 必须同时 bump。`db < build`（升级）：先自动快照再跑迁移、写版本号；`db > build`（降级，§5.5 钉版本演练是真实场景）：只打 WARN、**不迁移、不回写版本号**——本次构建不知道新版本做过什么，重置版本号会让半知的升级重跑。
 > - **打开即 `quick_check`**：损坏的库拒绝启动（容器进入重启循环、日志给出恢复路径），而不是像事故里那样全站随机 500、每次写入把洞挖深。
 > - **`synchronous=FULL`**（原 NORMAL）：WAL+NORMAL 是常规推荐，但库文件在 Docker bind mount 上，fsync 顺序只与宿主文件系统一样可靠（OrbStack/virtiofs 等）。FULL 每提交一次 fsync，本面板写频是秒级批次、代价测不出来；换来崩溃时最多丢最后一次提交而不是文件完整性。
@@ -410,7 +411,9 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 > **实现修订 2026-09-15（探针侧布局与服务管理对齐 one-sing.sh）**：入站配置与服务管理参考 `one-sing.sh`（同类需求的成熟实现），落地三件事，**协议与订阅语义不变**：
 > - **目录/证书布局（root 模式）**：探针上统一为 `/etc/one-sing/{sing-box,config.json,cert/{cert.crt,private.key}}`（原 `/usr/local/bin/sing-box`、`/etc/sing-box/{config.json,cert/{cert.pem,key.pem}}`）。同名同路径意味着**已经用 one-sing.sh 管起来的机器可以直接被接管**，不必重下二进制或重签证书。证书文件名由服务端写进 `config.json`，两侧必须一致，`internal/server/singbox` 有一条跨包测试盯着（`TestCertPathsMatchAgentLayout`）。
 > - **anytls `padding_scheme`**：采用 one-sing.sh 的方案（`stop=6` / `0=30-30` / `1=80-120` / `2=350-550,c` / `3=900-1400` / `4=250-600` / `5=250-600`），不再用 sing-box 默认值。它进 `config.json`，因此**改这一项等于改 `config_hash`，会在下一次收敛时把全部节点重新下发一遍**——有意的、一次性的代价。
-> - **systemd 单元对齐**：`fobe-singbox.service` 补上 `CapabilityBoundingSet` / `AmbientCapabilities`、`ExecReload=/bin/kill -HUP $MAINPID`、`LimitNOFILE=infinity`、`RestartSec=10s`（保留 `User=root`、`NoNewPrivileges=true`）。**单元名仍是 fobe 自己的**：写 `one-sing.service` 会与 one-sing.sh 抢同一个进程，卸载 fobe 时还会删掉别人的单元；作为补偿，agent 首次收敛前会把已存在的 `one-sing.service` **停掉并 disable**（`AdoptForeignSingboxService`，只认 systemd）——两个 supervisor 抢一个进程只会反复重启，而面板的启停会作用在一个它并不拥有的进程上。
+> - **systemd 单元对齐**：单元补上 `CapabilityBoundingSet` / `AmbientCapabilities`、`ExecReload=/bin/kill -HUP $MAINPID`、`LimitNOFILE=infinity`、`RestartSec=10s`（保留 `User=root`、`NoNewPrivileges=true`）。**单元名（2026-09-16 修订）＝ `one-sing.service`，即 one-sing.sh 自己的名字**：二进制与配置路径本来就与那个脚本同名同路径（`/etc/one-sing/{sing-box,config.json}`），单元名却是 fobe 自有的，结果是两套工具各自管一个单元、互相 disable——面板按下启动，脚本那边看到的还是"服务已停"。改名后两边指向同一个单元，脚本的 `systemctl {restart,status}` 直接作用于 fobe 的 sing-box。**代价（镜像是旧的也是真的）**：单元从此是共享物，谁最后写谁的内容生效（fobe 每次 apply 都会重写它），卸载 fobe 会删掉脚本也认得的单元；反过来，脚本 `create_systemd_service` 只在二进制缺失时才写，而 fobe 保证二进制在，所以那条路平时不会触发。procd 侧同时从 `/etc/init.d/sing-box` 改为 `/etc/init.d/one-sing`——OpenWrt 上 `sing-box` 这个名字常年属于发行版自己的包，fobe 此前一直在覆盖别人的启动脚本。
+>   **同名的边界（别指望混用协议配置）**：共享的是**单元**，不是**配置文件**。`one-sing.sh` 用 `jq` 往 `/etc/one-sing/config.json` 里追加 SS2022/VLESS/Socks5 入站，而那份 config.json 是 fobe 的期望状态产物——下一次收敛（最多 60s）发现 hash 不符就会**整份重写**，脚本加的入站会消失（fobe 的闸门②也随之重启服务）。要用脚本的那些协议，就别让 fobe 管这台机器的 sing-box；二者共享单元名的收益是"面板与脚本对同一个服务生效"，不是"配置可以混着改"。
+>   **改名要带迁移**：改名前的 `fobe-singbox.service` / `/etc/init.d/sing-box` 仍然 enable 且在跑，和 `one-sing.service` 抢同一个二进制、配置与入站端口 ⇒ agent 启动时（root）`RetireLegacySingboxUnit()` 停掉、disable 并删掉旧单元；procd 侧**只删自己写的那个**（脚本内容含 one-sing 布局才算我们的，`ownsLegacyInitScript`），发行版的 `/etc/init.d/sing-box` 一律不碰。旧的 `AdoptForeignSingboxService`（把 one-sing.service 停掉并 disable）随之删除——它现在会 disable 掉 fobe 自己刚建的单元。`install.sh --unprivileged` 两个名字都停：非特权 agent 没有 systemctl 权限，只能靠引导脚本收尾。
 > - **迁移是幂等的**：agent 启动时 `MigrateSingboxLayout` 只在「目标不存在且源存在」时搬文件（二进制连同 `.prev`/`.download`、配置连同 `.prev`、证书改名 `cert.pem→cert.crt`、`key.pem→private.key`），搬完删空的旧目录；搬不动只记 WARN，收敛循环照样能把缺的东西重新下载回来。
 > - **`config.json` 是 fobe 独占的**：同一台机器上又跑 one-sing.sh 又由 fobe 托管，两边会互相覆盖同一份 `config.json`（one-sing.sh 加的协议会消失）。要共存就改路径，别只改服务名。
 

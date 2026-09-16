@@ -285,28 +285,27 @@ func (s *Store) ListAudit(limit int) ([]AuditEntry, error) {
 // --- node_singbox (design §9.1) ---
 
 type NodeSingbox struct {
-	NodeID          string `json:"node_id"`
-	Version         string `json:"version"`
-	DesiredVersion  string `json:"desired_version"`
-	ConfigHash      string `json:"config_hash"`
-	Status          string `json:"status"`
-	LastError       string `json:"last_error"`
-	RollbackVersion string `json:"rollback_version"`
-	CertPEM         string `json:"cert_pem"`
-	CertSHA256      string `json:"cert_sha256"`
-	CertNotAfter    int64  `json:"cert_not_after"`
-	Port            int    `json:"port"`
-	UpdatedAt       int64  `json:"updated_at"`
+	NodeID         string `json:"node_id"`
+	Version        string `json:"version"`
+	DesiredVersion string `json:"desired_version"`
+	ConfigHash     string `json:"config_hash"`
+	Status         string `json:"status"`
+	LastError      string `json:"last_error"`
+	CertPEM        string `json:"cert_pem"`
+	CertSHA256     string `json:"cert_sha256"`
+	CertNotAfter   int64  `json:"cert_not_after"`
+	Port           int    `json:"port"`
+	UpdatedAt      int64  `json:"updated_at"`
 }
 
 func (s *Store) GetNodeSingbox(nodeID string) (*NodeSingbox, error) {
 	n := &NodeSingbox{}
 	err := s.db.QueryRow(
-		`SELECT node_id, version, desired_version, config_hash, status, last_error, rollback_version,
+		`SELECT node_id, version, desired_version, config_hash, status, last_error,
 		        cert_pem, cert_sha256, cert_not_after, port, updated_at
 		 FROM node_singbox WHERE node_id = ?`, nodeID,
 	).Scan(&n.NodeID, &n.Version, &n.DesiredVersion, &n.ConfigHash, &n.Status, &n.LastError,
-		&n.RollbackVersion, &n.CertPEM, &n.CertSHA256, &n.CertNotAfter, &n.Port, &n.UpdatedAt)
+		&n.CertPEM, &n.CertSHA256, &n.CertNotAfter, &n.Port, &n.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -316,18 +315,18 @@ func (s *Store) GetNodeSingbox(nodeID string) (*NodeSingbox, error) {
 func (s *Store) UpsertNodeSingbox(n *NodeSingbox) error {
 	_, err := s.db.Exec(
 		`INSERT INTO node_singbox
-		 (node_id, version, desired_version, config_hash, status, last_error, rollback_version,
+		 (node_id, version, desired_version, config_hash, status, last_error,
 		  cert_pem, cert_sha256, cert_not_after, port, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(node_id) DO UPDATE SET
 		   version = excluded.version, desired_version = excluded.desired_version,
 		   config_hash = excluded.config_hash, status = excluded.status,
-		   last_error = excluded.last_error, rollback_version = excluded.rollback_version,
+		   last_error = excluded.last_error,
 		   cert_pem = excluded.cert_pem, cert_sha256 = excluded.cert_sha256,
 		   cert_not_after = excluded.cert_not_after, port = excluded.port,
 		   updated_at = excluded.updated_at`,
 		n.NodeID, n.Version, n.DesiredVersion, n.ConfigHash, n.Status, n.LastError,
-		n.RollbackVersion, n.CertPEM, n.CertSHA256, n.CertNotAfter, n.Port, now(),
+		n.CertPEM, n.CertSHA256, n.CertNotAfter, n.Port, now(),
 	)
 	return err
 }

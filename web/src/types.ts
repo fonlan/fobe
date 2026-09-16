@@ -306,7 +306,6 @@ export interface SingboxStatus {
   config_hash: string;
   status: string;
   last_error: string;
-  rollback_version: string;
   cert_sha256: string;
   cert_not_after: number;
   port: number;

@@ -203,6 +203,11 @@ UNIT
             # A prior root-mode installation owns sing-box in a separate unit.
             # The unprivileged agent instead owns its fallback child; leave the
             # old unit up and both will race for the same panel-assigned port.
+            # Both names are retired: one-sing.service is the current one (§9.3
+            # 实现修订 2026-09-16), fobe-singbox.service is what a root install
+            # wrote before the rename — the unprivileged agent cannot clean that
+            # one up itself (no systemctl rights).
+            $SUDO systemctl disable --now one-sing.service >/dev/null 2>&1 || true
             $SUDO systemctl disable --now fobe-singbox.service >/dev/null 2>&1 || true
         fi
         $SUDO systemctl daemon-reload

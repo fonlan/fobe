@@ -10,7 +10,10 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
+
+	"github.com/fobe-panel/fobe/internal/agent/service"
 )
 
 const (
@@ -26,8 +29,10 @@ const (
 )
 
 // tailLogFallbackFiles are the best-effort log locations when no service
-// manager source answers. A var so tests can point them at temp files.
-var tailLogFallbackFiles = []string{"/tmp/fobe-singbox.log", "/var/log/sing-box.log"}
+// manager source answers — fobe itself writes no log file (spawn discards
+// output, §9.2 keeps no on-disk logs), so these only catch a sing-box someone
+// else started. A var so tests can point them at temp files.
+var tailLogFallbackFiles = []string{"/tmp/one-sing.log", "/var/log/sing-box.log"}
 
 // NormalizeTailLogsLines clamps the requested line count: non-positive
 // counts become the default and everything above the cap is capped
@@ -51,7 +56,12 @@ func singboxLogCommands(kind string, lines int) (primary []string, fallback []st
 	}
 	switch kind {
 	case "systemd":
-		return []string{fmt.Sprintf("journalctl -u fobe-singbox --no-pager -n %d", lines)}, fallback
+		// §9.3 实现修订 2026-09-16: the unit is one-sing.service (fobe's old
+		// name was fobe-singbox.service) — one-sing.sh's own name, so the same
+		// journalctl line works for either owner. Taken from the constant: this
+		// string and the unit fobe writes must never drift apart.
+		unit := strings.TrimSuffix(service.SingboxUnitName, ".service")
+		return []string{fmt.Sprintf("journalctl -u %s --no-pager -n %d", unit, lines)}, fallback
 	case "procd":
 		return []string{fmt.Sprintf("logread | tail -n %d", lines)}, fallback
 	default:

@@ -31,7 +31,7 @@ func TestNormalizeTailLogsLines(t *testing.T) {
 
 func TestSingboxLogCommands(t *testing.T) {
 	primary, fallback := singboxLogCommands("systemd", 100)
-	if len(primary) != 1 || primary[0] != "journalctl -u fobe-singbox --no-pager -n 100" {
+	if len(primary) != 1 || primary[0] != "journalctl -u one-sing --no-pager -n 100" {
 		t.Fatalf("systemd primary = %v", primary)
 	}
 	if len(fallback) != 2 {
@@ -51,7 +51,7 @@ func TestSingboxLogCommands(t *testing.T) {
 		t.Fatalf("fallback primary = %v, want none", primary)
 	}
 	if len(fallback) != 2 ||
-		!strings.Contains(fallback[0], "/tmp/fobe-singbox.log") ||
+		!strings.Contains(fallback[0], "/tmp/one-sing.log") ||
 		!strings.Contains(fallback[1], "/var/log/sing-box.log") {
 		t.Fatalf("fallback commands = %v", fallback)
 	}

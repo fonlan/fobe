@@ -647,11 +647,7 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
         <Tile label={t('sb_current')} value={sb?.version || '-'} />
         <Tile label={t('sb_desired')} value={sb?.desired_version || '-'} />
         <Tile label={t('sb_port')} value={sb?.port ? ':' + sb.port : '-'} />
-        <Tile
-          label={t('alert_status')}
-          value={t(statusKey) === statusKey ? status : t(statusKey)}
-          sub={sb?.rollback_version ? t('sb_rollback', { v: sb.rollback_version }) : undefined}
-        />
+        <Tile label={t('alert_status')} value={t(statusKey) === statusKey ? status : t(statusKey)} />
       </div>
 
       {sb?.last_error && (

@@ -71,7 +71,7 @@ type singboxManager struct {
 	lastFwPort   int                   // port the firewall pass already ran for (§9.2)
 	lastFwHint   string                // manual command when that pass failed (""=allowed)
 	rollbackSeen bool                  // one-shot: a rollback happened since last report (§15)
-	adoptedUnit  bool                  // one-shot: a foreign one-sing.service was disabled (§9.3)
+	retiredUnit  bool                  // one-shot: the pre-rename fobe-singbox unit was removed (§9.3)
 	openFw       func(port int) string // firewall pass, injectable for tests
 
 	kick    chan struct{} // nudge: desired changed / watchdog fired (buffered 1)
@@ -238,7 +238,7 @@ func (m *singboxManager) converge() {
 	m.lastAttempt = time.Now()
 	m.mu.Unlock()
 
-	m.adoptForeignUnit()
+	m.retireLegacyUnit()
 
 	bin, configPath, certDir := service.SingboxPaths()
 	act := m.observe(bin, d)
@@ -648,32 +648,35 @@ type singboxActual struct {
 	running         bool
 }
 
-// adoptForeignUnit takes over a one-sing.sh installation the first time the
-// agent is about to manage sing-box: both units would otherwise supervise the
-// same binary, config and port (flapping, and the panel's stop/start would
-// address a process it does not own). Failure is a WARN — the change path
-// below still runs, and the operator sees the flapping in the logs.
-func (m *singboxManager) adoptForeignUnit() {
+// retireLegacyUnit removes fobe's pre-rename service (fobe-singbox.service /
+// /etc/init.d/sing-box) the first time this manager is about to drive sing-box.
+// It is not optional housekeeping: the old unit is still enabled and running,
+// and it supervises the same binary, config and port as the one-sing.service
+// written below — two supervisors restarting one process flap forever while the
+// panel addresses a unit it does not control (§9.3 实现修订 2026-09-16).
+// Failure is a WARN: the change path below still runs, and the operator sees
+// the flapping in the logs.
+func (m *singboxManager) retireLegacyUnit() {
 	if !privileged() {
-		// 非特权模式不可能 systemctl disable——若机器上有 root 的
-		// one-sing.service，端口冲突会在闸门③暴露并如实上报，而不是在这里
-		// 收获一串 polkit 拒绝（§5.3 实现修订 2026-09-16）。
+		// 非特权模式不可能 systemctl disable——若机器上有 root 装的旧单元，
+		// 端口冲突会在闸门③暴露并如实上报，而不是在这里收获一串 polkit 拒绝
+		// （§5.3 实现修订 2026-09-16）。
 		return
 	}
 	m.mu.Lock()
-	done := m.adoptedUnit
-	m.adoptedUnit = true
+	done := m.retiredUnit
+	m.retiredUnit = true
 	m.mu.Unlock()
 	if done {
 		return
 	}
-	adopted, err := service.AdoptForeignSingboxService()
+	retired, err := service.RetireLegacySingboxUnit()
 	if err != nil {
-		m.log.Warn("could not adopt an existing one-sing.service", "err", err)
+		m.log.Warn("could not retire the legacy sing-box service", "err", err)
 		return
 	}
-	if adopted {
-		m.log.Info("adopted an existing one-sing.service: stopped and disabled it so fobe owns the sing-box process")
+	if retired {
+		m.log.Info("retired the legacy fobe-singbox service so one-sing.service can own the process")
 	}
 }
 

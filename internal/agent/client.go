@@ -130,6 +130,20 @@ func Run(cfg *Config, configPath string, log *slog.Logger) error {
 			}
 		}
 	}
+	// §9.3 实现修订 2026-09-16: the service moved to one-sing.service, the name
+	// one-sing.sh uses. A probe updated from before the rename still has the old
+	// unit enabled and running — retire it before the manager writes the new
+	// one, or both supervise the same binary and port. The manager repeats this
+	// guarded by its own flag (a service can also be left over from an older
+	// agent that never converged), but doing it here means it happens even when
+	// no desired state ever arrives.
+	if privileged() {
+		if retired, err := service.RetireLegacySingboxUnit(); err != nil {
+			log.Warn("legacy sing-box service could not be retired", "err", err)
+		} else if retired {
+			log.Info("retired the legacy fobe-singbox service; fobe now owns one-sing.service")
+		}
+	}
 
 	sbx := newSingboxManager(cfg, log)
 	go sbx.Run()

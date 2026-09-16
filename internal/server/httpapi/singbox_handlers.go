@@ -122,7 +122,7 @@ func (s *Server) handleGetNodeSingbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"singbox": map[string]any{
 		"node_id": sb.NodeID, "version": sb.Version, "desired_version": sb.DesiredVersion,
 		"config_hash": sb.ConfigHash, "status": sb.Status, "last_error": sb.LastError,
-		"rollback_version": sb.RollbackVersion, "cert_sha256": sb.CertSHA256,
+		"cert_sha256":    sb.CertSHA256,
 		"cert_not_after": sb.CertNotAfter, "port": sb.Port, "updated_at": sb.UpdatedAt,
 	}})
 }

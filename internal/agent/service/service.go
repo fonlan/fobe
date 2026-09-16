@@ -4,6 +4,7 @@
 package service
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -47,8 +48,8 @@ func Detect() Kind { return detectAt("/") }
 //   - disabled agent self-update (§5.5 hangs off Detect() != KindFallback),
 //     so the panel showed "no service manager to restart the agent" on hosts
 //     that were running the agent under systemd the whole time,
-//   - pushed sing-box onto the spawn-and-reap fallback branch instead of
-//     fobe-singbox.service, and made the panel's start/stop/restart errors say
+//   - pushed sing-box onto the spawn-and-reap fallback branch instead of a
+//     systemd unit, and made the panel's start/stop/restart errors say
 //     "no service manager detected".
 func detectAt(root string) Kind {
 	switch {
@@ -120,10 +121,14 @@ start_service() {
 //	/etc/one-sing/cert/         cert.crt + private.key
 //
 // /etc is overlay-persistent on OpenWrt too, so one layout covers systemd,
-// procd and the foreground fallback. The *service* keeps fobe's own names
-// (fobe-singbox.service / /etc/init.d/sing-box) on purpose: writing
-// one-sing.service would fight a one-sing.sh installation over the same
-// process, and uninstalling fobe would then remove someone else's unit.
+// procd and the foreground fallback.
+//
+// The *service* name is one-sing's as well, on purpose (§9.3 实现修订
+// 2026-09-16): one-sing.sh manages `one-sing.service` over exactly this binary
+// and config, so an operator's script and the panel must address the same unit
+// instead of each disabling the other's. The cost is the mirror image of the
+// old choice — the unit is shared, so whichever side writes it last wins, and
+// fobe's uninstall/upgrade touches a unit one-sing.sh also knows about.
 const (
 	// SingboxWorkDir is the one-sing-compatible working directory — the
 	// *default* layout root. An unprivileged deployment moves it at startup
@@ -136,6 +141,23 @@ const (
 	// a relocated layout remaps the prefix agent-side (relocateConfig).
 	SingboxCertFile = "cert.crt"
 	SingboxKeyFile  = "private.key"
+
+	// SingboxUnitName is the systemd unit fobe owns, and SingboxUnitPath is
+	// where it lives. Both come from one-sing.sh verbatim (SING_SERVICE).
+	SingboxUnitName = "one-sing.service"
+	SingboxUnitPath = "/etc/systemd/system/one-sing.service"
+	// SingboxInitPath is the procd equivalent. one-sing.sh is Debian-only, so
+	// this name is fobe's own — and it deliberately stops using
+	// `/etc/init.d/sing-box`, which on OpenWrt often belongs to the
+	// distribution's own sing-box package (fobe used to overwrite it).
+	SingboxInitPath = "/etc/init.d/one-sing"
+	// legacySingboxUnitPath / legacySingboxInitPath are fobe's pre-revision
+	// names. A probe installed before the rename has them enabled and running;
+	// they are retired (stop + disable + remove) before fobe writes its own, or
+	// two supervisors would fight over the same binary, config and port.
+	legacySingboxUnitName = "fobe-singbox.service"
+	legacySingboxUnitPath = "/etc/systemd/system/fobe-singbox.service"
+	legacySingboxInitPath = "/etc/init.d/sing-box"
 )
 
 // The layout paths are package state rather than consts so SetWorkDir can
@@ -194,7 +216,7 @@ func InstallSingbox(binPath, configPath string) error {
 	switch Detect() {
 	case KindSystemd:
 		unit := fmt.Sprintf(`[Unit]
-Description=sing-box (managed by fobe-agent)
+Description=one-sing service (managed by fobe-agent)
 After=network-online.target
 Wants=network-online.target
 
@@ -212,7 +234,7 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 `, binPath, configPath)
-		if err := os.WriteFile("/etc/systemd/system/fobe-singbox.service", []byte(unit), 0o644); err != nil {
+		if err := os.WriteFile(SingboxUnitPath, []byte(unit), 0o644); err != nil {
 			return fmt.Errorf("write unit: %w", err)
 		}
 		if err := run("systemctl", "daemon-reload"); err != nil {
@@ -222,7 +244,7 @@ WantedBy=multi-user.target
 		// symlink — only `enable` does. Without it sing-box comes up only
 		// because the agent converges after boot, so a host whose agent is
 		// broken (or stopped) would reboot without its inbound.
-		return run("systemctl", "enable", "fobe-singbox.service")
+		return run("systemctl", "enable", SingboxUnitName)
 
 	case KindProcd:
 		init := fmt.Sprintf(`#!/bin/sh /etc/rc.common
@@ -238,7 +260,7 @@ start_service() {
 	procd_close_instance
 }
 `, binPath, configPath)
-		if err := os.WriteFile("/etc/init.d/sing-box", []byte(init), 0o755); err != nil {
+		if err := os.WriteFile(SingboxInitPath, []byte(init), 0o755); err != nil {
 			return fmt.Errorf("write init.d: %w", err)
 		}
 		return nil // enable/start happens on first apply
@@ -253,7 +275,7 @@ start_service() {
 func EnableSingbox() error {
 	switch Detect() {
 	case KindProcd:
-		return run("/etc/init.d/sing-box", "enable")
+		return run(SingboxInitPath, "enable")
 	default:
 		return nil // systemd: nothing to do; fallback: no boot persistence
 	}
@@ -263,9 +285,9 @@ func EnableSingbox() error {
 func RestartSingbox() error {
 	switch Detect() {
 	case KindSystemd:
-		return run("systemctl", "restart", "fobe-singbox.service")
+		return run("systemctl", "restart", SingboxUnitName)
 	case KindProcd:
-		return run("/etc/init.d/sing-box", "restart")
+		return run(SingboxInitPath, "restart")
 	default:
 		return fmt.Errorf("no service manager detected")
 	}
@@ -275,9 +297,9 @@ func RestartSingbox() error {
 func StopSingbox() error {
 	switch Detect() {
 	case KindSystemd:
-		return run("systemctl", "stop", "fobe-singbox.service")
+		return run("systemctl", "stop", SingboxUnitName)
 	case KindProcd:
-		return run("/etc/init.d/sing-box", "stop")
+		return run(SingboxInitPath, "stop")
 	default:
 		return fmt.Errorf("no service manager detected")
 	}
@@ -286,9 +308,9 @@ func StopSingbox() error {
 func StartSingbox() error {
 	switch Detect() {
 	case KindSystemd:
-		return run("systemctl", "start", "fobe-singbox.service")
+		return run("systemctl", "start", SingboxUnitName)
 	case KindProcd:
-		return run("/etc/init.d/sing-box", "start")
+		return run(SingboxInitPath, "start")
 	default:
 		return fmt.Errorf("no service manager detected")
 	}
@@ -300,9 +322,9 @@ func StartSingbox() error {
 func SingboxActive() bool {
 	switch Detect() {
 	case KindSystemd:
-		return run("systemctl", "is-active", "--quiet", "fobe-singbox.service") == nil
+		return run("systemctl", "is-active", "--quiet", SingboxUnitName) == nil
 	case KindProcd:
-		return run("/etc/init.d/sing-box", "status") == nil
+		return run(SingboxInitPath, "status") == nil
 	default:
 		return false
 	}
@@ -313,10 +335,7 @@ func ArchIdent() string {
 	return runtime.GOOS + "-" + runtime.GOARCH
 }
 
-// --- layout migration & service adoption (design §9.3 实现修订) -------------
-
-// foreignSingboxUnit is the systemd unit one-sing.sh installs.
-const foreignSingboxUnit = "/etc/systemd/system/one-sing.service"
+// --- layout migration & service retirement (design §9.3 实现修订) ----------
 
 // singboxLayout names every path the migration touches. Keeping it a value
 // (rather than reading the package constants inline) is what makes the
@@ -434,29 +453,64 @@ func moveFile(src, dst string, mode os.FileMode) error {
 	return os.Remove(src)
 }
 
-// serviceRun is the systemctl seam: the adoption path is otherwise impossible
+// serviceRun is the systemctl seam: the retirement path is otherwise impossible
 // to test without touching a live service manager.
 var serviceRun = run
 
-// AdoptForeignSingboxService stops and disables a one-sing.service left by
-// one-sing.sh, so it cannot fight fobe's own unit over the same binary, config
-// and port — two supervisors restarting one process flap forever, and the
-// panel would report a sing-box it cannot stop.
+// RetireLegacySingboxUnit stops and removes the service fobe used before the
+// §9.3 rename (fobe-singbox.service / /etc/init.d/sing-box), so it cannot fight
+// the unit fobe owns now: both supervise the same binary, config and inbound
+// port, and two supervisors restarting one process flap forever while the panel
+// addresses a unit it does not control.
 //
-// It reports whether a unit was adopted. Only systemd is handled: one-sing.sh
-// targets Debian only.
-func AdoptForeignSingboxService() (bool, error) {
-	return adoptForeignSingboxService(Detect(), foreignSingboxUnit)
-}
-
-func adoptForeignSingboxService(kind Kind, unitPath string) (bool, error) {
-	if kind != KindSystemd || !fileExists(unitPath) {
+// It reports whether anything was retired. Only systemd is handled for the unit
+// file; on procd the legacy init script is removed **only when it is fobe's
+// own** (it carries fobe's one-sing paths) — `/etc/init.d/sing-box` on OpenWrt
+// frequently belongs to the distribution's sing-box package, and deleting a
+// stranger's service would be far worse than leaving a dead file behind.
+func RetireLegacySingboxUnit() (bool, error) {
+	switch Detect() {
+	case KindSystemd:
+		return retireSystemdUnit(legacySingboxUnitPath, legacySingboxUnitName)
+	case KindProcd:
+		if !ownsLegacyInitScript(legacySingboxInitPath) {
+			return false, nil
+		}
+		_ = serviceRun(legacySingboxInitPath, "stop")
+		_ = serviceRun(legacySingboxInitPath, "disable")
+		if err := os.Remove(legacySingboxInitPath); err != nil && !os.IsNotExist(err) {
+			return true, fmt.Errorf("remove %s: %w", legacySingboxInitPath, err)
+		}
+		return true, nil
+	default:
 		return false, nil
 	}
-	if err := serviceRun("systemctl", "disable", "--now", "one-sing.service"); err != nil {
-		return true, fmt.Errorf("disable one-sing.service: %w", err)
+}
+
+func retireSystemdUnit(unitPath, unitName string) (bool, error) {
+	if !fileExists(unitPath) {
+		return false, nil
 	}
+	if err := serviceRun("systemctl", "disable", "--now", unitName); err != nil {
+		return true, fmt.Errorf("disable %s: %w", unitName, err)
+	}
+	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
+		return true, fmt.Errorf("remove %s: %w", unitPath, err)
+	}
+	_ = serviceRun("systemctl", "daemon-reload")
 	return true, nil
+}
+
+// ownsLegacyInitScript reports whether the procd script at path was written by
+// fobe: ours always names the one-sing layout (the unit is generated with
+// absolute binary/config paths under the work dir), which a distribution
+// package's script never does.
+func ownsLegacyInitScript(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(raw, []byte("one-sing"))
 }
 
 // pathExists reports whether anything at all (file or directory) is at p.
