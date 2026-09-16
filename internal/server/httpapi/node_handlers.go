@@ -403,15 +403,33 @@ func containsInterface(interfaces []store.NodeInterface, want string) bool {
 	return false
 }
 
+// handleNodeLatency serves the node's latency history. `target=all` (the
+// detail-page chart) returns every target enabled on the node, averaged into
+// `bucket`-second buckets (design §13: 7d views are downsampled server-side,
+// else 5s points × N targets flood the payload). `target=<id>` keeps
+// returning raw points for a single target.
 func (s *Server) handleNodeLatency(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	targetID := parseInt64Default(r.URL.Query().Get("target"), 0)
 	from := parseInt64Default(r.URL.Query().Get("from"), nowUnix()-7*86400)
-	if targetID == 0 {
-		writeErr(w, http.StatusBadRequest, "target_required")
-		return
+	var (
+		samples []store.LatencySampleRow
+		err     error
+	)
+	switch target := r.URL.Query().Get("target"); target {
+	case "", "all":
+		bucket := parseInt64Default(r.URL.Query().Get("bucket"), 1800)
+		if bucket <= 0 {
+			bucket = 1800
+		}
+		samples, err = s.Store.ListLatencyBucketed(id, from, bucket)
+	default:
+		targetID := parseInt64Default(target, 0)
+		if targetID == 0 {
+			writeErr(w, http.StatusBadRequest, "target_required")
+			return
+		}
+		samples, err = s.Store.ListLatency(id, targetID, from)
 	}
-	samples, err := s.Store.ListLatency(id, targetID, from)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return

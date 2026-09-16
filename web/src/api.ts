@@ -209,8 +209,18 @@ export function nodeTraffic(id: string, days: number): Promise<TrafficResp> {
   return request(`/api/nodes/${encodeURIComponent(id)}/traffic?days=${days}`);
 }
 
-export function nodeLatency(id: string, target: number, from: number): Promise<{ samples: LatencySample[] }> {
-  return request(`/api/nodes/${encodeURIComponent(id)}/latency?target=${target}&from=${Math.floor(from)}`);
+/** target='all' pulls every target enabled on the node, averaged into
+ * `bucket`-second buckets (design §13); a numeric target returns raw points. */
+export function nodeLatency(
+  id: string,
+  target: number | 'all',
+  from: number,
+  bucket?: number,
+): Promise<{ samples: LatencySample[] }> {
+  const b = bucket && bucket > 0 ? `&bucket=${bucket}` : '';
+  return request(
+    `/api/nodes/${encodeURIComponent(id)}/latency?target=${target}&from=${Math.floor(from)}${b}`,
+  );
 }
 
 /** §14 手动主 IP: the server validates that the IP is in the node's reported set. */

@@ -428,3 +428,36 @@ func (s *Store) ListLatency(nodeID string, targetID int64, fromTS int64) ([]Late
 	}
 	return out, rows.Err()
 }
+
+// ListLatencyBucketed returns per-bucket averages for every target enabled on
+// the node, restricted to targets in node_latency_targets. Design §13 requires
+// server-side downsampling for the 7d view: raw 5s points are ~121k rows per
+// target, and the multi-target chart would multiply that by N. A bucket with
+// no successful probe keeps the -1 sentinel (COALESCE over the CASE), loss
+// becomes the bucket's mean failure rate. TS is the bucket start.
+func (s *Store) ListLatencyBucketed(nodeID string, fromTS, bucket int64) ([]LatencySampleRow, error) {
+	rows, err := s.db.Query(
+		`SELECT target_id, (ts / ?) * ? AS bts,
+		        COALESCE(AVG(CASE WHEN icmp_ms >= 0 THEN icmp_ms END), -1),
+		        COALESCE(AVG(CASE WHEN tcp_ms >= 0 THEN tcp_ms END), -1),
+		        AVG(loss)
+		 FROM latency_samples
+		 WHERE node_id = ? AND ts >= ?
+		   AND target_id IN (SELECT target_id FROM node_latency_targets WHERE node_id = ?)
+		 GROUP BY target_id, bts
+		 ORDER BY target_id, bts`, bucket, bucket, nodeID, fromTS, nodeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []LatencySampleRow{}
+	for rows.Next() {
+		var r LatencySampleRow
+		if err := rows.Scan(&r.TargetID, &r.TS, &r.ICMPMs, &r.TCPMs, &r.Loss); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

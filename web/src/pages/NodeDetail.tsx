@@ -15,8 +15,9 @@ const C_MEM = 'var(--accent)';
 const C_DISK = 'var(--amber)';
 const C_RX = 'var(--accent)';
 const C_TX = 'var(--green)';
-const C_ICMP = 'var(--accent)';
-const C_TCP = 'var(--green)';
+// One distinct color per enabled latency target, cycling when there are more
+// targets than palette entries (CSS vars only — no hardcoded colors).
+const LATENCY_PALETTE = ['var(--accent)', 'var(--green)', 'var(--amber)', 'var(--red)'];
 
 /**
  * Node detail = monitoring only: live tiles, charts, traffic, latency history
@@ -30,14 +31,12 @@ export default function NodeDetail() {
   const [data, setData] = useState<NodeDetailData | null>(null);
   const [metrics, setMetrics] = useState<MetricsSample[]>([]);
   const [traffic, setTraffic] = useState<TrafficResp | null>(null);
-  const [targets, setTargets] = useState<LatencyTarget[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [d, tg] = await Promise.all([api.getNode(id), api.listLatencyTargets().catch(() => ({ targets: [] }))]);
+      const d = await api.getNode(id);
       setData(d);
-      setTargets(tg.targets ?? []);
       setErr(null);
     } catch (e) {
       setErr(apiErrorMessage(e, t));
@@ -233,7 +232,7 @@ export default function NodeDetail() {
 
       <section className="card">
         <h3>{t('sec_latency')}</h3>
-        <LatencyPanel nodeId={id} nodeTargets={data.latency_targets ?? []} allTargets={targets} />
+        <LatencyPanel nodeId={id} nodeTargets={data.latency_targets ?? []} />
       </section>
 
       <section className="card">
@@ -246,32 +245,25 @@ export default function NodeDetail() {
 
 // --- latency ----------------------------------------------------------------
 
-function LatencyPanel({
-  nodeId,
-  nodeTargets,
-  allTargets,
-}: {
-  nodeId: string;
-  nodeTargets: LatencyTarget[];
-  allTargets: LatencyTarget[];
-}) {
+// One line per target enabled on this node — design §13's "多目标对比" chart.
+// The server returns all enabled targets in one request, bucket-averaged
+// (design §13: 7d views are downsampled server-side); each target contributes
+// the series matching its kind (icmp → icmp_ms, tcp → tcp_ms).
+function LatencyPanel({ nodeId, nodeTargets }: { nodeId: string; nodeTargets: LatencyTarget[] }) {
   const { t } = useI18n();
-  const options = nodeTargets.length > 0 ? nodeTargets : allTargets;
-  const [targetId, setTargetId] = useState<number>(options[0]?.id ?? 0);
   const [samples, setSamples] = useState<LatencySample[]>([]);
   const [busy, setBusy] = useState(false);
+  // nodeTargets gets a new array identity on every 5s tile refresh; key the
+  // fetch on the id set so the 30s poll only restarts when the selection changes.
+  const targetKey = nodeTargets.map((tg) => tg.id).join(',');
 
   useEffect(() => {
-    if (targetId === 0 && options.length > 0) setTargetId(options[0].id);
-  }, [options, targetId]);
-
-  useEffect(() => {
-    if (targetId === 0) return;
+    if (targetKey === '') return;
     let alive = true;
     setBusy(true);
     const pull = () => {
       api
-        .nodeLatency(nodeId, targetId, Math.floor(Date.now() / 1000) - 7 * 86400)
+        .nodeLatency(nodeId, 'all', Math.floor(Date.now() / 1000) - 7 * 86400, 1800)
         .then((r) => alive && setSamples(r.samples ?? []))
         .catch(() => alive && setSamples([]))
         .finally(() => alive && setBusy(false));
@@ -284,9 +276,38 @@ function LatencyPanel({
       alive = false;
       window.clearInterval(timer);
     };
-  }, [nodeId, targetId]);
+  }, [nodeId, targetKey]);
 
-  if (options.length === 0) {
+  const series = useMemo<ChartSeries[]>(() => {
+    const byTarget = new Map<number, { icmp: ChartPoint[]; tcp: ChartPoint[] }>();
+    for (const s of samples) {
+      let e = byTarget.get(s.target_id);
+      if (!e) {
+        e = { icmp: [], tcp: [] };
+        byTarget.set(s.target_id, e);
+      }
+      if (typeof s.icmp_ms === 'number' && s.icmp_ms >= 0) e.icmp.push({ x: s.ts, y: s.icmp_ms });
+      if (typeof s.tcp_ms === 'number' && s.tcp_ms >= 0) e.tcp.push({ x: s.ts, y: s.tcp_ms });
+    }
+    // LineChart keys legend/tooltip rows by series name; disambiguate targets
+    // that share a name by suffixing the kind.
+    const seen = new Map<string, number>();
+    const out: ChartSeries[] = [];
+    for (const tg of nodeTargets) {
+      const e = byTarget.get(tg.id);
+      if (!e) continue;
+      const points = tg.kind === 'icmp' ? e.icmp : e.tcp;
+      if (points.length === 0) continue;
+      let name = tg.name;
+      const n = (seen.get(name) ?? 0) + 1;
+      seen.set(name, n);
+      if (n > 1) name = `${name} (${tg.kind})`;
+      out.push({ name, color: LATENCY_PALETTE[out.length % LATENCY_PALETTE.length], points });
+    }
+    return out;
+  }, [samples, nodeTargets]);
+
+  if (nodeTargets.length === 0) {
     return (
       <p className="hint">
         {t('no_chart_data')} — {t('nav_targets')}: <Link to="/settings/targets">{t('target_new')}</Link>
@@ -294,44 +315,17 @@ function LatencyPanel({
     );
   }
 
-  const icmp: ChartPoint[] = [];
-  const tcp: ChartPoint[] = [];
-  for (const s of samples) {
-    if (typeof s.icmp_ms === 'number' && s.icmp_ms >= 0) icmp.push({ x: s.ts, y: s.icmp_ms });
-    if (typeof s.tcp_ms === 'number' && s.tcp_ms >= 0) tcp.push({ x: s.ts, y: s.tcp_ms });
-  }
-  const series: ChartSeries[] = [];
-  if (icmp.length > 0) series.push({ name: 'ICMP', color: C_ICMP, points: icmp });
-  if (tcp.length > 0) series.push({ name: 'TCP', color: C_TCP, points: tcp });
-  const lossVals = samples.map((s) => s.loss).filter((l) => typeof l === 'number' && l > 0);
-  const avgLoss = lossVals.length > 0 ? lossVals.reduce((a, b) => a + b, 0) / lossVals.length : 0;
+  const avgLoss = samples.length > 0 ? samples.reduce((a, s) => a + s.loss, 0) / samples.length : 0;
 
   return (
     <div className="stack">
       <div className="row-gap">
-        <label className="field inline">
-          <span>{t('select_target')}</span>
-          <select value={targetId} onChange={(e) => setTargetId(Number(e.target.value))}>
-            {options.map((tg) => (
-              <option key={tg.id} value={tg.id}>
-                {tg.name} ({tg.kind} {tg.host}
-                {tg.kind === 'tcp' ? ':' + tg.port : ''})
-              </option>
-            ))}
-          </select>
-        </label>
         {busy && <span className="hint">{t('loading')}</span>}
         <span className="hint">
           {t('loss')}: <span className="mono">{avgLoss.toFixed(2)}%</span>
         </span>
       </div>
-      <LineChart
-        series={series}
-        fmtY={(v) => `${Math.round(v)}ms`}
-        fmtX={fmtTimeShort}
-        emptyText={t('no_chart_data')}
-        key={targetId}
-      />
+      <LineChart series={series} fmtY={(v) => `${Math.round(v)}ms`} fmtX={fmtTimeShort} emptyText={t('no_chart_data')} />
     </div>
   );
 }
