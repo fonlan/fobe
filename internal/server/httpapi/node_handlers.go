@@ -63,6 +63,13 @@ type nodeView struct {
 	AgentUpdateError     string `json:"agent_update_error,omitempty"`
 	AgentUpdatePlannedAt *int64 `json:"agent_update_planned_at,omitempty"`
 	AgentUpdateDoneAt    *int64 `json:"agent_update_done_at,omitempty"`
+	// AgentUpdateAfter is when the pending plan actually becomes actionable:
+	// AgentUpdatePlannedAt (the stagger anchor) plus this node's deterministic
+	// offset. This is the "计划时刻" the panel shows; the anchor is written here
+	// for diagnostics only (it is the same second for every node after a server
+	// restart, so displaying it looks like a late start — see agentupdate
+	// .PlannedStart).
+	AgentUpdateAfter *int64 `json:"agent_update_after,omitempty"`
 	// AgentSelfUpdate is the capability bit an agent built before §5.5 never
 	// sends; false is how the panel recognises "needs a manual reinstall".
 	AgentSelfUpdate bool `json:"agent_self_update"`
@@ -111,6 +118,14 @@ func (s *Server) buildNodeView(n *store.Node) nodeView {
 	}
 	if n.AgentUpdateDoneAt > 0 {
 		v.AgentUpdateDoneAt = &n.AgentUpdateDoneAt
+	}
+	// §5.5: show the moment the probe will actually start, not the anchor it was
+	// planned from. s.AgentUpdate is optional (dev builds without the volume),
+	// and a nil manager simply has no plan to report.
+	if s.AgentUpdate != nil {
+		if after := s.AgentUpdate.PlannedStart(n); after > 0 {
+			v.AgentUpdateAfter = &after
+		}
 	}
 	// §5.5: the capability bit, not a version guess, decides whether this probe
 	// can follow on its own.

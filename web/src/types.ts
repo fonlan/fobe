@@ -48,7 +48,14 @@ export interface NodeView {
   agent_update_state: string;
   agent_update_attempts: number;
   agent_update_error?: string;
+  /**
+   * §5.5 stagger anchor: when the server first noticed this node was behind
+   * (the same second for every node after a restart). Diagnostics only — the
+   * panel shows agent_update_after.
+   */
   agent_update_planned_at?: number | null;
+  /** §5.5: when the pending plan becomes actionable = anchor + stagger offset. */
+  agent_update_after?: number | null;
   agent_update_done_at?: number | null;
   /** Capability bit: false = built before §5.5, needs a manual reinstall. */
   agent_self_update: boolean;

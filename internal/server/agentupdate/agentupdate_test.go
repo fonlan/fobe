@@ -149,7 +149,7 @@ func TestGatesRefuseTarget(t *testing.T) {
 }
 
 // The stagger anchor is written once per (node, target) and must not move on
-// reconnect: the panel shows it as the plan.
+// reconnect: every later decision is derived from it.
 func TestTargetStaggerIsStable(t *testing.T) {
 	dl := t.TempDir()
 	writeArtifact(t, dl, "20260915.000000")
@@ -181,6 +181,78 @@ func TestTargetStaggerIsStable(t *testing.T) {
 	}
 	if n.AgentTargetVersion != "20260915.000000" || n.AgentUpdatePlannedAt == 0 {
 		t.Fatalf("plan not recorded: target=%q planned_at=%d", n.AgentTargetVersion, n.AgentUpdatePlannedAt)
+	}
+}
+
+// The panel must show when the probe actually starts (anchor + stagger offset),
+// not the anchor: after a restart the anchor is the same second for every node,
+// so displaying it made a correctly staggered roll-out look like a late start.
+func TestPlannedStartIsTheDeadlineTheAgentGot(t *testing.T) {
+	dl := t.TempDir()
+	writeArtifact(t, dl, "20260915.000000")
+	st := testStore(t)
+	addNode(t, st, "n1", "old")
+	addNode(t, st, "n2", "old")
+	now := int64(1_700_000_000)
+	m := New(Config{
+		Store: st, Log: testLog(), ServerVersion: "20260915.000000", DLDir: dl,
+		Enabled: func() bool { return true },
+		Now:     func() int64 { return now },
+		Stagger: 5 * time.Minute,
+	})
+
+	// Both nodes are planned in the same instant (that is what a server restart
+	// does), yet they must not be shown as starting in the same instant.
+	_, after1, ok := m.Target("n1")
+	if !ok {
+		t.Fatal("n1: expected a target")
+	}
+	_, after2, ok := m.Target("n2")
+	if !ok {
+		t.Fatal("n2: expected a target")
+	}
+	n1, err := st.GetNode("n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n2, err := st.GetNode("n2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n1.AgentUpdatePlannedAt != n2.AgentUpdatePlannedAt {
+		t.Fatalf("anchors differ (%d vs %d) — the test no longer models a restart",
+			n1.AgentUpdatePlannedAt, n2.AgentUpdatePlannedAt)
+	}
+	if got := m.PlannedStart(n1); got != after1 {
+		t.Fatalf("PlannedStart(n1) = %d, want the deadline the agent was handed (%d)", got, after1)
+	}
+	if got := m.PlannedStart(n2); got != after2 {
+		t.Fatalf("PlannedStart(n2) = %d, want the deadline the agent was handed (%d)", got, after2)
+	}
+	if after1 == after2 {
+		t.Fatalf("both nodes got deadline %d — the stagger is not per-node", after1)
+	}
+
+	// The anchor itself is never what the panel gets once there is an offset.
+	if off := int64(m.staggerOffset("n1", "20260915.000000") / time.Second); off > 0 {
+		if m.PlannedStart(n1) == n1.AgentUpdatePlannedAt {
+			t.Fatal("PlannedStart returned the anchor")
+		}
+	}
+
+	// No pending plan: converged, cleared, or nothing to update.
+	converged := *n1
+	converged.AgentVersion = "20260915.000000"
+	if got := m.PlannedStart(&converged); got != 0 {
+		t.Fatalf("converged node: PlannedStart = %d, want 0", got)
+	}
+	cleared := *n1
+	cleared.AgentUpdatePlannedAt = 0
+	if got := m.PlannedStart(&cleared); got != 0 {
+		t.Fatalf("cleared plan: PlannedStart = %d, want 0", got)
+	}
+	if got := (*Manager)(nil).PlannedStart(n1); got != 0 {
+		t.Fatalf("unwired manager: PlannedStart = %d, want 0", got)
 	}
 }
 

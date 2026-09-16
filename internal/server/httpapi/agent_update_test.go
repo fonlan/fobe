@@ -185,6 +185,29 @@ func TestHelloAckCarriesAgentTargetAndStagger(t *testing.T) {
 	if n.AgentTargetVersion != "20260915.000000" || n.AgentUpdatePlannedAt == 0 {
 		t.Fatalf("plan not recorded: %+v", n)
 	}
+
+	// What the panel renders as 计划时刻 is the moment this probe may start, not
+	// the anchor it was planned from: after a restart the anchor is the same
+	// second for every node, so showing it made correct staggering read as a
+	// late start. The anchor stays in the payload for diagnostics.
+	_, out := authedGet(t, srv, cookie, "/api/nodes/"+nodeID)
+	view, _ := out["node"].(map[string]any)
+	after, ok := view["agent_update_after"].(float64)
+	if !ok {
+		t.Fatalf("agent_update_after missing from the node view: %v", view["agent_update_after"])
+	}
+	if int64(after) != ack.AgentUpdateAfter {
+		t.Fatalf("agent_update_after = %d, want the deadline the agent was handed (%d)",
+			int64(after), ack.AgentUpdateAfter)
+	}
+	anchor, ok := view["agent_update_planned_at"].(float64)
+	if !ok {
+		t.Fatalf("agent_update_planned_at missing (diagnostics): %v", view["agent_update_planned_at"])
+	}
+	if int64(anchor) != n.AgentUpdatePlannedAt || int64(after) < int64(anchor) {
+		t.Fatalf("anchor/deadline mismatch: anchor=%d stored=%d deadline=%d",
+			int64(anchor), n.AgentUpdatePlannedAt, int64(after))
+	}
 }
 
 // A dev/compose server has nothing to hand out; offering a target anyway would

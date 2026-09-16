@@ -188,7 +188,7 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
         />
         <Tile
           label={t('agent_update_planned')}
-          value={!unsupported && node.agent_update_planned_at ? fmtTime(node.agent_update_planned_at) : '-'}
+          value={!unsupported && node.agent_update_after ? fmtTime(node.agent_update_after) : '-'}
           sub={node.agent_update_done_at ? `${t('agent_update_done')}: ${fmtTime(node.agent_update_done_at)}` : undefined}
         />
       </div>

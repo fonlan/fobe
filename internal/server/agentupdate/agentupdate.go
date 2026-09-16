@@ -254,9 +254,33 @@ func (m *Manager) Target(nodeID string) (version string, after int64, ok bool) {
 	return target, after, true
 }
 
+// PlannedStart is the unix second at which a pending plan becomes actionable:
+// the recorded anchor plus the same deterministic stagger offset the agent was
+// handed as agent_update_after. 0 means no plan is pending.
+//
+// This — not the anchor — is what the panel shows as 计划时刻. The anchor is
+// the moment the server noticed the mismatch, which after a server restart is
+// the *same second for every node*; showing it made a correctly staggered
+// roll-out read as "every probe starts minutes after the planned time". The
+// anchor stays the storage/tuning truth (Target's stability, StaleAgentUpdates'
+// "15 minutes after distribution"), it is just not an operator-facing number.
+func (m *Manager) PlannedStart(n *store.Node) int64 {
+	if m == nil || n == nil || n.AgentUpdatePlannedAt == 0 {
+		return 0
+	}
+	if n.AgentTargetVersion == "" || n.AgentVersion == n.AgentTargetVersion {
+		return 0
+	}
+	after := n.AgentUpdatePlannedAt + int64(m.staggerOffset(n.ID, n.AgentTargetVersion)/time.Second)
+	if after <= 0 {
+		return 0
+	}
+	return after
+}
+
 // staggerOffset is the deterministic per-(node, target) spread inside the
 // stagger window. Deterministic on purpose: the same node keeps the same slot
-// across reconnects, so the panel's "planned at" does not jump around.
+// across reconnects, so the panel's "planned start" does not jump around.
 func (m *Manager) staggerOffset(nodeID, target string) time.Duration {
 	span := int64(m.cfg.Stagger / time.Second)
 	if span <= 0 {
