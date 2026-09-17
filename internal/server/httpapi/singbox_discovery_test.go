@@ -167,8 +167,10 @@ func TestLocalInboundsRenderFromTheFileAsEqualEntries(t *testing.T) {
 	if anytls == nil {
 		t.Fatalf("anytls inbound vanished: %+v", nodes)
 	}
-	if anytls.NameSuffix != "anytls:28711" {
-		t.Fatalf("anytls inbound lost its suffix: %+v", anytls)
+	// Plain node name: 2026-09-17j removed the protocol:port suffix — the
+	// renderers, not the node builder, own duplicate-name dedup.
+	if anytls.Name != "HK-Sharon" {
+		t.Fatalf("anytls name = %q, want the plain node name", anytls.Name)
 	}
 	if anytls.Password != "AnyTlsScriptPw1" {
 		t.Fatalf("password = %q, want the file's (rotating it breaks every client holding the script's URI)", anytls.Password)
@@ -182,8 +184,8 @@ func TestLocalInboundsRenderFromTheFileAsEqualEntries(t *testing.T) {
 		t.Fatalf("certificate = %q, want the bytes the probe reported for that port", anytls.CertPEM)
 	}
 	other := proxyNodeAt(nodes, 16929)
-	if other == nil || other.NameSuffix != "vless:16929" {
-		t.Fatalf("vless inbound must keep its suffix: %+v", nodes)
+	if other == nil || other.Name != "HK-Sharon" {
+		t.Fatalf("vless inbound must keep the plain name too: %+v", nodes)
 	}
 	if other.RealityPublicKey == "" {
 		t.Fatalf("vless reality key not derived: %+v", other)

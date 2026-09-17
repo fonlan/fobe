@@ -1,7 +1,5 @@
 package singbox
 
-import "strconv"
-
 // Adopted inbounds as subscription nodes (§9.3 实现修订 2026-09-17).
 //
 // This is the last mile of adoption: the config side (BuildNodeConfigWithInbounds)
@@ -40,9 +38,6 @@ func ProxyNodesFor(extras []ExtraInbound, nodeID, name, server, certPEM string) 
 			Server:   server,
 			Port:     e.ListenPort,
 			Protocol: e.Type,
-			// The suffix is what keeps two inbounds on one host apart in a
-			// client's proxy group.
-			NameSuffix: e.Type + ":" + strconv.Itoa(e.ListenPort),
 		}
 		switch e.Type {
 		case ProtoShadowsocks:
@@ -147,9 +142,10 @@ func extraRealityShortID(e ExtraInbound) string {
 // The panel's global anytls password only reaches a listener the *panel* wrote
 // (install / edit), and from then on the file carries it like any other value.
 //
-// Every listener keeps a `type:port` suffix. Several inbounds on a node are
-// peers: none is a hidden primary entry with a special name or subscription
-// meaning.
+// Every listener renders under the node's plain name (2026-09-17j removed the
+// type:port suffix): several inbounds on a node are peers, none is a hidden
+// primary entry with a special name or subscription meaning. Same names would
+// collide in a client's proxy group, so the renderers dedupe with "#2"/"-2".
 func LiveProxyNodes(configJSON, nodeID, name, server string, certs map[int]string) []ProxyNode {
 	inbounds, err := ParseLocalInbounds(configJSON)
 	if err != nil {

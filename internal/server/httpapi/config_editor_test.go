@@ -172,15 +172,16 @@ func TestSubscriptionRendersLiveConfigFile(t *testing.T) {
 	if first["password"] == "shared-proxy-pw" {
 		t.Fatal("the global anytls password replaced the credential the probe serves")
 	}
-	if first["tag"] != "fobe-HK-Sharon · anytls:22039" {
-		t.Fatalf("first inbound tag = %v, want a protocol:port suffix", first["tag"])
+	if first["tag"] != "fobe-HK-Sharon" {
+		t.Fatalf("first inbound tag = %v, want the plain node name (2026-09-17j dropped the suffix)", first["tag"])
 	}
-	// The hand-added anytls keeps the script's password and gets a suffixed name.
+	// The hand-added anytls keeps the script's password; the duplicate name
+	// falls back to the tag dedup.
 	added := byPort[28711]
 	if added == nil || added["password"] != "AnyTlsScriptPw1" {
 		t.Fatalf("hand-added anytls = %v", added)
 	}
-	if added["tag"] != "fobe-HK-Sharon · anytls:28711" {
+	if added["tag"] != "fobe-HK-Sharon-2" {
 		t.Fatalf("hand-added tag = %v", added["tag"])
 	}
 	// VLESS REALITY with the derived public key.

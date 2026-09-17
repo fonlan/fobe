@@ -295,9 +295,16 @@ func TestSubscriptionRenderDefaultsAndSniffing(t *testing.T) {
 		t.Fatalf("clash content-type %q", ct)
 	}
 	y := string(r.Body)
-	for _, want := range []string{"type: anytls", `"203.0.113.10"`, "port: 23456", "skip-cert-verify: false", "ca-str: |", "BEGIN CERTIFICATE", "sni: www.bing.com"} {
+	// 2026-09-17j: no sni / ca-str, and verification is knowingly off — mihomo's
+	// anytls schema has no field to pin a certificate with.
+	for _, want := range []string{"type: anytls", `"203.0.113.10"`, "port: 23456", "skip-cert-verify: true"} {
 		if !strings.Contains(y, want) {
 			t.Fatalf("clash output missing %q:\n%s", want, y)
+		}
+	}
+	for _, gone := range []string{"ca-str", "sni:", "BEGIN CERTIFICATE"} {
+		if strings.Contains(y, gone) {
+			t.Fatalf("clash output still contains %q:\n%s", gone, y)
 		}
 	}
 

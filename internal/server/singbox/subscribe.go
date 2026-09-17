@@ -28,10 +28,6 @@ type ProxyNode struct {
 	// Protocol is "" (treated as anytls) for the inbound fobe owns, and the
 	// inbound's own type for an adopted one.
 	Protocol string
-	// NameSuffix disambiguates an adopted inbound's client-facing name: several
-	// inbounds live on one host, and two proxies named "HK-Sharon" would make a
-	// client's proxy group ambiguous.
-	NameSuffix string
 	// Method is the shadowsocks cipher (adopted inbounds only).
 	Method string
 	// UUID + Flow are the VLESS credential and its xtls flow.
@@ -55,17 +51,6 @@ func (n ProxyNode) effectiveProtocol() string {
 		return ProtoAnytls
 	}
 	return n.Protocol
-}
-
-// renderName is the client-facing name: the node's, plus the adopted inbound's
-// type and port so an SS2022 inbound is distinguishable from the anytls one on
-// the same host.
-func (n ProxyNode) renderName() string {
-	base := nodeName(n)
-	if n.NameSuffix == "" {
-		return base
-	}
-	return base + " · " + n.NameSuffix
 }
 
 // tlsServerName is the SNI a client must present: the shared value for the
@@ -149,7 +134,7 @@ func RenderNodesJSON(nodes []ProxyNode) (string, error) {
 		}
 		out := sbNodeOutbound{
 			Type:       n.effectiveProtocol(),
-			Tag:        nodeTag(n.renderName(), seen),
+			Tag:        nodeTag(nodeName(n), seen),
 			Server:     n.Server,
 			ServerPort: n.Port,
 		}
@@ -204,8 +189,11 @@ func RenderNodesJSON(nodes []ProxyNode) (string, error) {
 // --- clash (mihomo) YAML rendering ---
 
 // RenderNodesYAML renders {{nodes}} for clash templates: list items only
-// (the template owns the "proxies:" key). For anytls the certificate goes into
-// ca-str (inline PEM) and skip-cert-verify stays false so the pin holds.
+// (the template owns the "proxies:" key). Anytls carries `skip-cert-verify:
+// true` and no CA fields on purpose: mihomo's anytls schema has no `ca-str`,
+// so there is nothing to pin with on this format — verification is knowingly
+// dropped here while the sing-box renderer keeps inline-PEM pinning
+// (design §9.3 实现修订 2026-09-17j).
 func RenderNodesYAML(nodes []ProxyNode) string {
 	var b strings.Builder
 	seen := map[string]int{}
@@ -229,7 +217,7 @@ func RenderNodesYAML(nodes []ProxyNode) string {
 		default:
 			continue
 		}
-		name := n.renderName()
+		name := nodeName(n)
 		seen[name]++
 		if c := seen[name]; c > 1 {
 			name = fmt.Sprintf("%s #%d", name, c)
@@ -239,14 +227,12 @@ func RenderNodesYAML(nodes []ProxyNode) string {
 		b.WriteString("    port: " + strconv.Itoa(n.Port) + "\n")
 		switch n.effectiveProtocol() {
 		case ProtoAnytls:
+			// No sni and no ca-str: with skip-cert-verify there is nothing SNI
+			// could verify against, and mihomo's anytls schema has no ca-str
+			// field to pin with (design §9.3 实现修订 2026-09-17j).
 			b.WriteString("    type: anytls\n")
 			b.WriteString("    password: " + yamlQuote(n.Password) + "\n")
-			b.WriteString("    sni: " + n.tlsServerName() + "\n")
-			b.WriteString("    skip-cert-verify: false\n")
-			b.WriteString("    ca-str: |\n")
-			for _, line := range strings.Split(strings.TrimRight(n.CertPEM, "\n"), "\n") {
-				b.WriteString("      " + strings.TrimSpace(line) + "\n")
-			}
+			b.WriteString("    skip-cert-verify: true\n")
 		case ProtoShadowsocks:
 			b.WriteString("    type: ss\n")
 			b.WriteString("    cipher: " + yamlQuote(n.Method) + "\n")

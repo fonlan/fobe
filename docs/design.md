@@ -448,16 +448,16 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 > **实现修订 2026-09-17b（编辑器模型：文件是真相，fobe 退成编辑者）**：上一条修订把「识别 → 接管」做成了"接管一次、之后由 fobe 整份重写"，实战反馈是**这个代价不该由操作员承担**——他继续用 `one-sing.sh` 的 `jq` 加一个入站，下一次收敛就把它抹了；而"接管"这个词本身也在暗示一件他没打算做的事（交出配置所有权）。本修订**推翻"期望状态是配置真相"在 sing-box 上的适用性**：
 > - **`/etc/one-sing/config.json` 是唯一真相**。agent 每轮（60s + 启动 + 面板"从探针刷新"命令）只读扫描，文件变了就把**原文**上报；服务端解析、加密存档，**不再按模板重写**。面板显示的就是探针盘上那一份。
 > - **编辑 = 读-合并-写**：`PUT /api/nodes/{id}/singbox/config` 携带 `reported_hash`（渲染时的文件指纹）+ `add/update/delete`。哈希对不上直接 `409 config_changed` —— 撞上"最后写赢"比"基于陈旧副本静默合并"好。合并**只碰被编辑的字段**：`sniff`、`multiplex`、`padding_scheme` 这类 fobe 不建模的选项原样保留，缺省的凭据**继承文件里的值**（面板回显脱敏字段时绝不清空密码）。合并后的整份文档写进 `settings.singbox_config:<id>` 并作为期望态下发；agent 看到字节不同就 `check` → 写盘 → `systemctl restart one-sing.service`（还是那三道闸门）。
-> - **手工加的东西立刻可见**：订阅从"最近上报的文件"渲染——`jq` 加一个 VLESS，下一轮上报后订阅里就有它，不需要任何"接管"。`POST /api/nodes/{id}/singbox/refresh` 让操作员改完文件不用等一轮。每个监听都以自己的协议、端口、凭据和证书渲染；名称统一带 `协议:端口` 后缀，避免在一个节点有多条规则时出现同名。
+> - **手工加的东西立刻可见**：订阅从"最近上报的文件"渲染——`jq` 加一个 VLESS，下一轮上报后订阅里就有它，不需要任何"接管"。`POST /api/nodes/{id}/singbox/refresh` 让操作员改完文件不用等一轮。每个监听都以自己的协议、端口、凭据和证书渲染。名称不带 `协议:端口` 后缀（**2026-09-17j 删除了这里引入的后缀**：同机多条入站重名交给渲染器的 `#2`/`-2` 兜底，见 §9.3 的 17j 修订）。
 > - **接管退化成一次普通编辑**：勾选 = 一个 credential 留空的 update（服务端写入面板自己那份全局任何 anytls 密码，前端拿不到它），端口与其余字段照旧。没有"接管后别的东西会被删"这种语义。**2026-09-17d 把这一步也删了**：勾选框与「接管」按钮不复存在，见下一条修订。
-> - **证书要文件里的字节**：config.json 只写 `certificate_path`，而客户端 pin 的是 PEM。agent 顺带上报每个 anytls 入站的证书内容（按端口索引，≤64 KiB、必须含 `BEGIN CERTIFICATE`），否则那些监听**永远进不了订阅**（本项目不做 `insecure=true`，§9.3）。
+> - **证书要文件里的字节**：config.json 只写 `certificate_path`，而客户端 pin 的是 PEM。agent 顺带上报每个 anytls 入站的证书内容（按端口索引，≤64 KiB、必须含 `BEGIN CERTIFICATE`），否则那些监听**永远进不了订阅**（本项目不做 `insecure=true`，§9.3；**2026-09-17j 把该原则收窄为"sing-box 渲染永不 insecure"**——Clash 渲染无法 pin，见 §9.3 的 17j 修订）。
 > - **agent 侧三处配套（都是真机上抓出来的）**：① 无版本的期望帧**不是**"未管理"——`SetDesired` 只有在 `Version=="" && ConfigJSON==""` 时才算 unmanaged，否则面板对脚本节点的编辑会被静默丢弃；② 无版本时**绝不去装内核**（`needInstall` 要求 `d.Version != ""`），否则 agent 会去下 `/dl/singbox//linux-amd64` 拿到 404、回滚整次 apply，日志里只有 `download : get sha256: 404 Not Found`；③ `hub.buildDesiredState` / `pushDesired` 在**只有 config、没有 desired_version** 时也要发帧（`ConfigHash != ""` 即算有期望态）。
 > - **`SyncSingboxConfigs()` 跳过被面板编辑过的节点**（`settings.singbox_edited:<id>` 标记）：模板变化只修复"从头由面板装、且从未被编辑"的节点。改了模板就想把操作员的文件再覆盖一遍，正是这次要消灭的行为。
 > - **代价（写清楚）**：① 订阅最长滞后一个上报周期（agent 变即推，通常数秒；可手动刷新）；② 两个写者抢同一文件时最后写赢，面板不保证等于盘上——它显示的是"最近上报"，且拒绝基于陈旧指纹的写入；③ 面板读得到凭据（它是操作员的配置，必须能改），仍经 Cryptor 加密落库、审计只记动作与端口。
 
 > **实现修订 2026-09-17d（取消接管动作）**：17b 把「接管」降级成一次编辑之后，面板上仍留着一个勾选框加一个「接管勾选的入站」按钮，而它要做的事完全可以从探针上报的文件里读出来。本修订删掉这个动作：`POST /api/nodes/{id}/singbox/adopt` 与编辑器请求里的 `adopt` 标志一并删除；要改入站就在表格里读-合并-写，或在探针上改完点「从探针刷新」。`extra_inbounds` / `BuildNodeConfigWithInbounds` 仍保留为 0.1.1 及更早节点的存量读方，避免安装或改端口时丢掉 VLESS/SS/Socks。
 
-> **实现修订 2026-09-17g（入口规则平等）**：一个节点可以有多条服务端入站，因此不再由探针上报挑选最后一个 anytls 写入 `node_singbox.port`，也不再给任何行显示「本节点入口」、锁定删除或使用无后缀订阅名。`LiveProxyNodes` 对每条可渲染规则统一按 `协议:端口` 加后缀，并只使用该端口随本机配置上报的证书与凭据；缺少某条 anytls 的证书 PEM 时跳过那一条，不会借用别的入口的证书。编辑页移除了旧的单一「修改端口」控件，端口变更统一在规则表逐行完成；仍保留至少一条入站的保护，防止生成空配置。
+> **实现修订 2026-09-17g（入口规则平等）**：一个节点可以有多条服务端入站，因此不再由探针上报挑选最后一个 anytls 写入 `node_singbox.port`，也不再给任何行显示「本节点入口」、锁定删除或使用无后缀订阅名。`LiveProxyNodes` 对每条可渲染规则统一按 `协议:端口` 加后缀（**2026-09-17j 已删除该后缀**，见下），并只使用该端口随本机配置上报的证书与凭据；缺少某条 anytls 的证书 PEM 时跳过那一条，不会借用别的入口的证书。编辑页移除了旧的单一「修改端口」控件，端口变更统一在规则表逐行完成；仍保留至少一条入站的保护，防止生成空配置。
 
 > **实现修订 2026-09-17f（入站状态由探针确认）**：入站表新增状态列，状态不是沿用 `node_singbox.status` 的进程级结果。面板「新增入站」时先把 `(node_id, port)` 记为 `pending`，因此规则下发后、探针尚未回报前，新行就会立即显示「添加中」；agent 成功应用配置后马上重扫本机文件，并对每个已配置监听作 `127.0.0.1:port` TCP 检测，随 `State.SingboxLocal.effective_inbound_ports` 上报。服务端只在该端口同时出现在上报配置与有效端口集合中时改为 `running`（「运行中」），绝不由全局 sing-box 进程在跑来推断；新 agent 会额外声明检查能力，因此某次检查后端口不在集合内会保持/回落为 `pending`。旧 agent 没有该能力标记时保留已有状态（新入口仍是「添加中」），避免假阳性；探针离线或端口没绑定成功也同样不会被显示为运行。每入口状态持久化在 `node_singbox_inbounds`（SchemaVersion 13），使页面刷新和异步上报之间不丢刚新增的行。
 
@@ -474,11 +474,15 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 > - **编辑页状态 Tile**：管理态沉默（无 desired_version 且无 version）而发现通道在场（`local.present`）时，状态显示「已识别（本机实例）」（`sb_status_local`），「尚未安装 sing-box」提示不再出现；管理态有任何话要说（安装中/运行中/异常）时仍以管理态为准。发现卡片里的运行/停止细节照旧。
 > - **代价**：发现型节点的直连/中转入口进订阅仍滞后一个上报周期（不变）；「已识别」不区分运行与停止——那是发现卡片里状态行的职责，Tile 只回答"这台机器有没有 sing-box"。
 
+> **实现修订 2026-09-17j（订阅名不再带 `协议:端口` 后缀；Clash 渲染的 anytls 改 `skip-cert-verify: true`）**：两条实战反馈，都出在订阅渲染器上：
+> - **名字去后缀**：17g 给每条出站名追加 `协议:端口`，实战读起来就是"订阅名称字段不生效"。后缀删除，客户端看到的就是回退链算出的基础名（入口 alias → `nodes.sub_name` → `nodes.name` → 节点 id）；直连入口的 alias 现在真正逐字生效（此前 `NameSuffix` 未清，alias 后面仍会被追加一次后缀，后续入站甚至双重后缀）。同一节点多条入站同名时交给渲染器既有的兜底去重（Clash ` #2`、sing-box tag `-2`）——**代价（说清楚）**：`-2` 不含端口信息，光看名字分不清是哪条入站；要区分就用 alias 或别在一台机器上开同名入站。这与 2026-09-16 的 tag 修订是同一款取舍："拒绝静默加后缀"的口径从来只约束显式 alias（`alias_conflict`），自动名一直允许 `-2`。
+> - **Clash 渲染放弃 pinning**：mihomo 的 anytls 出站 schema 没有 `ca-str` 字段（写了无效），`skip-cert-verify: false` + 内嵌证书在 Clash 客户端里根本没有落地方式；没有校验可言时 `sni` 也无从起作用。anytls 在 Clash YAML 里改写 `skip-cert-verify: true`，不再输出 `sni` 与 `ca-str`。**这是明确接受的降级**：Clash 侧的自签 anytls 暴露给能动路由的中间人，换取"Clash 客户端能连"；sing-box JSON 渲染保持 `tls.certificate` 内嵌 PEM pinning 不变，"不做 insecure" 的原则收窄为"sing-box 渲染永不 insecure"。证书上报（§9.3）仍是渲染门槛：没上报 PEM 的 anytls 入站照旧不进订阅，两种格式一致。
+
 > **实现修订 2026-09-16（非特权目录重定位）**：`--unprivileged` 不可写 `/etc`，故布局为 `dirname(-config)/one-sing/`（安装路径即 `/opt/fobe-agent/one-sing/`，`FOBE_SINGBOX_HOME` 优先）。服务端仍生成 root 布局的绝对证书路径，agent 在写盘与 config hash 比对时同步替换前缀；否则每次 60 秒收敛都会误判配置变化并重启。非特权模式不迁移 root 的旧布局，也不接管 `one-sing.service`。
 
 - **私钥永不离开探针**：首次启用时由 agent 用 Go 标准库 `crypto/x509` 现场生成自签证书（不依赖 openssl——OpenWrt 常常没有），存 `/etc/one-sing/cert/{cert.crt,private.key}`（0600）。密钥算法保持 ECDSA P-256（而非 one-sing.sh 的 RSA-4096）：探针是小机器、密钥在设备上现场生成，而客户端是按 SHA256 指纹 pinning 的，算法对客户端不可见。
 - agent 上报**证书 PEM + SHA256 指纹 + 有效期**给面板（不含私钥）。
-- 订阅渲染时把证书 PEM 写进客户端的 `tls.certificate` 字段做 **pinning**，而不是让客户端 `insecure: true`。这样自签也不会被中间人。
+- 订阅渲染时把证书 PEM 写进客户端的 `tls.certificate` 字段做 **pinning**，而不是让客户端 `insecure: true`。这样自签也不会被中间人。（**2026-09-17j：Clash 渲染是唯一例外**——mihomo 的 anytls 没有 `ca-str`，只能 `skip-cert-verify: true`，见上方 17j 修订。）
 - 入站口令 = **该入站自己的密码**：服务端在创建它时现生成 16 位 `[A-Za-z0-9]`，此后每次重新生成配置都从节点自己的 `config.json` 读回来（见 §10.1 实现修订 2026-09-17e；2026-09-17e 之前是全局共享的 `settings.anytls_password`）。
 - 端口：默认随机高位端口（10000-60000），面板可改；改端口时 agent 尝试自动放行防火墙（ufw / firewalld / nft / OpenWrt fw4），失败则返回需要你手动执行的命令原文。
 

@@ -845,15 +845,11 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 
 		if e.RelayNodeID == "" {
 			if e.Alias != "" {
-				// One entry can carry several inbounds: the first takes the
-				// alias verbatim, the rest keep their suffix so names stay
-				// unique inside a client's proxy group.
+				// One entry can carry several inbounds: every proxy takes the
+				// alias, and the renderers dedupe repeats with "#2"/"-2"
+				// (2026-09-17j removed the type:port suffix).
 				for i := range live {
-					if i == 0 {
-						live[i].Name = e.Alias
-					} else {
-						live[i].Name = e.Alias + " · " + live[i].NameSuffix
-					}
+					live[i].Name = e.Alias
 				}
 			}
 			nodes = append(nodes, live...)
