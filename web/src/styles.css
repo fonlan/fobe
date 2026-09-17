@@ -116,6 +116,24 @@ a:hover { text-decoration: underline; }
 
 .topbar-brand:hover { text-decoration: none; }
 
+/* small version badge next to the brand title; mono to read as a build id */
+.topbar-version {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  line-height: 1.4;
+  /* the brand title is 18px; nudge the badge to sit on its baseline */
+  align-self: flex-end;
+  margin-bottom: 3px;
+  white-space: nowrap;
+}
+
 /* brand artwork carries its own rounded tile; only size it here */
 .logo-img { width: 24px; height: 24px; display: block; }
 .logo-img.big { width: 64px; height: 64px; }

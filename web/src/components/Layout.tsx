@@ -47,7 +47,9 @@ function LogoutIcon() {
 export default function Layout() {
   const { t, locale, setLocale } = useI18n();
   const { mode, setMode, resolved } = useTheme();
-  const { setMe } = useAuth();
+  // me.version is the server build version (ldflags-injected, §5.5); shown as
+  // a small badge next to the brand. Empty in the API-only placeholder.
+  const { me, setMe } = useAuth();
   const navigate = useNavigate();
 
   const toggleLang = () => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN');
@@ -77,6 +79,7 @@ export default function Layout() {
           <Link to="/" className="topbar-brand" aria-label={t('app_name')}>
             <img src="/logo.svg" alt="" className="logo-img" />
             <span>Fobe</span>
+            {me?.version && <span className="topbar-version">{me.version}</span>}
           </Link>
           <div className="topbar-actions">
             <NavLink to="/alerts" className="btn ghost small icon-link" title={t('nav_alerts')} aria-label={t('nav_alerts')}>
