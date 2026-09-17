@@ -49,7 +49,7 @@ cd web && npm run build           # tsc（类型检查）+ vite build
 scripts/build.sh [outdir]         # 本地/CI 三件套：server、linux/amd64 agent+manifest、web
 scripts/pgo.sh [--url http://127.0.0.1:6060 | --file cpu.pprof]   # 采 CPU 剖面 → cmd/server/default.pgo
 docker compose up -d              # 拉预构建镜像（ghcr.io/fonlan/fobe），零必填环境变量
-docker compose up -d --build      # 本机构建（VERSION 占位 compose 会在镜像内换成内容寻址 compose-<哈希>，§5.5 跟随真实生效）
+docker compose up -d --build      # 本机构建（VERSION 占位 compose 会在镜像内换成内容寻址裸哈希，§5.5 跟随真实生效）
 
 # 进容器用的逃生口
 docker compose exec server fobe-server admin unblock <ip|all> | reset-password | list-sessions --revoke | kill-switch on|off

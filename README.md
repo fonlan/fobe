@@ -157,7 +157,7 @@ cd web && npm run build     # 前端 tsc 类型检查 + 构建
 | `FOBE_WEB_DIR` | `/srv/web` | 前端 dist 目录；留空进 API-only 模式 |
 | `FOBE_DL_DIR` | `/data/dl` | agent / sing-box 产物目录；必须落在挂载卷内，否则升级/重建容器即丢 |
 | `FOBE_AGENT_SEED_DIR` | `/srv/agent-seed` | 镜像内 agent 产物位置，启动时播种进 `FOBE_DL_DIR`；置空关闭播种 |
-| `FOBE_VERSION` | `compose` | 仅本地构建生效：注入 server/agent 版本号（镜像内会换成内容寻址的 `compose-<哈希>`）；显式设置可钉住版本做降级演练 |
+| `FOBE_VERSION` | `compose` | 仅本地构建生效：注入 server/agent 版本号（镜像内会换成内容寻址的裸哈希，无前缀）；显式设置可钉住版本做降级演练 |
 | `FOBE_BACKUP_DIR` | `/data/backup` | 快照目录；`=off` 关闭快照 |
 | `FOBE_SINGBOX_AUTO_DOWNLOAD` | `1` | 启动时若无任何本地版本则自动下载 sing-box 最新稳定版；`0` 关闭（也可手动投放 `data/dl/singbox/<version>/`） |
 | `FOBE_GEOIP_MMDB` | `/data/geoip/GeoLite2-Country.mmdb` | 国别库路径（本机直接跑二进制时指到可写目录） |

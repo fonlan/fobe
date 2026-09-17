@@ -53,6 +53,11 @@ ARG SERVER_GOAMD64=v1
 # Go builds are reproducible, so identical source keeps the same id.
 # An explicit non-placeholder VERSION (the release pipeline passes the tag)
 # goes through untouched.
+# The id is the bare fingerprint, no dev-/compose- prefix (2026-09-17): the
+# panel wears it as a badge next to the brand and the prefix was noise, while
+# release-shape only needs a digit (guaranteed by the 0-prepend). The pending
+# build keeps embedding "<base>-pending", so the fingerprint — and therefore
+# the id's digits — match the prefixed era for unchanged source.
 # The final id lives in $VER, not $VERSION on purpose: Docker substitutes ARG
 # names into the RUN text at parse time, so reassigning VERSION in the shell
 # cannot affect the already-substituted occurrences below.
@@ -76,7 +81,7 @@ RUN set -eu; \
         pack /tmp/agent-pending; \
         fp="$(sha256sum /tmp/agent-pending | cut -c1-12)"; \
         case "$fp" in *[0-9]*) ;; *) fp="0$fp" ;; esac; \
-        VER="$base-$fp"; \
+        VER="$fp"; \
       ;; \
     esac; \
     CGO_ENABLED=0 GOAMD64="$SERVER_GOAMD64" go build -trimpath -pgo=auto \
