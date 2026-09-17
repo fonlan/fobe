@@ -565,7 +565,10 @@ func (m *singboxManager) converge() {
 			m.report(d, act.version, false, err.Error(), pair)
 			return
 		}
-		if err := m.verifyWindow(bin, effectivePort(d)); err != nil {
+		// Nothing was running before this start, so gate ③ holds the config to
+		// its full promise: every listener it declares must answer (§9.2 实现
+		// 修订 2026-09-17).
+		if err := m.verifyWindow(bin, gate3TargetPorts(d, configPath, false)); err != nil {
 			m.rollback(bin, configPath, d, false, false, err, pair)
 			return
 		}
@@ -714,13 +717,19 @@ func (m *singboxManager) apply(bin, configPath string, d *protocol.SingboxDesire
 		return err
 	}
 
+	// Fix what gate ③ may demand *before* the restart replaces the listeners
+	// that would form the baseline (§9.2 实现修订 2026-09-17).
+	wasRunning := m.processAlive(bin)
+	demand := gate3TargetPorts(d, configPath, wasRunning)
+
 	// gate ②: write/refresh the service definition and start
 	if err := m.start(bin, configPath); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
 
-	// gate ③: 30s observation — process alive && inbound port answers TCP
-	if err := m.verifyWindow(bin, effectivePort(d)); err != nil {
+	// gate ③: 30s observation — process alive && every demanded listener
+	// answers TCP on 127.0.0.1
+	if err := m.verifyWindow(bin, demand); err != nil {
 		return fmt.Errorf("verify: %w", err)
 	}
 	return nil
@@ -1209,22 +1218,99 @@ func killPID(pid int) {
 	_ = p.Kill()
 }
 
-// verifyWindow is gate ③: within the observation window the process must
-// stay alive and TCP 127.0.0.1:port must answer; retried every second.
-func (m *singboxManager) verifyWindow(bin string, port int) error {
+// verifyWindow is gate ③: within the observation window the process must stay
+// alive and every port in `ports` must answer TCP on 127.0.0.1; retried every
+// second. An empty slice skips the TCP half — the process check still gates.
+func (m *singboxManager) verifyWindow(bin string, ports []int) error {
 	deadline := time.Now().Add(observeWindow)
 	for {
 		if !m.processAlive(bin) {
 			return errors.New("sing-box process exited during observation window")
 		}
-		if port <= 0 || tcpConnectable(port) {
+		if missing := firstUnreachablePort(ports); missing == 0 {
 			return nil
-		}
-		if !time.Now().Before(deadline) {
-			return fmt.Errorf("port %d not reachable within %s", port, observeWindow)
+		} else if !time.Now().Before(deadline) {
+			return fmt.Errorf("port %d not reachable within %s", missing, observeWindow)
 		}
 		time.Sleep(observeStep)
 	}
+}
+
+func firstUnreachablePort(ports []int) int {
+	for _, port := range ports {
+		if !tcpConnectable(port) {
+			return port
+		}
+	}
+	return 0
+}
+
+// configListenPorts returns every distinct inbound listen_port a config
+// declares, in file order. These are the listeners sing-box will actually
+// open — the thing gate ③ can hold the config to.
+func configListenPorts(configJSON string) []int {
+	var cfg struct {
+		Inbounds []struct {
+			ListenPort int `json:"listen_port"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return nil
+	}
+	seen := map[int]bool{}
+	ports := make([]int, 0, len(cfg.Inbounds))
+	for _, inbound := range cfg.Inbounds {
+		if inbound.ListenPort <= 0 || seen[inbound.ListenPort] {
+			continue
+		}
+		seen[inbound.ListenPort] = true
+		ports = append(ports, inbound.ListenPort)
+	}
+	return ports
+}
+
+// gate3Ports decides what gate ③ may demand of this apply.
+//
+// It verifies the *config's* listeners, never the desired frame's bookkeeping
+// port: `node_singbox.port` is sticky by design (an uninstall/reinstall round
+// trip keeps the operator's port), so it can name a listener the config no
+// longer contains — and then every apply on the node fails verification for a
+// port nobody asked sing-box to open, rolled back after 30s each time. That is
+// not hypothetical: a panel that deleted an inbound put every later edit of
+// that node into exactly that dead loop (verify: port 22039 not reachable).
+//
+// When sing-box was already running, only listeners that answered *before* the
+// restart are evidence that this apply broke something: a listener the probe
+// never served (one bound to a specific non-loopback address, say) cannot get
+// better or worse from an unrelated edit, and demanding it anyway let one
+// stuck listener block every edit of the file. A fresh start has no baseline,
+// so there the config is held to its full promise: every declared listener
+// must come up.
+func gate3Ports(newConfig string, wasRunning bool, probe func(int) bool) []int {
+	ports := configListenPorts(newConfig)
+	if len(ports) == 0 || !wasRunning {
+		return ports
+	}
+	required := make([]int, 0, len(ports))
+	for _, port := range ports {
+		if probe(port) {
+			required = append(required, port)
+		}
+	}
+	return required
+}
+
+// gate3TargetPorts is gate3Ports against the config this apply is about to
+// serve: the desired document when there is one, the on-disk file otherwise
+// (a version-only apply re-serves what is already there).
+func gate3TargetPorts(d *protocol.SingboxDesired, configPath string, wasRunning bool) []int {
+	served := d.ConfigJSON
+	if served == "" {
+		if raw, err := os.ReadFile(configPath); err == nil {
+			served = string(raw)
+		}
+	}
+	return gate3Ports(served, wasRunning, tcpConnectable)
 }
 
 func tcpConnectable(port int) bool {
@@ -1236,8 +1322,10 @@ func tcpConnectable(port int) bool {
 	return true
 }
 
-// effectivePort prefers the desired port; when absent it falls back to the
-// first inbound listen_port in the config so gate ③ still has a target.
+// effectivePort is the firewall pass's target: the desired port, falling back
+// to the first inbound listen_port in the config. It is bookkeeping for the
+// one-shot allow rule (§9.2), deliberately not gate ③'s demand set — a sticky
+// port the config no longer declares must not fail an apply (see gate3Ports).
 func effectivePort(d *protocol.SingboxDesired) int {
 	if d.Port > 0 {
 		return d.Port

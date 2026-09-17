@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/fonlan/fobe/internal/server/singbox"
@@ -69,6 +70,21 @@ const liveConfigWithPanelInbound = `{
         }
       }
     }
+  ],
+  "outbounds": [{"type": "direct", "tag": "direct"}]
+}`
+
+// deleteFixture is a minimal reported file for the delete-status test. The
+// one-line anytls block is the anchor TestPutNodeSingboxConfigDeleteShows
+// DeletingUntilReport removes to fake the probe's applied report.
+const deleteFixture = `{
+  "log": {"level": "info"},
+  "inbounds": [
+    {"type": "anytls", "tag": "anytls-in-22039", "listen": "::", "listen_port": 22039,
+     "users": [{"password": "panel-generated-pw"}],
+     "tls": {"enabled": true, "certificate_path": "/etc/one-sing/cert/cert.crt", "key_path": "/etc/one-sing/cert/private.key"}},
+    {"type": "vless", "tag": "vless-in-16929", "listen": "::", "listen_port": 16929,
+     "users": [{"uuid": "b2f0a2f4-1111-2222-3333-444455556666"}]}
   ],
   "outbounds": [{"type": "direct", "tag": "direct"}]
 }`
@@ -453,6 +469,94 @@ func TestPutNodeSingboxConfigShowsNewInboundAsPendingBeforeReport(t *testing.T) 
 		}
 	}
 	t.Fatalf("new pending inbound absent from %+v", body.Inbounds)
+}
+
+// Deleting an inbound must read 删除中 while the probe still reports the old
+// file — dropping the lifecycle row at edit time made the still-listed listener
+// come back as plain `pending`, so a running listener showed 添加中 for the
+// whole apply window. The row disappears once a report no longer lists the
+// port (the probe applied the delete).
+func TestPutNodeSingboxConfigDeleteShowsDeletingUntilReport(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := loginSession(t, srv)
+	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
+	seedLiveConfig(t, api, id, deleteFixture)
+	// Lifecycle rows the way reconciliation leaves them: both listeners
+	// reported, only 22039 locally acknowledged so far.
+	if err := api.Store.ReconcileNodeSingboxInbounds(id, []store.NodeSingboxInbound{
+		{Port: 22039, Type: "anytls", Tag: "anytls-in-22039"},
+		{Port: 16929, Type: "vless", Tag: "vless-in-16929"},
+	}, []int{22039}, true); err != nil {
+		t.Fatalf("seed lifecycle rows: %v", err)
+	}
+
+	statusOf := func() map[int]string {
+		t.Helper()
+		r := doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+id+"/singbox/config", cookie, nil)
+		if r.Status != http.StatusOK {
+			t.Fatalf("GET config = %d %s", r.Status, r.Body)
+		}
+		var body struct {
+			Inbounds []struct {
+				Port   int    `json:"port"`
+				Status string `json:"status"`
+			} `json:"inbounds"`
+		}
+		if err := json.Unmarshal(r.Body, &body); err != nil {
+			t.Fatalf("decode config payload: %v", err)
+		}
+		out := map[int]string{}
+		for _, inbound := range body.Inbounds {
+			out[inbound.Port] = inbound.Status
+		}
+		return out
+	}
+
+	if got := statusOf(); got[22039] != "running" {
+		t.Fatalf("status before delete = %v, want 22039 running", got)
+	}
+
+	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+id+"/singbox/config", cookie,
+		map[string]any{
+			"reported_hash": hashOf(deleteFixture),
+			"delete":        []int{0},
+		})
+	if r.Status != http.StatusOK {
+		t.Fatalf("delete inbound = %d %s", r.Status, r.Body)
+	}
+
+	// The reported file is unchanged until the probe applies: the listener is
+	// still listed, but now as 删除中 — and its neighbour keeps its own state.
+	got := statusOf()
+	if _, listed := got[22039]; !listed {
+		t.Fatalf("deleted listener vanished before the probe applied: %v", got)
+	}
+	if got[22039] != "deleting" {
+		t.Fatalf("status after delete = %v, want 22039 deleting", got)
+	}
+	if got[16929] != "pending" {
+		t.Fatalf("untouched listener disturbed: %v", got)
+	}
+
+	// The probe applies and reports the file without the listener: the row is
+	// gone, not pending.
+	anchor := `{"type": "anytls", "tag": "anytls-in-22039", "listen": "::", "listen_port": 22039,
+     "users": [{"password": "panel-generated-pw"}],
+     "tls": {"enabled": true, "certificate_path": "/etc/one-sing/cert/cert.crt", "key_path": "/etc/one-sing/cert/private.key"}},`
+	after := strings.Replace(deleteFixture, anchor+"\n", "", 1)
+	if after == deleteFixture {
+		t.Fatal("fixture anchor missing")
+	}
+	seedLiveConfig(t, api, id, after)
+	if err := api.Store.ReconcileNodeSingboxInbounds(id, []store.NodeSingboxInbound{
+		{Port: 16929, Type: "vless", Tag: "vless-in-16929"},
+	}, nil, true); err != nil {
+		t.Fatalf("reconcile applied report: %v", err)
+	}
+	got = statusOf()
+	if _, listed := got[22039]; listed {
+		t.Fatalf("deleted listener still listed after the confirming report: %v", got)
+	}
 }
 
 // A node the panel installs from scratch still works: no file reported yet, so

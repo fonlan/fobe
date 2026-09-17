@@ -448,8 +448,9 @@ export interface SingboxInbound {
   flow?: string;
   username?: string;
   method?: string;
-  /** `pending` until the agent confirms local TCP reachability, then `running`. */
-  status: 'pending' | 'running' | string;
+  /** `pending` until the agent confirms local TCP reachability, then `running`;
+   *  a listener the panel removed reads `deleting` until a report drops it. */
+  status: 'pending' | 'running' | 'deleting' | string;
   /** Position in the file's inbound array — every edit carries it back. */
   number: number;
 }

@@ -151,8 +151,9 @@ type inboundView struct {
 	Username   string `json:"username,omitempty"`
 	Method     string `json:"method,omitempty"`
 	// Status is pending until the agent reports that this exact listener accepts
-	// a local TCP connection, then running. A desired config is not proof that
-	// sing-box bound every inbound it contains.
+	// a local TCP connection, then running. A listener the panel removed reads
+	// deleting until a report no longer lists the port. A desired config is not
+	// proof that sing-box bound every inbound it contains.
 	Status string `json:"status"`
 	// Number is the position in the file's inbound array. Every edit carries
 	// the number it was rendered from, so an edit can be rejected instead of
@@ -215,18 +216,23 @@ func (s *Server) handleGetNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 	livePorts := map[int]bool{}
 	for i, ib := range inbounds {
 		view := inboundViewOf(ib, i)
+		// pending/running/deleting all live in the lifecycle row; the default
+		// covers a listener the panel has no record of (a script added it
+		// between reports).
 		view.Status = "pending"
-		if state, ok := byPort[ib.Port]; ok && state.Status == "running" {
-			view.Status = "running"
+		if state, ok := byPort[ib.Port]; ok {
+			view.Status = state.Status
 		}
 		views = append(views, view)
 		livePorts[ib.Port] = true
 	}
 	// The endpoint normally mirrors the last report. Keep a just-added listener
 	// visible before that report arrives, otherwise the user sees no row during
-	// the interval its pending state matters.
+	// the interval its pending state matters. A deleting row is the mirror
+	// image — its port is still in the reported file by definition — so it
+	// never renders from here.
 	for _, state := range states {
-		if livePorts[state.Port] {
+		if livePorts[state.Port] || state.Status == "deleting" {
 			continue
 		}
 		views = append(views, inboundView{
@@ -261,6 +267,15 @@ type configEditRequest struct {
 	Add          []inboundEdit `json:"add,omitempty"`
 	Update       []inboundEdit `json:"update,omitempty"`
 	Delete       []int         `json:"delete,omitempty"`
+}
+
+// deletedInbound is one listener the panel removed, with enough identity from
+// the file it was rendered from to keep its lifecycle row presentable while it
+// reads 删除中.
+type deletedInbound struct {
+	port int
+	typ  string
+	tag  string
 }
 
 type inboundEdit struct {
@@ -318,7 +333,7 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 	// then update by number, then append. Order matters: the numbers the panel
 	// sent describe the file it rendered, not the file being built.
 	drop := map[int]bool{}
-	deletedPorts := []int{}
+	deleted := []deletedInbound{}
 	for _, n := range req.Delete {
 		if n < 0 || n >= len(inbounds) {
 			writeErr(w, http.StatusBadRequest, "bad_index")
@@ -326,7 +341,12 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 		}
 		drop[n] = true
 		if inbound, ok := inbounds[n].(map[string]any); ok {
-			deletedPorts = append(deletedPorts, intFieldOf(inbound["listen_port"]))
+			tag, _ := inbound["tag"].(string)
+			deleted = append(deleted, deletedInbound{
+				port: intFieldOf(inbound["listen_port"]),
+				typ:  stringFieldOf(inbound["type"]),
+				tag:  tag,
+			})
 		}
 	}
 	if len(drop) > 0 {
@@ -393,11 +413,18 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 		singboxWriteErr(w, err)
 		return
 	}
-	for _, port := range deletedPorts {
-		if port <= 0 {
+	// The listener's lifecycle row is not dropped here: it flips to `deleting`
+	// and stays until an agent report no longer lists the port. Deleting it at
+	// edit time made the row — still present in the last reported file — come
+	// back from the GET as plain `pending`, i.e. a running listener showed
+	// 添加中 for the whole apply window (§9.3 实现修订 2026-09-17).
+	for _, del := range deleted {
+		if del.port <= 0 {
 			continue
 		}
-		if err := s.Store.DeleteNodeSingboxInbound(id, port); err != nil {
+		if err := s.Store.SetNodeSingboxInboundDeleting(id, store.NodeSingboxInbound{
+			Port: del.port, Type: del.typ, Tag: del.tag,
+		}); err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -647,6 +674,11 @@ func intFieldOf(v any) int {
 	default:
 		return 0
 	}
+}
+
+func stringFieldOf(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 // handleNodeSingboxRefresh asks the probe to re-read its config now

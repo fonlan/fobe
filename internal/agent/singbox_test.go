@@ -361,19 +361,61 @@ func TestVerifyWindowTimesOut(t *testing.T) {
 	}
 	m := newSingboxManager(&Config{}, testLogger())
 	// processAlive false (no child, no service manager output) → immediate failure
-	err := m.verifyWindow("nonexistent-sing-box", 1)
+	err := m.verifyWindow("nonexistent-sing-box", []int{1})
 	if err == nil || !strings.Contains(err.Error(), "observation window") {
 		t.Fatalf("err = %v, want observation window failure", err)
 	}
-	// port 0 skips the TCP check but the process check still gates
+	// no demanded ports skips the TCP check but the process check still gates
 	m.proc = nil
 	start := time.Now()
-	err = m.verifyWindow("nonexistent-sing-box", 0)
+	err = m.verifyWindow("nonexistent-sing-box", nil)
 	if err == nil {
 		t.Fatalf("expected failure with dead process")
 	}
 	if time.Since(start) > observeWindow {
 		t.Fatalf("verifyWindow should fail fast on a dead process")
+	}
+}
+
+func TestConfigListenPorts(t *testing.T) {
+	cfg := `{"inbounds":[
+		{"type":"anytls","listen_port":22039},
+		{"type":"vless","listen_port":16929},
+		{"type":"socks","listen_port":22039},
+		{"type":"mixed","listen_port":0},
+		{"type":"direct"}
+	]}`
+	got := configListenPorts(cfg)
+	if len(got) != 2 || got[0] != 22039 || got[1] != 16929 {
+		t.Fatalf("configListenPorts = %v, want [22039 16929]", got)
+	}
+	if got := configListenPorts("not json"); got != nil {
+		t.Fatalf("unparseable config = %v, want nil", got)
+	}
+}
+
+// Gate ③ holds the apply to the config's own listeners, not to the desired
+// frame's bookkeeping port — and while the service was already running, only
+// to the listeners that answered before the restart. A listener the probe
+// never served stays out of the demand set: one stuck listener must not roll
+// back every unrelated edit (the verify: port 22039 incident, §9.2).
+func TestGate3PortsBaseline(t *testing.T) {
+	cfg := `{"inbounds":[
+		{"type":"anytls","listen_port":22039},
+		{"type":"vless","listen_port":16929}
+	]}`
+	up := map[int]bool{22039: true} // 16929 was never reachable on this probe
+	probe := func(port int) bool { return up[port] }
+
+	if got := gate3Ports(cfg, false, probe); len(got) != 2 {
+		t.Fatalf("fresh start = %v, want every declared listener demanded", got)
+	}
+	got := gate3Ports(cfg, true, probe)
+	if len(got) != 1 || got[0] != 22039 {
+		t.Fatalf("running baseline = %v, want only the previously-answering listener", got)
+	}
+	if got := gate3Ports("", true, probe); got != nil {
+		t.Fatalf("empty config = %v, want nothing demanded", got)
 	}
 }
 

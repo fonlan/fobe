@@ -492,3 +492,95 @@ func TestRecordSingboxLocalPromotesOnlyAcknowledgedInbound(t *testing.T) {
 		}
 	}
 }
+
+// A pending removal reads `deleting` until the port disappears from a report —
+// reports that still list it (the delete not yet applied, or applied and rolled
+// back) must not flip the row back to running. The stale-report cleanup is what
+// finally deletes the row. A listener the probe never acknowledged has nothing
+// to delete on the probe: its row is dropped outright.
+func TestReconcileKeepsDeletingInboundUntilPortVanishes(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n1")
+	if err := h.store.SetNodeSingboxInboundPending("n1", store.NodeSingboxInbound{
+		Port: 28711, Type: singbox.ProtoAnytls, Tag: "anytls-in-28711",
+	}); err != nil {
+		t.Fatalf("seed pending inbound: %v", err)
+	}
+	report := func(cfg string, effective []int) {
+		t.Helper()
+		h.recordSingboxLocal("n1", &protocol.SingboxLocal{
+			Present: true, Running: true, ConfigSHA256: "hash-" + cfg, ConfigJSON: cfg,
+			EffectiveInboundPorts: effective, InboundChecksKnown: true,
+		})
+	}
+	report(hubLocalConfig, []int{28711})
+
+	if err := h.store.SetNodeSingboxInboundDeleting("n1", store.NodeSingboxInbound{
+		Port: 28711, Type: singbox.ProtoAnytls, Tag: "anytls-in-28711",
+	}); err != nil {
+		t.Fatalf("mark deleting: %v", err)
+	}
+	// A report that still lists the port (the pre-apply cadence, or a rollback)
+	// keeps the removal pending instead of resurrecting 运行中.
+	report(hubLocalConfig, []int{28711})
+	states, err := h.store.ListNodeSingboxInbounds("n1")
+	if err != nil {
+		t.Fatalf("list states: %v", err)
+	}
+	for _, state := range states {
+		if state.Port == 28711 && state.Status != "deleting" {
+			t.Fatalf("report resurrected the deleting row: %+v", states)
+		}
+	}
+
+	// The applied delete: the port stops appearing, and the row goes with it.
+	report(`{"inbounds":[
+	  {"type":"vless","tag":"vless-in-16929","listen_port":16929,"users":[{"uuid":"b2f0a2f4-1111-2222-3333-444455556666"}]}
+	]}`, nil)
+	states, err = h.store.ListNodeSingboxInbounds("n1")
+	if err != nil {
+		t.Fatalf("list states after apply: %v", err)
+	}
+	for _, state := range states {
+		if state.Port == 28711 {
+			t.Fatalf("deleting row survived the confirming report: %+v", states)
+		}
+	}
+
+	// An add still in flight (reported=0) never existed on the probe: deleting
+	// it must not leave a `deleting` ghost behind.
+	if err := h.store.SetNodeSingboxInboundPending("n1", store.NodeSingboxInbound{
+		Port: 12345, Type: singbox.ProtoSocks, Tag: "socks-in-12345",
+	}); err != nil {
+		t.Fatalf("seed never-reported add: %v", err)
+	}
+	if err := h.store.SetNodeSingboxInboundDeleting("n1", store.NodeSingboxInbound{
+		Port: 12345, Type: singbox.ProtoSocks, Tag: "socks-in-12345",
+	}); err != nil {
+		t.Fatalf("delete never-reported add: %v", err)
+	}
+	states, err = h.store.ListNodeSingboxInbounds("n1")
+	if err != nil {
+		t.Fatalf("list states: %v", err)
+	}
+	for _, state := range states {
+		if state.Port == 12345 {
+			t.Fatalf("never-reported add left a ghost row: %+v", state)
+		}
+	}
+
+	// A live listener with no lifecycle row at all still gets one, so its
+	// removal is visible as 删除中 from the first report on.
+	if err := h.store.SetNodeSingboxInboundDeleting("n1", store.NodeSingboxInbound{
+		Port: 16929, Type: singbox.ProtoVLESS, Tag: "vless-in-16929",
+	}); err != nil {
+		t.Fatalf("delete unrowed listener: %v", err)
+	}
+	states, err = h.store.ListNodeSingboxInbounds("n1")
+	if err != nil {
+		t.Fatalf("list states: %v", err)
+	}
+	if len(states) != 1 || states[0].Port != 16929 || states[0].Status != "deleting" {
+		t.Fatalf("unrowed listener not marked deleting: %+v", states)
+	}
+}

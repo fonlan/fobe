@@ -694,15 +694,17 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
   }, [installing, uninstalling, onlineNow, load]);
 
   // A new inbound is visible from the desired-state record before the agent's
-  // local config report catches up. Re-read quickly only for that short pending
-  // interval, so its status turns to running as soon as the agent confirms the
-  // listener instead of waiting for the normal discovery refresh.
-  const hasPendingInbound = cfg?.inbounds.some((inbound) => inbound.status === 'pending') ?? false;
+  // local config report catches up, and a deleted one lingers in the report
+  // until the probe applies and re-reports. Re-read quickly while either is in
+  // flight, so statuses flip as soon as the agent answers instead of waiting
+  // for the normal discovery refresh.
+  const hasInFlightInbound =
+    cfg?.inbounds.some((inbound) => inbound.status === 'pending' || inbound.status === 'deleting') ?? false;
   useEffect(() => {
-    if (!hasPendingInbound || !onlineNow) return;
+    if (!hasInFlightInbound || !onlineNow) return;
     const h = window.setInterval(() => void load(), 5000);
     return () => window.clearInterval(h);
-  }, [hasPendingInbound, onlineNow, load]);
+  }, [hasInFlightInbound, onlineNow, load]);
 
   const run = async (fn: () => Promise<unknown>, okMsg: string) => {
     if (busy) return;
@@ -814,7 +816,11 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
                         </td>
                         <td>
                           <span className="chip">
-                            {ib.status === 'running' ? t('sb_inbound_running') : t('sb_inbound_pending')}
+                            {ib.status === 'running'
+                              ? t('sb_inbound_running')
+                              : ib.status === 'deleting'
+                                ? t('sb_inbound_deleting')
+                                : t('sb_inbound_pending')}
                           </span>
                         </td>
                         <td>

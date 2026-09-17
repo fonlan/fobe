@@ -413,12 +413,78 @@ func (s *Store) DeleteNodeSingboxInbound(nodeID string, port int) error {
 	return err
 }
 
+// SetNodeSingboxInboundDeleting records that the panel removed this listener
+// from the desired document while the probe is still serving it. The row
+// survives — marked `deleting` — until an agent report no longer lists the
+// port: that is the confirmation that turns the panel's 删除中 into "gone",
+// and it is why the row must not be dropped at edit time (dropping it made the
+// still-listed listener render as plain `pending` — 添加中 — for the whole
+// apply window).
+//
+// A listener the probe never acknowledged (reported=0: an add whose desired
+// state has not been applied yet) has nothing to delete on the probe, so its
+// row is dropped outright. A listener with no row at all still gets one, so
+// the deleting state is visible even when reconciliation has never run.
+func (s *Store) SetNodeSingboxInboundDeleting(nodeID string, inbound NodeSingboxInbound) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// The normal case: a row the probe has acknowledged flips to deleting.
+	res, err := tx.Exec(
+		`UPDATE node_singbox_inbounds SET status = 'deleting', type = ?, tag = ?, updated_at = ?
+		 WHERE node_id = ? AND port = ? AND reported = 1`,
+		inbound.Type, inbound.Tag, now(), nodeID, inbound.Port,
+	)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n > 0 {
+		return tx.Commit()
+	}
+	// No acknowledged row. A row the probe never reported (an add still in
+	// flight) describes nothing on the probe — drop it rather than park a
+	// `deleting` ghost nobody will ever confirm.
+	drop, err := tx.Exec(
+		`DELETE FROM node_singbox_inbounds WHERE node_id = ? AND port = ? AND reported = 0`,
+		nodeID, inbound.Port,
+	)
+	if err != nil {
+		return err
+	}
+	if n, err := drop.RowsAffected(); err != nil {
+		return err
+	} else if n > 0 {
+		return tx.Commit()
+	}
+	// A live listener reconciliation has never rowed still gets a row, so its
+	// removal is visible as 删除中 from the first report on.
+	if _, err := tx.Exec(
+		`INSERT INTO node_singbox_inbounds (node_id, port, type, tag, status, reported, updated_at)
+		 VALUES (?, ?, ?, ?, 'deleting', 1, ?)`,
+		nodeID, inbound.Port, inbound.Type, inbound.Tag, now(),
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ReconcileNodeSingboxInbounds records the config that the agent actually saw.
 // An older report that lacks a freshly added listener must not erase that
 // pending row (reported=0); confirmed, missing rows from a prior report are
 // removed. Only effective ports become running. effectiveKnown is false for an
 // older agent that did not send the wire field, whose report must not demote a
 // listener that a newer agent had already confirmed.
+//
+// A `deleting` row whose port is still reported keeps its state: the report
+// describes the file as it is *now*, but the panel's delete has not been
+// applied until the port stops appearing — flipping back to running there is
+// exactly what turned a pending removal into a phantom 添加中/运行中 row. The
+// same stale cleanup that removes confirmed-but-vanished rows is what finally
+// deletes it.
 func (s *Store) ReconcileNodeSingboxInbounds(
 	nodeID string,
 	inbounds []NodeSingboxInbound,
@@ -469,7 +535,9 @@ func (s *Store) ReconcileNodeSingboxInbounds(
 			`INSERT INTO node_singbox_inbounds (node_id, port, type, tag, status, reported, updated_at)
 			 VALUES (?, ?, ?, ?, ?, 1, ?)
 			 ON CONFLICT(node_id, port) DO UPDATE SET
-			   type = excluded.type, tag = excluded.tag, status = excluded.status,
+			   type = excluded.type, tag = excluded.tag,
+			   status = CASE WHEN node_singbox_inbounds.status = 'deleting'
+			                 THEN 'deleting' ELSE excluded.status END,
 			   reported = 1, updated_at = excluded.updated_at`,
 			nodeID,
 			inbound.Port,
