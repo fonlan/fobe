@@ -92,7 +92,6 @@ func relayEntryOf(t *testing.T, entries []subEntryView, targetID string) subEntr
 func TestRelayEntryAutoEnrolAndRender(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -152,7 +151,6 @@ func TestRelayEntryAutoEnrolAndRender(t *testing.T) {
 func TestRelayEntryTombstoneSurvivesReconcile(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -190,7 +188,6 @@ func TestRelayEntryTombstoneSurvivesReconcile(t *testing.T) {
 func TestRelayDetectionRequiresMatchingTarget(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -215,7 +212,6 @@ func TestRelayDetectionRequiresMatchingTarget(t *testing.T) {
 func TestRelayEntryNotEnrolledWhileUnrenderable(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0) // port+cert reported below
@@ -261,7 +257,6 @@ func TestRelayEntryNotEnrolledWhileUnrenderable(t *testing.T) {
 func TestPickerOnlyOffersRenderableNodes(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	readyID := seedNodeWithIP(t, api, "ready", "machine-ready", "203.0.113.10", 20001)
 	plainID := seedNodeWithIP(t, api, "plain", "machine-plain", "198.51.100.7", 0) // no sing-box at all
@@ -301,7 +296,6 @@ func TestPickerOnlyOffersRenderableNodes(t *testing.T) {
 func TestRelayIngressNeedsAnAddress(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "", 20001) // no address
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -322,7 +316,6 @@ func TestRelayIngressNeedsAnAddress(t *testing.T) {
 func TestEntryAliasValidationAndTag(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -380,7 +373,6 @@ func TestEntryAliasValidationAndTag(t *testing.T) {
 func TestRelayNameFormatSetting(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -409,7 +401,6 @@ func TestRelayNameFormatSetting(t *testing.T) {
 func TestRelayAutoIncludeCanBeDisabled(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -441,7 +432,6 @@ func TestRelayAutoIncludeCanBeDisabled(t *testing.T) {
 func TestSubscriptionEntriesPayloadKeepsUnboundCandidatesAbsent(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -466,7 +456,6 @@ func TestSubscriptionEntriesPayloadKeepsUnboundCandidatesAbsent(t *testing.T) {
 func TestLegacyNodeIDsPathKeepsRelayEntries(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -503,7 +492,6 @@ func TestLegacyNodeIDsPathKeepsRelayEntries(t *testing.T) {
 func TestDirectEntryShadowedWarning(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -538,7 +526,6 @@ func TestDirectEntryShadowedWarning(t *testing.T) {
 func TestRelayEntrySurvivesItsRelayNode(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
 	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
@@ -569,7 +556,6 @@ func TestRelayEntrySurvivesItsRelayNode(t *testing.T) {
 func TestRelayWorksWithANonAnytlsIngress(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	// A: address + forward rule, no sing-box installed.
 	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 0)

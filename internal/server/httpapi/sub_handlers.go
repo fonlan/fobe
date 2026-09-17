@@ -802,18 +802,6 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 	if err != nil {
 		return nil
 	}
-	password, err := s.ensureAnytlsPassword()
-	if err != nil {
-		// A subscription is the other place the password can be born (§10.1 实现
-		// 修订 2026-09-16): rendering is as much a "use it" moment as installing.
-		// If the credential cannot be had at all (storage, or the wrong-master-key
-		// case of §4.4), serve nothing rather than a list of outbounds with an
-		// empty password — a client would import nodes that can never
-		// authenticate, and the operator would be staring at a 200. Real cause is
-		// in the log.
-		s.Log.Error("subscription: anytls password", "err", err)
-		return nil
-	}
 	format := s.relayNameFormat()
 	nodes := make([]singbox.ProxyNode, 0, len(entries))
 	for _, e := range entries {
@@ -840,13 +828,18 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 			// No report yet (an install in flight, an agent that predates the
 			// field, or a row written before the editor model): fall back to
 			// the managed pair so a fresh node still appears as soon as it has
-			// a port and a certificate.
-			if !subRenderable(target, sb) {
+			// a port and a certificate. The credential still comes from the
+			// node's own config (§10.1 实现修订 2026-09-17e) — rendering is not a
+			// place that mints, and a node with no readable credential is
+			// skipped instead of served with an empty password (a client would
+			// import an outbound that can never authenticate).
+			password := s.nodeProxyPassword(e.NodeID, sb.Port)
+			if !subRenderable(target, sb) || password == "" {
 				continue
 			}
 			live = []singbox.ProxyNode{{
 				ID: e.NodeID, Name: name, Server: target.PrimaryIP, Port: sb.Port,
-				Password: s.nodeAnytlsPassword(e.NodeID, password), CertPEM: sb.CertPEM,
+				Password: password, CertPEM: sb.CertPEM,
 			}}
 		}
 
@@ -896,15 +889,6 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 		})
 	}
 	return nodes
-}
-
-// nodeAnytlsPassword is the credential the panel's own inbound serves: the
-// per-node override when one exists (§19.9), else the global shared password.
-func (s *Server) nodeAnytlsPassword(nodeID, global string) string {
-	if override, err := s.Store.GetNodeSingboxPasswordOverride(nodeID); err == nil && override != "" {
-		return override
-	}
-	return global
 }
 
 // renderSubscription produces the final config body for the chosen format:

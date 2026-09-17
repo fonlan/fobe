@@ -483,8 +483,11 @@ func (s *Store) GetNodeSingboxFirewallHint(nodeID string) (string, error) {
 }
 
 // GetNodeSingboxPasswordOverride returns the per-node anytls password
-// override (§19.9; empty = use the global shared password). v1 keeps this a
-// data-model-only feature: no UI/API writes it yet.
+// override (§19.9). Since §10.1 实现修订 2026-09-17e it is only a *fallback*:
+// a node's credential normally lives in its own config.json (the panel's
+// copy of it, or the probe's report), and this column is read last — it has no
+// writer in the panel any more, but a value set by hand must still win over
+// minting a new password.
 func (s *Store) GetNodeSingboxPasswordOverride(nodeID string) (string, error) {
 	var pw string
 	err := s.db.QueryRow(

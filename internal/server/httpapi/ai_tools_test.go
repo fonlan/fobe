@@ -113,13 +113,6 @@ func TestAIMetaToolsForceConfirmation(t *testing.T) {
 			kind:       "set_singbox_port",
 			payloadHas: `"port":24443`,
 		},
-		{
-			name:       "set_anytls_password",
-			tool:       "set_anytls_password",
-			arguments:  `{"password":"super-secret-pw","reason":"rotation"}`,
-			kind:       "set_anytls_password",
-			payloadHas: `"password_encrypted"`,
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -155,9 +148,6 @@ func TestAIMetaToolsForceConfirmation(t *testing.T) {
 			if !strings.Contains(action.Payload, test.payloadHas) {
 				t.Fatalf("payload %q missing %q", action.Payload, test.payloadHas)
 			}
-			if test.kind == "set_anytls_password" && strings.Contains(action.Payload, "super-secret-pw") {
-				t.Fatalf("plaintext password leaked into pending action: %q", action.Payload)
-			}
 			audit, err := api.Store.ListAudit(50)
 			if err != nil {
 				t.Fatal(err)
@@ -166,9 +156,6 @@ func TestAIMetaToolsForceConfirmation(t *testing.T) {
 			for _, entry := range audit {
 				if entry.Actor == "ai" && entry.Action == "ai_action_confirmation_required" && entry.Risk == "forced" {
 					found = true
-				}
-				if test.kind == "set_anytls_password" && strings.Contains(entry.Command, "super-secret-pw") {
-					t.Fatalf("plaintext password in audit entry: %+v", entry)
 				}
 			}
 			if !found {
@@ -423,14 +410,6 @@ func TestAIConfirmSetPortAppliesDesired(t *testing.T) {
 	upstream := upstreamAI(t, chatToolCall("call-port", "set_singbox_port", `{"port":24443}`), nil)
 	defer upstream.Close()
 	configureAI(t, api, upstream.URL, "k", "m")
-	password, err := api.Crypt.Encrypt("ctx-password")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := api.Store.SetSetting("anytls_password", password, true); err != nil {
-		t.Fatal(err)
-	}
-
 	_, body := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "change port"})
 	actionID := body["tool_call"].(map[string]any)["action_id"].(string)
 
@@ -454,45 +433,6 @@ func TestAIConfirmSetPortAppliesDesired(t *testing.T) {
 	}
 	if n := nodeCommandCount(t, api, nodeID); n != 0 {
 		t.Fatalf("commands queued = %d, want 0", n)
-	}
-}
-
-func TestAIConfirmAnytlsPasswordRepublishesConfig(t *testing.T) {
-	server, api := newTestServer(t)
-	defer server.Close()
-	nodeID := createAINode(t, api, "ai-confirm-pw")
-	cookie := loginCookie(t, server.URL)
-	upstream := upstreamAI(t, chatToolCall("call-pw", "set_anytls_password", `{"password":"brand-new-pw"}`), nil)
-	defer upstream.Close()
-	configureAI(t, api, upstream.URL, "k", "m")
-	oldPW, err := api.Crypt.Encrypt("old-pw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := api.Store.SetSetting("anytls_password", oldPW, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
-		NodeID: nodeID, DesiredVersion: "1.10.0", Port: 24443, Status: "running",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	_, body := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "rotate the password"})
-	actionID := body["tool_call"].(map[string]any)["action_id"].(string)
-
-	confirmResp, confirmBody := postJSONCookie(t, server.URL, cookie, "POST", "/api/ai/actions/"+actionID+"/confirm", nil)
-	defer confirmResp.Body.Close()
-	if confirmResp.StatusCode != http.StatusOK || confirmBody["status"] != "applied" {
-		t.Fatalf("confirm = %d (%v)", confirmResp.StatusCode, confirmBody)
-	}
-	stored, ok := api.GetDecryptedSetting("anytls_password")
-	if !ok || stored != "brand-new-pw" {
-		t.Fatalf("anytls_password = %q ok=%v", stored, ok)
-	}
-	cfg, err := api.Store.GetSetting("singbox_config:" + nodeID)
-	if err != nil || !strings.Contains(cfg, "brand-new-pw") {
-		t.Fatalf("regenerated config = %q err=%v", cfg, err)
 	}
 }
 

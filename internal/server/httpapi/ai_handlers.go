@@ -29,7 +29,6 @@ const (
 	aiTailLogsLinesDefault = 100
 	aiTailLogsLinesMax     = 500 // agent enforces the same cap (§12.2)
 	aiTailLogsMaxBytes     = 8 << 10
-	aiMaxPasswordLen       = 256
 )
 
 // aiTailLogsWait bounds how long an AI request blocks on the node's
@@ -463,17 +462,19 @@ func decodeAIContent(raw json.RawMessage) string {
 
 // aiToolKinds are the tool names the model may invoke (§12.2). run_shell
 // keeps its own path; restart/stop/start_singbox map onto the commands
-// queue, install/port/anytls are server-side meta operations, tail_logs is
-// a read-only agent command.
+// queue, install/port are server-side meta operations, tail_logs is a
+// read-only agent command. (The global-password rotation tool is gone with the
+// global password itself, §10.1 实现修订 2026-09-17e: a node's credential is
+// generated when the panel creates its inbound, and re-typing it through the
+// AI is what the editor already does.)
 var aiToolKinds = map[string]bool{
-	"run_shell":           true,
-	"restart_singbox":     true,
-	"stop_singbox":        true,
-	"start_singbox":       true,
-	"install_singbox":     true,
-	"set_singbox_port":    true,
-	"set_anytls_password": true,
-	"tail_logs":           true,
+	"run_shell":        true,
+	"restart_singbox":  true,
+	"stop_singbox":     true,
+	"start_singbox":    true,
+	"install_singbox":  true,
+	"set_singbox_port": true,
+	"tail_logs":        true,
 }
 
 // aiToolAction is one parsed model tool request: the tool name plus raw
@@ -621,12 +622,6 @@ func aiToolsSpec() []aiOpenAIToolSpec {
 				"reason": reason,
 			},
 			"port"),
-		tool("set_anytls_password",
-			"Rotate the global anytls password and re-push configs to all nodes. The panel generates and owns this credential, so omitting `password` (or sending an empty one) mints a fresh random one — prefer that over inventing a value. Always requires operator confirmation.",
-			map[string]any{
-				"password": map[string]any{"type": "string"},
-				"reason":   reason,
-			}),
 		tool("tail_logs",
 			"Read the latest sing-box service log lines from the selected node (read-only).",
 			map[string]any{
@@ -649,8 +644,6 @@ func (s *Server) handleAIAction(w http.ResponseWriter, r *http.Request, session 
 		return s.handleAIInstallSingbox(r, session, action, toolCall)
 	case "set_singbox_port":
 		return s.handleAISetSingboxPort(r, session, action, toolCall)
-	case "set_anytls_password":
-		return s.handleAISetAnytlsPassword(r, session, action, toolCall)
 	case "tail_logs":
 		return s.handleAITailLogs(r, session, action, toolCall)
 	default:
@@ -850,53 +843,6 @@ func (s *Server) handleAISetSingboxPort(r *http.Request, session *store.AISessio
 	return toolCall
 }
 
-// handleAISetAnytlsPassword stages a global anytls password rotation (§12.3
-// meta operation, forced confirmation). An empty password means "generate one":
-// since §10.1 实现修订 2026-09-16 the panel owns this credential, so the model
-// never has to invent a secret to rotate it. The plaintext never lands in the
-// pending action: only its ciphertext does.
-func (s *Server) handleAISetAnytlsPassword(r *http.Request, session *store.AISession, action *aiToolAction, toolCall map[string]any) map[string]any {
-	var args struct {
-		Password string `json:"password"`
-		Reason   string `json:"reason"`
-	}
-	if err := json.Unmarshal(action.Args, &args); err != nil {
-		toolCall["status"] = "invalid"
-		return toolCall
-	}
-	args.Password = strings.TrimSpace(args.Password)
-	if len(args.Password) > aiMaxPasswordLen {
-		toolCall["status"] = "invalid"
-		return toolCall
-	}
-	// §10.1 实现修订 2026-09-16: the panel owns this credential, so an empty
-	// `password` means "mint a fresh one" — a rotation the operator can confirm
-	// without first having to invent a secret.
-	if args.Password == "" {
-		generated, err := singbox.GenerateAnytlsPassword()
-		if err != nil {
-			toolCall["status"] = "internal"
-			return toolCall
-		}
-		args.Password = generated
-	}
-	encrypted, err := s.Crypt.Encrypt(args.Password)
-	if err != nil {
-		toolCall["status"] = "internal"
-		return toolCall
-	}
-	pendingID, ok := s.requestAIConfirmation(r, session, "set_anytls_password",
-		map[string]string{"password_encrypted": encrypted}, args.Reason, "forced")
-	if !ok {
-		toolCall["status"] = "internal"
-		return toolCall
-	}
-	toolCall["status"] = "needs_confirmation"
-	toolCall["action_id"] = pendingID
-	toolCall["reason"] = args.Reason
-	return toolCall
-}
-
 // handleAITailLogs answers a tail_logs tool call with real node logs
 // (§12.1): enqueue kind=tail_logs, wait ≤8s for the agent's cmd_result and
 // hand the capped stdout back. The output is also persisted as a tool
@@ -1060,9 +1006,6 @@ func (s *Server) handleConfirmAIAction(w http.ResponseWriter, r *http.Request) {
 	case "set_singbox_port":
 		s.confirmAISetSingboxPort(w, r, action)
 		return
-	case "set_anytls_password":
-		s.confirmAISetAnytlsPassword(w, r, action)
-		return
 	}
 	allowed, reason, err := s.Store.CheckAICommandGate(action.NodeID, aiCommandLimit, nowUnix())
 	if err != nil {
@@ -1178,53 +1121,5 @@ func (s *Server) confirmAISetSingboxPort(w http.ResponseWriter, r *http.Request,
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_id": action.SessionID, "action_id": action.ID, "status": "applied", "port": payload.Port,
-	})
-}
-
-// confirmAISetAnytlsPassword stores the new global anytls password
-// (encrypted at rest, §12.3 meta operation) and re-pushes the desired
-// config to every node with sing-box configured — the password is baked
-// into each node config, so they must all be regenerated. Subscriptions
-// render on demand at /sub/<token>, so the new password flows into them
-// without extra work.
-func (s *Server) confirmAISetAnytlsPassword(w http.ResponseWriter, r *http.Request, action *store.AIPendingAction) {
-	var payload struct {
-		PasswordEncrypted string `json:"password_encrypted"`
-	}
-	if err := json.Unmarshal([]byte(action.Payload), &payload); err != nil || payload.PasswordEncrypted == "" {
-		writeErr(w, http.StatusBadRequest, "bad_request")
-		return
-	}
-	password, err := s.Crypt.Decrypt(payload.PasswordEncrypted)
-	if err != nil || strings.TrimSpace(password) == "" {
-		writeErr(w, http.StatusBadRequest, "bad_request")
-		return
-	}
-	if err := s.Store.SetSetting("anytls_password", payload.PasswordEncrypted, true); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	if nodes, err := s.Store.ListNodes(); err == nil {
-		for i := range nodes {
-			sb, err := s.Store.GetNodeSingbox(nodes[i].ID)
-			if err != nil || sb.DesiredVersion == "" {
-				continue
-			}
-			if err := s.applySingboxDesired(nodes[i].ID, sb, sb.DesiredVersion, sb.Port, sb.Status); err != nil {
-				s.Log.Warn("ai anytls password push", "node", nodes[i].ID, "err", err)
-			}
-		}
-	}
-	s.Store.InsertAudit(&store.AuditEntry{
-		Actor: "ai", NodeID: action.NodeID, Action: "anytls_password_updated", Command: "[redacted]",
-		Reason: action.Reason, Risk: action.Risk, SourceIP: s.Trust.RealIP(r), AISessionID: action.SessionID,
-	})
-	s.publishEvent("settings_updated", "")
-	if err := s.Store.ConfirmAIPendingAction(action.ID, "", nowUnix()); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"session_id": action.SessionID, "action_id": action.ID, "status": "applied",
 	})
 }

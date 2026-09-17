@@ -451,10 +451,25 @@ func applyInboundEdit(existing any, edit inboundEdit) (map[string]any, error) {
 			}
 		}
 	}
+	// credential resolves one field: the operator's value, else the file's, else
+	// (only for a new inbound) a freshly minted one.
+	credential := func(fromEdit string, existing any) (string, error) {
+		if cred := pickCredential(fromEdit, existing); cred != "" {
+			return cred, nil
+		}
+		if !edit.New {
+			return "", nil
+		}
+		return mintCredential(edit.Type)
+	}
 
 	switch edit.Type {
 	case singbox.ProtoVLESS:
-		if cred := pickCredential(edit.Credential, user["uuid"]); cred != "" {
+		cred, err := credential(edit.Credential, user["uuid"])
+		if err != nil {
+			return nil, err
+		}
+		if cred != "" {
 			user["uuid"] = cred
 		}
 		if _, ok := user["uuid"]; !ok {
@@ -470,7 +485,11 @@ func applyInboundEdit(existing any, edit inboundEdit) (map[string]any, error) {
 		if edit.Username != "" {
 			user["name"] = edit.Username
 		}
-		if cred := pickCredential(edit.Credential, user["password"]); cred != "" {
+		cred, err := credential(edit.Credential, user["password"])
+		if err != nil {
+			return nil, err
+		}
+		if cred != "" {
 			user["password"] = cred
 		}
 		if len(user) > 0 {
@@ -481,19 +500,20 @@ func applyInboundEdit(existing any, edit inboundEdit) (map[string]any, error) {
 		if _, ok := m["method"]; !ok {
 			return nil, badConfig("method_required")
 		}
-		if cred := pickCredential(edit.Credential, m["password"]); cred != "" {
+		cred, err := credential(edit.Credential, m["password"])
+		if err != nil {
+			return nil, err
+		}
+		if cred != "" {
 			m["password"] = cred
 		}
 		if _, ok := m["password"]; !ok {
 			return nil, badConfig("credential_required")
 		}
 	case singbox.ProtoAnytls:
-		cred := pickCredential(edit.Credential, user["password"])
-		if edit.New && cred == "" {
-			// A brand-new inbound has no identity to inherit: inventing a secret
-			// the operator never sees is how a client ends up unable to
-			// authenticate.
-			return nil, badConfig("credential_required")
+		cred, err := credential(edit.Credential, user["password"])
+		if err != nil {
+			return nil, err
 		}
 		if cred != "" {
 			user["password"] = cred
@@ -522,6 +542,22 @@ func applyInboundEdit(existing any, edit inboundEdit) (map[string]any, error) {
 		}
 	}
 	return m, nil
+}
+
+// mintCredential invents the credential of an inbound the panel is *creating*:
+// a 16-char alnum password for the password protocols, a v4 UUID for VLESS
+// (§10.1 实现修订 2026-09-17e). The server owns the inbound anyway — asking the
+// operator to type a secret is how credentials get reused, and a UUID is not a
+// value anybody should have to make up.
+//
+// It is deliberately only reachable for `New`: on an existing inbound a blank
+// field means "keep what the file has", and minting there would rotate a
+// working credential.
+func mintCredential(typ string) (string, error) {
+	if typ == singbox.ProtoVLESS {
+		return singbox.GenerateUUID()
+	}
+	return singbox.GenerateAnytlsPassword()
 }
 
 // pickCredential is "the operator's value, else the file's, else nothing".

@@ -12,7 +12,6 @@ import (
 func TestSubscriptionUAFilterAllowsMatchingClient(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	nodeID, _ := seedNode(t, api, "ua-hit", "m-ua-hit", "203.0.113.30")
 	seedSingbox(t, api, nodeID, 24101)
@@ -55,7 +54,6 @@ func TestSubscriptionUAFilterAllowsMatchingClient(t *testing.T) {
 func TestSubscriptionUAFilterBlocksOtherClients(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	nodeID, _ := seedNode(t, api, "ua-miss", "m-ua-miss", "203.0.113.31")
 	seedSingbox(t, api, nodeID, 24102)

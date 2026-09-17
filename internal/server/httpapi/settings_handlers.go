@@ -10,10 +10,6 @@ import (
 
 // Settings groups (design §4.4 / §12.1 / §13 / §14 / §15 / §16):
 //   ai.base_url, ai.model, ai.api_key (encrypted), ai.default_policy
-//   anytls_password (encrypted; global shared proxy password, §10 — the server
-//   generates it on first use since §10.1 实现修订 2026-09-16, so the panel has no
-//   field for it; PUT stays as the API escape hatch, and an empty value means
-//   "mint a fresh random one")
 //   notify.telegram_bot_token (encrypted), notify.telegram_chat_id,
 //   notify.webhook_url, notify.webhook_secret
 //   notify.feishu_app_id / app_secret (encrypted) / receive_id / bot_name /
@@ -37,7 +33,6 @@ type settingView struct {
 // sensitiveKeys are write-only: GET returns set/unset, never the value.
 var sensitiveKeys = map[string]bool{
 	"ai.api_key":                   true,
-	"anytls_password":              true,
 	"notify.telegram_bot_token":    true,
 	"notify.webhook_secret":        true,
 	"notify.feishu_app_secret":     true,
@@ -210,15 +205,6 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit("settings_updated", joinKeys(req.Settings), s.Trust.RealIP(r))
 	s.publishEvent("settings_updated", "")
-	// §10.1 实现修订 2026-09-16: rotating the anytls password has to reach the nodes
-	// now, not at the next restart. Every managed config bakes the password in,
-	// so this is the same pass startup runs (hash mismatch → rebuild + push).
-	// Writing an empty value also lands here and is the documented way to ask
-	// for a fresh random credential: ensureAnytlsPassword mints one, and the
-	// rebuild bakes it in.
-	if _, rotated := req.Settings["anytls_password"]; rotated {
-		s.SyncSingboxConfigs()
-	}
 	if _, changed := req.Settings["latency.interval_seconds"]; changed && s.Hub != nil {
 		s.Hub.PushLatencyConfig()
 	}

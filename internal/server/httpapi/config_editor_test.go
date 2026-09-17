@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"testing"
 
 	"github.com/fonlan/fobe/internal/server/singbox"
@@ -95,6 +96,10 @@ func seedLiveConfig(t *testing.T, api *Server, nodeID, cfg string) {
 	}
 }
 
+// A generated VLESS credential is a random RFC 4122 v4 UUID (§10.1 实现修订
+// 2026-09-17e).
+var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
 func hashOf(s string) string {
 	return singbox.ConfigHash([]byte(s))
 }
@@ -110,7 +115,6 @@ func TestSubscriptionRendersLiveConfigFile(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed ips: %v", err)
 	}
-	setAnytlsPassword(t, srv, cookie)
 	seedLiveConfig(t, api, id, liveConfigWithPanelInbound)
 	// The panel's own bookkeeping: port + reported certificate.
 	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
@@ -346,9 +350,11 @@ func TestPutNodeSingboxConfigRejectsDuplicatePort(t *testing.T) {
 	}
 }
 
-// A new inbound with no credential cannot be written: sing-box would reject the
-// config and the probe would be left on a rolled-back file.
-func TestPutNodeSingboxConfigRequiresCredentialForNewInbound(t *testing.T) {
+// An inbound the operator adds without filling in a credential gets one minted
+// by the server (§10.1 实现修订 2026-09-17e): a 16-char alnum password for the
+// password protocols, a v4 UUID for VLESS. Typing secrets by hand is how they
+// end up reused, and the panel is creating the listener anyway.
+func TestPutNodeSingboxConfigMintsCredentialsForNewInbounds(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := loginSession(t, srv)
 	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
@@ -362,10 +368,40 @@ func TestPutNodeSingboxConfigRequiresCredentialForNewInbound(t *testing.T) {
 	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+id+"/singbox/config", cookie,
 		map[string]any{
 			"reported_hash": hashOf(liveConfigWithPanelInbound),
-			"add":           []map[string]any{{"type": "anytls", "port": 9999, "new": true}},
+			"add": []map[string]any{
+				{"type": "anytls", "port": 9999, "new": true},
+				{"type": "vless", "port": 9998, "new": true},
+			},
 		})
-	if r.Status != http.StatusBadRequest || !bytes.Contains(r.Body, []byte("credential_required")) {
-		t.Fatalf("credential-less add = %d %s", r.Status, r.Body)
+	if r.Status != http.StatusOK {
+		t.Fatalf("add without credentials = %d %s", r.Status, r.Body)
+	}
+	cfg, err := api.Store.GetSetting("singbox_config:" + id)
+	if err != nil {
+		t.Fatalf("pushed config: %v", err)
+	}
+	if !anytlsPasswordRE.MatchString(singbox.InboundPasswordAtPort(cfg, 9999)) {
+		t.Fatalf("added anytls did not get a %d-char alnum password:\n%s", singbox.AnytlsPasswordLen, cfg)
+	}
+	var doc struct {
+		Inbounds []struct {
+			Port  int `json:"listen_port"`
+			Users []struct {
+				UUID string `json:"uuid"`
+			} `json:"users"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(cfg), &doc); err != nil {
+		t.Fatalf("pushed config is not JSON: %v", err)
+	}
+	uuid := ""
+	for _, in := range doc.Inbounds {
+		if in.Port == 9998 && len(in.Users) > 0 {
+			uuid = in.Users[0].UUID
+		}
+	}
+	if !uuidRE.MatchString(uuid) {
+		t.Fatalf("added vless uuid = %q, want a v4 UUID:\n%s", uuid, cfg)
 	}
 }
 
@@ -380,7 +416,10 @@ func TestSubscriptionFallsBackToManagedPairWithoutReport(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed ips: %v", err)
 	}
-	setAnytlsPassword(t, srv, cookie)
+	// The managed pair plus the config document its credential lives in
+	// (§10.1 实现修订 2026-09-17e): with no readable credential the renderer skips
+	// the node instead of serving an outbound nobody can authenticate.
+	seedSingbox(t, api, id, 22039)
 	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
 		NodeID: id, Version: "1.13.0-beta.7", DesiredVersion: "1.13.0-beta.7",
 		Status: "running", Port: 22039, CertPEM: testCertPEM, CertSHA256: "f00d",

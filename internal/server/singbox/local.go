@@ -174,6 +174,29 @@ func AnytlsPorts(configJSON string) []int {
 	return ports
 }
 
+// InboundPasswordAtPort returns the credential the document's inbound on `port`
+// serves, or "" when there is no inbound there (or it carries no password).
+//
+// It is how a regeneration reuses the password the clients already hold instead
+// of minting a new one: the credential belongs to the *inbound*, so it is read
+// back from the node's own configuration rather than from a server-side shared
+// value (§10.1 实现修订 2026-09-17e).
+func InboundPasswordAtPort(configJSON string, port int) string {
+	if port <= 0 {
+		return ""
+	}
+	inbounds, err := ParseLocalInbounds(configJSON)
+	if err != nil {
+		return ""
+	}
+	for _, ib := range inbounds {
+		if ib.Port == port {
+			return InboundPassword(ib.Inbound)
+		}
+	}
+	return ""
+}
+
 // PanelInboundPort answers "which listener on this probe is the node's own"
 // for a file the panel did not write (design §9.3 实现修订 2026-09-17d).
 //

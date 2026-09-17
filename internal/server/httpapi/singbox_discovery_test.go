@@ -154,8 +154,6 @@ func proxyNodeAt(nodes []singbox.ProxyNode, port int) *singbox.ProxyNode {
 // a listener it does not own.
 func TestLocalInboundsRenderFromTheFileWithoutAdoption(t *testing.T) {
 	_, api := newTestServer(t)
-	// A credential that exists and must NOT show up on the script's listener.
-	setEncryptedPassword(t, api, "GlobalPanelPw1")
 	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
 	seedLocalSnapshot(t, api, id, true)
 
@@ -192,6 +190,11 @@ func TestLocalInboundsRenderFromTheFileWithoutAdoption(t *testing.T) {
 	if own.Password != "AnyTlsScriptPw1" {
 		t.Fatalf("password = %q, want the file's (rotating it breaks every client holding the script's URI)", own.Password)
 	}
+	// Reading a node's file is not a moment that mints anything: the credential
+	// belongs to that inbound and nowhere else (§10.1 实现修订 2026-09-17e).
+	if _, err := api.Store.GetSetting("anytls_password"); err == nil {
+		t.Fatal("rendering the file minted a global anytls password")
+	}
 	if own.CertPEM != testCertPEM {
 		t.Fatalf("certificate = %q, want the bytes the probe reported for that port", own.CertPEM)
 	}
@@ -210,7 +213,6 @@ func TestLocalInboundsRenderFromTheFileWithoutAdoption(t *testing.T) {
 // services down on the next install or port change.
 func TestLegacyAdoptedInboundsSurviveRegeneration(t *testing.T) {
 	_, api := newTestServer(t)
-	setEncryptedPassword(t, api, "shared-pw")
 	id, _ := seedNode(t, api, "legacy", "m-legacy", "203.0.113.10")
 	extras := []singbox.ExtraInbound{{
 		Type: singbox.ProtoVLESS, Tag: "vless-in-16929", ListenPort: 16929,

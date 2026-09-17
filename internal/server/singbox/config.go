@@ -108,6 +108,23 @@ func RandomPort() (int, error) {
 // ValidPort reports whether the panel may apply this inbound port.
 func ValidPort(p int) bool { return p >= MinPort && p <= MaxPort }
 
+// GenerateUUID returns a random RFC 4122 version-4 UUID: the credential a VLESS
+// inbound needs (§10.1 实现修订 2026-09-17e).
+//
+// It exists for the same reason GenerateAnytlsPassword does — the panel is the
+// one creating the inbound, so the panel can invent the secret. Asking the
+// operator to produce a UUID by hand is busywork, and a hand-typed one is
+// usually a reused one.
+func GenerateUUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("random uuid: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
 // --- node config.json (design §9.1 / §9.4) ---
 
 type logSection struct {
@@ -204,25 +221,6 @@ func BuildNodeConfig(port int, password string) ([]byte, error) {
 		return nil, fmt.Errorf("marshal sing-box config: %w", err)
 	}
 	return raw, nil
-}
-
-// EffectiveAnytlsPassword picks the per-node password override when set,
-// else the global shared password (§19.9: empty override = 全局 anytls_password).
-func EffectiveAnytlsPassword(globalPassword, override string) string {
-	if override != "" {
-		return override
-	}
-	return globalPassword
-}
-
-// BuildNodeConfigWithOverride is BuildNodeConfig with a per-node password
-// override (§19.9). The override travels to the agent inside ConfigJSON —
-// SingboxDesired carries no password field, so nothing changes on the wire.
-// It is also how an adopted anytls inbound keeps its own password: the inbound
-// that one-sing.sh generated already has one, and rotating it on takeover would
-// break every client that was handed the script's URI.
-func BuildNodeConfigWithOverride(port int, globalPassword, override string) ([]byte, error) {
-	return BuildNodeConfig(port, EffectiveAnytlsPassword(globalPassword, override))
 }
 
 // --- adopted inbounds (§9.3 实现修订 2026-09-17) ---

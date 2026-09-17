@@ -15,10 +15,14 @@ import (
 
 	"github.com/fonlan/fobe/internal/protocol"
 	"github.com/fonlan/fobe/internal/server/security"
+	"github.com/fonlan/fobe/internal/server/singbox"
 	"github.com/fonlan/fobe/internal/server/store"
 	"github.com/gorilla/websocket"
 )
 
+// testAnytlsPassword is the credential a seeded node's own inbound serves. Since
+// §10.1 实现修订 2026-09-17e it lives in the node's config document (written by
+// seedSingbox below), not in a server-wide setting.
 const testAnytlsPassword = "shared-proxy-pw"
 
 const testCertPEM = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUEeTest\n-----END CERTIFICATE-----\n"
@@ -110,16 +114,11 @@ func seedNode(t *testing.T, api *Server, name, machineID, primaryIP string) (str
 	return id, secret
 }
 
-func setAnytlsPassword(t *testing.T, srv *httptest.Server, cookie string) {
-	t.Helper()
-	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/settings", cookie,
-		map[string]any{"settings": map[string]string{"anytls_password": testAnytlsPassword}})
-	if r.Status != 200 {
-		t.Fatalf("set anytls_password: %d %s", r.Status, r.Body)
-	}
-}
-
-// seedSingbox fakes an agent-reported sing-box state (running, cert reported).
+// seedSingbox fakes an agent-reported sing-box state (running, cert reported),
+// plus the node's own config document — which is where its credential lives
+// since §10.1 实现修订 2026-09-17e. A node with a port and a certificate but no
+// readable credential is skipped by the subscription renderer, exactly as it
+// would be in production.
 func seedSingbox(t *testing.T, api *Server, nodeID string, port int) {
 	t.Helper()
 	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
@@ -127,6 +126,13 @@ func seedSingbox(t *testing.T, api *Server, nodeID string, port int) {
 		CertPEM: testCertPEM, CertSHA256: "f00d",
 	}); err != nil {
 		t.Fatalf("seed singbox: %v", err)
+	}
+	cfg, err := singbox.BuildNodeConfig(port, testAnytlsPassword)
+	if err != nil {
+		t.Fatalf("build seeded config: %v", err)
+	}
+	if err := api.Store.SetSetting("singbox_config:"+nodeID, string(cfg), false); err != nil {
+		t.Fatalf("seed node config: %v", err)
 	}
 }
 
@@ -223,7 +229,6 @@ func TestTemplatePlaceholderValidation(t *testing.T) {
 func TestSubscriptionRenderDefaultsAndSniffing(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	nodeID, _ := seedNode(t, api, "probe-1", "m-sub-1", "203.0.113.10")
 	seedSingbox(t, api, nodeID, 23456)
@@ -336,7 +341,6 @@ func TestSubscriptionRenderDefaultsAndSniffing(t *testing.T) {
 func TestSubscriptionDisableAndRotate(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	nodeID, _ := seedNode(t, api, "probe-2", "m-sub-2", "203.0.113.11")
 	seedSingbox(t, api, nodeID, 30000)
@@ -401,7 +405,6 @@ func TestSubscriptionDisableAndRotate(t *testing.T) {
 func TestSingboxInstallAndDesiredPush(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	nodeID, secret := seedNode(t, api, "probe-sb", "m-sb-1", "203.0.113.12")
 
@@ -430,7 +433,6 @@ func TestSingboxInstallAndDesiredPush(t *testing.T) {
 	ws.WriteJSON(protocol.NewEnvelope(protocol.TypeHello, "", protocol.Hello{MachineID: "m-sb-1", Version: "dev"}))
 	readType(protocol.TypeHelloAck)
 
-	// install without anytls_password would fail; already set above.
 	r := doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+nodeID+"/singbox/install", cookie,
 		map[string]string{"version": "1.11.5"})
 	if r.Status != 200 {
@@ -456,8 +458,10 @@ func TestSingboxInstallAndDesiredPush(t *testing.T) {
 	if !strings.Contains(desired.Singbox.ConfigJSON, `"listen_port": `+strconv.Itoa(inst.Port)) {
 		t.Fatalf("desired config incomplete:\n%s", desired.Singbox.ConfigJSON)
 	}
-	if !strings.Contains(desired.Singbox.ConfigJSON, `"password": "`+testAnytlsPassword+`"`) {
-		t.Fatalf("desired config missing shared password:\n%s", desired.Singbox.ConfigJSON)
+	// The credential is the node's own (§10.1 实现修订 2026-09-17e): a fresh
+	// 16-char alnum password minted because this node had no inbound before.
+	if pw := configPassword(t, api, nodeID, inst.Port); !strings.Contains(desired.Singbox.ConfigJSON, `"password": "`+pw+`"`) {
+		t.Fatalf("desired config missing the node's credential %q:\n%s", pw, desired.Singbox.ConfigJSON)
 	}
 
 	// node_singbox carries the desired version, and the settings key holds the
@@ -522,7 +526,6 @@ func TestSingboxInstallAndDesiredPush(t *testing.T) {
 func TestSingboxUninstallIsDesiredStateNotACommand(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
-	setAnytlsPassword(t, srv, cookie)
 
 	nodeID, secret := seedNode(t, api, "probe-un", "m-un-1", "203.0.113.14")
 

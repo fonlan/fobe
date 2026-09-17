@@ -93,7 +93,6 @@ func TestSubscriptionRulesLiveInTemplate(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
 	client := &http.Client{}
-	setAnytlsPassword(t, srv, cookie)
 
 	nodeID, _ := seedNode(t, api, "probe-rules", "m-rules-1", "203.0.113.20")
 	seedSingbox(t, api, nodeID, 25000)
@@ -195,7 +194,6 @@ func TestMigrateLegacyRules(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
 	client := &http.Client{}
-	setAnytlsPassword(t, srv, cookie)
 
 	// what the old panel wrote into the two settings
 	if err := api.Store.SetSetting(legacySettingRulesSingbox, `{"protocol":"dns","action":"hijack-dns"}`, false); err != nil {
@@ -299,7 +297,6 @@ func TestSubscriptionPickerReadyFlag(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
 	client := &http.Client{}
-	setAnytlsPassword(t, srv, cookie)
 
 	// ready: port + reported certificate (seeded by seedSingbox)
 	readyID, _ := seedNode(t, api, "ready", "m-ready", "203.0.113.30")
@@ -369,7 +366,6 @@ func TestSubscriptionFormatResolution(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
 	client := &http.Client{}
-	setAnytlsPassword(t, srv, cookie)
 
 	nodeID, _ := seedNode(t, api, "probe-fmt", "m-fmt-1", "203.0.113.40")
 	seedSingbox(t, api, nodeID, 27000)
@@ -462,7 +458,6 @@ func TestSubscriptionAccessLogRefusalReasons(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
 	client := &http.Client{}
-	setAnytlsPassword(t, srv, cookie)
 
 	nodeID, _ := seedNode(t, api, "probe-log", "m-log-1", "203.0.113.50")
 	seedSingbox(t, api, nodeID, 28000)

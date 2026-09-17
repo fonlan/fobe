@@ -332,14 +332,22 @@ func (s *Server) handleSingboxPort(w http.ResponseWriter, r *http.Request) {
 }
 
 // applySingboxDesired is the single write path for node sing-box desired
-// state: build config from the global anytls password, persist it under
-// `singbox_config:<node_id>` (the same key hub.buildDesiredState reads), keep
-// agent-reported fields, and push the desired frame when the node is online.
+// state: build the config, persist it under `singbox_config:<node_id>` (the
+// same key hub.buildDesiredState reads), keep agent-reported fields, and push
+// the desired frame when the node is online.
+//
+// Creating the node's inbound is where its credential is decided (§10.1 实现
+// 修订 2026-09-17e): an existing password (the panel's own document, the
+// probe's report, a hand-set override) is reused — an install over a listener
+// one-sing.sh already serves keeps that listener's password, so no client is
+// cut off — and only a node with no inbound at all gets a fresh 16-char alnum
+// one. Changing a port runs through here too, and must not rotate.
 func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, version string, port int, status string) error {
-	// The credential is machine-generated on first use (§10.1 实现修订
-	// 2026-09-16): installing a node is what creates it, so the operator never
-	// has to provide one and there is no "password not configured" branch left.
-	password, err := s.ensureAnytlsPassword()
+	// The lookup hint is the port the node already owns, not the one being
+	// installed: on a port change the credential sits in the document under the
+	// *old* port, and asking for the new one would mint a second password for
+	// the same listener.
+	password, err := s.ensureNodeProxyPassword(nodeID, sb.Port)
 	if err != nil {
 		return err
 	}
@@ -348,12 +356,7 @@ func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, versi
 	// them would silently delete his VLESS/SS/Socks services (§9.3 实现修订
 	// 2026-09-17).
 	extras := s.loadExtraInbounds(nodeID)
-	override, err := s.Store.GetNodeSingboxPasswordOverride(nodeID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return err
-	}
-	config, err := singbox.BuildNodeConfigWithInbounds(port,
-		singbox.EffectiveAnytlsPassword(password, override), extras)
+	config, err := singbox.BuildNodeConfigWithInbounds(port, password, extras)
 	if err != nil {
 		return err
 	}
@@ -409,17 +412,6 @@ func (s *Server) SyncSingboxConfigs() int {
 	if len(targets) == 0 {
 		return 0 // nothing is managed — do not mint a credential nobody asked for
 	}
-	// §10.1 实现修订 2026-09-16: the password is generated on demand, and this pass
-	// is real demand — a managed node exists, so its config has to be derivable.
-	// (Before that change this branch meant "the operator has not configured a
-	// password yet" and skipping was the whole answer.) A failure here is a
-	// storage or master-key problem, never a reason to rotate: report, rebuild
-	// nothing, and leave working clients alone.
-	password, err := s.ensureAnytlsPassword()
-	if err != nil {
-		s.Log.Error("singbox config sync: anytls password", "err", err)
-		return 0
-	}
 	updated := 0
 	for _, t := range targets {
 		// §9.3 实现修订 2026-09-17b: a node whose config the panel has edited
@@ -435,9 +427,17 @@ func (s *Server) SyncSingboxConfigs() int {
 		if err != nil {
 			continue
 		}
-		override, _ := s.Store.GetNodeSingboxPasswordOverride(t.NodeID)
-		config, err := singbox.BuildNodeConfigWithInbounds(sb.Port,
-			singbox.EffectiveAnytlsPassword(password, override), s.loadExtraInbounds(t.NodeID))
+		// §10.1 实现修订 2026-09-17e: the credential comes from the node's own
+		// config, and a node whose config carries none is *skipped* rather than
+		// given a fresh password — this pass exists to pick up a template change,
+		// and minting here would rewrite a working config with a credential no
+		// client has.
+		password := s.nodeProxyPassword(t.NodeID, sb.Port)
+		if password == "" {
+			s.Log.Warn("singbox config sync: no credential to re-derive, skipped", "node", t.NodeID)
+			continue
+		}
+		config, err := singbox.BuildNodeConfigWithInbounds(sb.Port, password, s.loadExtraInbounds(t.NodeID))
 		if err != nil {
 			// A port the template refuses (never assigned, or out of range) is
 			// not this pass's business; the next operator change fixes it.
