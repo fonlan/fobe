@@ -594,7 +594,7 @@ func downloadFile(client *http.Client, url, tmp, exePath string) (int64, error) 
 		need = 64 << 20
 	}
 	// statfsFunc (not statfsFree) is the swappable hook sing-box tests use too.
-	if free, _, err := statfsFunc(filepath.Dir(exePath)); err == nil && free < need {
+	if free, _, _, err := statfsFunc(filepath.Dir(exePath)); err == nil && free < need {
 		return 0, fmt.Errorf("not enough free space in %s: %d < %d bytes", filepath.Dir(exePath), free, need)
 	}
 

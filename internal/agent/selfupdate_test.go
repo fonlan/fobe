@@ -339,7 +339,7 @@ func TestDownloadRefusesWithoutDiskSpace(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "fobe-agent")
 	orig := statfsFunc
-	statfsFunc = func(string) (uint64, uint64, error) { return 1024, 1024, nil }
+	statfsFunc = func(string) (uint64, uint64, uint64, error) { return 1024, 1024, 2048, nil }
 	defer func() { statfsFunc = orig }()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

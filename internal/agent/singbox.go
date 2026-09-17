@@ -1014,7 +1014,7 @@ func checkInstallSpace(dir string) error {
 // filesystem that could not hold the swap, which is the fill-the-overlay
 // outcome §5.4 exists to prevent (same 2× rule as §5.5).
 func checkInstallSpaceFor(dir string, artifactBytes uint64, replacing bool) error {
-	freeBytes, freeInodes, err := statfsFunc(dir)
+	freeBytes, freeInodes, totalInodes, err := statfsFunc(dir)
 	if err != nil {
 		return nil
 	}
@@ -1022,8 +1022,22 @@ func checkInstallSpaceFor(dir string, artifactBytes uint64, replacing bool) erro
 	if replacing {
 		needBytes += artifactBytes
 	}
-	if freeBytes >= needBytes && freeInodes >= minInstallFreeInodes {
+	// btrfs and friends allocate inodes on demand, so statfs on them reports
+	// f_files = f_ffree = 0 (`df -i` shows 0 0). That is "no inode budget",
+	// not "out of inodes" — refusing there blocked every install on a btrfs
+	// data volume with "0 inodes free" while gigabytes were actually usable.
+	// The inode floor only applies when the filesystem publishes a budget
+	// (ext4/f2fs/overlay-on-ext4...); a genuinely starved one still does.
+	inodesOk := totalInodes == 0 || freeInodes >= minInstallFreeInodes
+	if freeBytes >= needBytes && inodesOk {
 		return nil
+	}
+	if totalInodes == 0 {
+		// Inode numbers are meaningless on this fs; don't let the message
+		// point the operator at a nonexistent inode shortage.
+		return fmt.Errorf(
+			"insufficient disk space on %s: %d MiB free, need ≥ %d MiB — install refused",
+			dir, freeBytes>>20, needBytes>>20)
 	}
 	return fmt.Errorf(
 		"insufficient disk space on %s: %d MiB / %d inodes free, need ≥ %d MiB / %d inodes — install refused",

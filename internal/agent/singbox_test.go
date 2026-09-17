@@ -623,24 +623,33 @@ func TestCheckInstallSpace(t *testing.T) {
 	orig := statfsFunc
 	defer func() { statfsFunc = orig }()
 
-	statfsFunc = func(string) (uint64, uint64, error) { return 1 << 30, 10_000, nil }
+	statfsFunc = func(string) (uint64, uint64, uint64, error) { return 1 << 30, 10_000, 20_000, nil }
 	if err := checkInstallSpace("/usr/local/bin"); err != nil {
 		t.Fatalf("plenty of space refused: %v", err)
 	}
 
-	statfsFunc = func(string) (uint64, uint64, error) { return 32 << 20, 10_000, nil }
+	statfsFunc = func(string) (uint64, uint64, uint64, error) { return 32 << 20, 10_000, 20_000, nil }
 	err := checkInstallSpace("/usr/local/bin")
 	if err == nil || !strings.Contains(err.Error(), "insufficient disk space") {
 		t.Fatalf("err = %v, want insufficient disk space", err)
 	}
 
-	statfsFunc = func(string) (uint64, uint64, error) { return 1 << 30, minInstallFreeInodes - 1, nil }
+	statfsFunc = func(string) (uint64, uint64, uint64, error) { return 1 << 30, minInstallFreeInodes - 1, 20_000, nil }
 	if err := checkInstallSpace("/usr/local/bin"); err == nil {
 		t.Fatalf("inode starvation must refuse the install")
 	}
 
+	// btrfs-style dynamic-inode filesystem: statfs reports no inode budget at
+	// all (totalInodes == freeInodes == 0) while gigabytes are free. That is
+	// "untracked", not "starved" — it must not refuse the install (real-world
+	// report: 8375 MiB / 0 inodes free on /etc/one-sing, install refused).
+	statfsFunc = func(string) (uint64, uint64, uint64, error) { return 1 << 30, 0, 0, nil }
+	if err := checkInstallSpace("/etc/one-sing"); err != nil {
+		t.Fatalf("fs without an inode budget must not be refused: %v", err)
+	}
+
 	// undeterminable space never blocks (fail open)
-	statfsFunc = func(string) (uint64, uint64, error) { return 0, 0, errors.New("statfs failed") }
+	statfsFunc = func(string) (uint64, uint64, uint64, error) { return 0, 0, 0, errors.New("statfs failed") }
 	if err := checkInstallSpace("/usr/local/bin"); err != nil {
 		t.Fatalf("statfs failure must not block installs: %v", err)
 	}
@@ -658,7 +667,7 @@ func TestCheckInstallSpaceForScalesWithArtifact(t *testing.T) {
 	fresh := uint64(minInstallFreeBytes) + artifact
 
 	list := func(free uint64) {
-		statfsFunc = func(string) (uint64, uint64, error) { return free, 10_000, nil }
+		statfsFunc = func(string) (uint64, uint64, uint64, error) { return free, 10_000, 20_000, nil }
 	}
 
 	list(update - 1)

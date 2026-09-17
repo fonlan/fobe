@@ -203,7 +203,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 - 二进制与配置统一放 `/etc/one-sing/`（`sing-box` + `config.json` + `cert/`），与 one-sing.sh 同一套路径（实现修订 2026-09-15，见 §9.3）；`/etc` 在 OpenWrt 上同样是 overlay 持久。
 - **写放大控制**：指标与日志不落盘（内存环形缓冲），仅上报；错误日志按行数上限写 `/tmp`（tmpfs）。
 - 内存：agent 目标常驻 < 30MB；采集周期在低内存设备上可从 60s 放宽（面板可配）。
-- 首次运行检测 overlay 剩余空间，低于阈值时拒绝安装 sing-box 并给出提示（避免把路由器写满）。**实现修订 2026-09-16（阈值必须随产物大小走）**：原先只查一个平坦的 64 MiB，而 agent 要写的 sing-box 二进制自 1.14 起已近 90 MiB（见 §9.2 实现修订）——闸门等于放行一个必然写满 overlay 的安装。现在分两道：收敛前的粗筛仍查 64 MiB / 100 inode（此时还不知道产物多大），拿到响应头后按 `64 MiB + 产物` 复核；**替换已有二进制时再加一份**，因为它要被留成 `.prev` 供回滚（与 §5.5 的 2× 规则同源，只是首装没有那份 `.prev`，不该为不存在的副本拒绝）。空间扫描不到时一律放行（fail open）。
+- 首次运行检测 overlay 剩余空间，低于阈值时拒绝安装 sing-box 并给出提示（避免把路由器写满）。**实现修订 2026-09-16（阈值必须随产物大小走）**：原先只查一个平坦的 64 MiB，而 agent 要写的 sing-box 二进制自 1.14 起已近 90 MiB（见 §9.2 实现修订）——闸门等于放行一个必然写满 overlay 的安装。现在分两道：收敛前的粗筛仍查 64 MiB / 100 inode（此时还不知道产物多大），拿到响应头后按 `64 MiB + 产物` 复核；**替换已有二进制时再加一份**，因为它要被留成 `.prev` 供回滚（与 §5.5 的 2× 规则同源，只是首装没有那份 `.prev`，不该为不存在的副本拒绝）。空间扫描不到时一律放行（fail open）。**实现修订 2026-09-17e（inode 半闸只对"有 inode 预算"的文件系统生效）**：btrfs 等动态分配 inode 的文件系统 `statfs` 上报 `f_files = f_ffree = 0`（`df -i` 显示 0 0，是"无预算"不是"用尽"），原判定把 8 GiB 空闲的 btrfs 数据卷判成 0 inode 可用而拒绝安装（面板报 `insufficient disk space on /etc/one-sing: 8375 MiB / 0 inodes free`）。现在 statfs 一并取总 inode 数：为 0 视为该文件系统不跟踪 inode、跳过 inode 半闸（字节闸不变），错误信息也不再展示无意义的 inode 数字；真实耗尽的 ext4/f2fs（总 inode > 0 且空闲 < 100）照旧拒绝。
 
 ### 5.5 agent 自更新（跟随服务端）（实现修订 2026-09-15）
 
