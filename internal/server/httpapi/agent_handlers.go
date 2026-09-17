@@ -369,9 +369,16 @@ func (s *Server) handleDeleteLatencyTarget(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusBadRequest, "bad_request")
 		return
 	}
+	// Capture the probing nodes before the FK cascade removes the link rows:
+	// an online probe must be told to stop, or it keeps sampling a target the
+	// panel no longer knows (§13 实现修订 2026-09-17k).
+	affected, _ := s.Store.NodeIDsForLatencyTarget(tid)
 	if err := s.Store.DeleteLatencyTarget(tid); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
+	}
+	for _, nodeID := range affected {
+		s.Hub.PushLatencyTargets(nodeID)
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

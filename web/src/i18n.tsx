@@ -321,6 +321,8 @@ const zh = {
   no_chart_data: '暂无数据',
   latency_ms: '延迟 (ms)',
   loss: '丢包率',
+  target_no_reply: '全部丢包 · 目标无回应（防火墙拦 ICMP？换 tcp 类型试试）',
+  target_no_samples: '暂无样本 · 探针离线或尚未开始',
   singbox: 'sing-box',
   delete_node_done: '节点已删除',
 
@@ -1110,6 +1112,8 @@ const en: Record<DictKey, string> = {
   no_chart_data: 'No data',
   latency_ms: 'Latency (ms)',
   loss: 'Loss',
+  target_no_reply: 'All probes lost · target not answering (firewalled ICMP? try tcp kind)',
+  target_no_samples: 'No samples yet · probe offline or not started',
   singbox: 'sing-box',
   delete_node_done: 'Node deleted',
 

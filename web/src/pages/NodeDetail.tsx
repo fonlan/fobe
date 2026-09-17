@@ -306,8 +306,9 @@ function LatencyPanel({ nodeId, nodeTargets }: { nodeId: string; nodeTargets: La
     };
   }, [nodeId, targetKey]);
 
-  const series = useMemo<ChartSeries[]>(() => {
+  const { series, targetStats } = useMemo(() => {
     const byTarget = new Map<number, { icmp: ChartPoint[]; tcp: ChartPoint[] }>();
+    const totals = new Map<number, number>();
     for (const s of samples) {
       let e = byTarget.get(s.target_id);
       if (!e) {
@@ -316,15 +317,17 @@ function LatencyPanel({ nodeId, nodeTargets }: { nodeId: string; nodeTargets: La
       }
       if (typeof s.icmp_ms === 'number' && s.icmp_ms >= 0) e.icmp.push({ x: s.ts, y: s.icmp_ms });
       if (typeof s.tcp_ms === 'number' && s.tcp_ms >= 0) e.tcp.push({ x: s.ts, y: s.tcp_ms });
+      totals.set(s.target_id, (totals.get(s.target_id) ?? 0) + 1);
     }
     // LineChart keys legend/tooltip rows by series name; disambiguate targets
     // that share a name by suffixing the kind.
     const seen = new Map<string, number>();
     const out: ChartSeries[] = [];
+    const stats = new Map<number, { pts: number; rttPts: number }>();
     for (const tg of nodeTargets) {
       const e = byTarget.get(tg.id);
-      if (!e) continue;
-      const points = tg.kind === 'icmp' ? e.icmp : e.tcp;
+      const points = tg.kind === 'icmp' ? (e?.icmp ?? []) : (e?.tcp ?? []);
+      stats.set(tg.id, { pts: totals.get(tg.id) ?? 0, rttPts: points.length });
       if (points.length === 0) continue;
       let name = tg.name;
       const n = (seen.get(name) ?? 0) + 1;
@@ -332,8 +335,16 @@ function LatencyPanel({ nodeId, nodeTargets }: { nodeId: string; nodeTargets: La
       if (n > 1) name = `${name} (${tg.kind})`;
       out.push({ name, color: LATENCY_PALETTE[out.length % LATENCY_PALETTE.length], points });
     }
-    return out;
+    return { series: out, targetStats: stats };
   }, [samples, nodeTargets]);
+
+  // A target that probes but never answers (firewalled ICMP, dead host) has no
+  // plottable RTT points, and the chart silently omits it — which reads as
+  // "adding the target did nothing" (it once sent an operator hunting a
+  // delivery bug while the remote host was simply dropping ICMP). Name every
+  // target the chart cannot draw, and tell probing-but-unreachable apart from
+  // no-samples-at-all (probe offline): different problems, different fixes.
+  const silentTargets = nodeTargets.filter((tg) => (targetStats.get(tg.id)?.rttPts ?? 0) === 0);
 
   if (nodeTargets.length === 0) {
     return (
@@ -354,6 +365,15 @@ function LatencyPanel({ nodeId, nodeTargets }: { nodeId: string; nodeTargets: La
         </span>
       </div>
       <LineChart series={series} fmtY={(v) => `${Math.round(v)}ms`} fmtX={fmtTimeShort} emptyText={t('no_chart_data')} />
+      {silentTargets.map((tg) => {
+        const probing = (targetStats.get(tg.id)?.pts ?? 0) > 0;
+        return (
+          <p className="hint" key={tg.id}>
+            <span className={probing ? 'chip status-failed' : 'chip'}>{tg.name}</span>{' '}
+            {probing ? t('target_no_reply') : t('target_no_samples')}
+          </p>
+        );
+      })}
     </div>
   );
 }

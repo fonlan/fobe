@@ -413,6 +413,11 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
+		// The target list used to reach the probe only via hello_ack, so an
+		// edit never took effect on a stable connection. Online probes get the
+		// new list now; offline ones at their next handshake (§13 实现修订
+		// 2026-09-17k).
+		s.Hub.PushLatencyTargets(id)
 	}
 	if networkChanged {
 		s.Hub.PushDesired(id)

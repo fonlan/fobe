@@ -562,6 +562,13 @@ func (s *agentSession) handleServerFrame(env protocol.Envelope) {
 	case protocol.TypeLatencyCfg:
 		var cfg protocol.LatencyConfig
 		if json.Unmarshal(env.Payload, &cfg) == nil {
+			// nil targets = global cadence broadcast: keep probing as told at
+			// handshake. Non-nil (even empty) replaces the list — an empty list
+			// must actually stop the probes, or a node could never opt out.
+			if cfg.Targets != nil {
+				s.log.Info("latency targets updated", "count", len(cfg.Targets))
+				s.setLatencyTargets(cfg.Targets)
+			}
 			s.setLatencyInterval(cfg.IntervalSec)
 		}
 	case protocol.TypeTermOpen, protocol.TypeTermInput, protocol.TypeTermResize, protocol.TypeTermClose:

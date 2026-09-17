@@ -366,6 +366,26 @@ func (s *Store) SetNodeLatencyTargets(nodeID string, targetIDs []int64) error {
 	return tx.Commit()
 }
 
+// NodeIDsForLatencyTarget lists the nodes currently probing the given target.
+// The delete path needs them *before* the FK cascade removes the link rows, so
+// it can push each node an updated target list (§13 实现修订 2026-09-17k).
+func (s *Store) NodeIDsForLatencyTarget(targetID int64) ([]string, error) {
+	rows, err := s.db.Query(`SELECT node_id FROM node_latency_targets WHERE target_id = ? ORDER BY node_id`, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // TargetsForNode returns the enabled target specs for a node.
 func (s *Store) TargetsForNode(nodeID string) ([]LatencyTarget, error) {
 	rows, err := s.db.Query(

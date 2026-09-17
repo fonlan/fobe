@@ -168,17 +168,12 @@ func (h *Hub) HandleAgentWS(w http.ResponseWriter, r *http.Request, nodeID strin
 	}()
 
 	// hello_ack with the full desired state (§7).
-	targets, _ := h.store.TargetsForNode(nodeID)
-	specs := make([]protocol.TargetSpec, 0, len(targets))
-	for _, t := range targets {
-		specs = append(specs, protocol.TargetSpec{ID: t.ID, Name: t.Name, Kind: t.Kind, Host: t.Host, Port: t.Port})
-	}
 	desired := h.buildDesiredState(nodeID)
 	ack := protocol.HelloAck{
 		NodeID:             nodeID,
 		ProbeMetrics:       false,
 		Desired:            desired,
-		LatencyTargets:     specs,
+		LatencyTargets:     h.latencySpecs(nodeID),
 		LatencyIntervalSec: h.latencyInterval(),
 		// §5.5: the flat fields mirror Desired so both carriers can never
 		// disagree, and old agents that ignore the new fields are unaffected.
@@ -204,6 +199,34 @@ func (h *Hub) latencyInterval() int {
 		return defaultLatencyIntervalSec
 	}
 	return seconds
+}
+
+// latencySpecs snapshots a node's latency targets in wire form. Both carriers
+// — hello_ack and the per-node latency_config push — read from here, so they
+// cannot disagree (same rule as the §5.5 mirrored flat fields).
+func (h *Hub) latencySpecs(nodeID string) []protocol.TargetSpec {
+	targets, err := h.store.TargetsForNode(nodeID)
+	if err != nil {
+		return []protocol.TargetSpec{}
+	}
+	specs := make([]protocol.TargetSpec, 0, len(targets))
+	for _, t := range targets {
+		specs = append(specs, protocol.TargetSpec{ID: t.ID, Name: t.Name, Kind: t.Kind, Host: t.Host, Port: t.Port})
+	}
+	return specs
+}
+
+// PushLatencyTargets re-delivers a node's latency target list to an online
+// probe (design §13 实现修订 2026-09-17k). Target edits used to ride only
+// hello_ack, so a probe with a long-lived connection kept probing whatever it
+// was told at connect time — a newly enabled target never got sampled and the
+// detail page never grew its line. Offline probes simply receive the list in
+// their next hello_ack; returns false when nothing was sent.
+func (h *Hub) PushLatencyTargets(nodeID string) bool {
+	return h.Send(nodeID, protocol.NewEnvelope(protocol.TypeLatencyCfg, "", protocol.LatencyConfig{
+		IntervalSec: h.latencyInterval(),
+		Targets:     h.latencySpecs(nodeID),
+	}))
 }
 
 // HandleAgentSelfCheck serves the §5.5 bypass handshake of a downloaded binary.

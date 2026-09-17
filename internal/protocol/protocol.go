@@ -501,8 +501,14 @@ type ProbeMetrics struct {
 	Enabled bool `json:"enabled"`
 }
 
-// LatencyConfig updates the local probe cadence without reconnecting the
-// agent. The server sends it whenever the panel setting changes.
+// LatencyConfig updates local latency probing without reconnecting the agent.
+// IntervalSec is the global cadence; the server broadcasts it when the panel
+// setting changes. Targets is the per-node measurement list (design §13):
+// nil — what a global broadcast carries — keeps the current list, while a
+// non-nil slice, *including empty*, replaces it, so a node can actually opt
+// out. Without the per-node push an edited target list only reached the agent
+// via its next hello_ack, i.e. possibly never on a long-lived connection.
 type LatencyConfig struct {
-	IntervalSec int `json:"interval_sec"`
+	IntervalSec int          `json:"interval_sec"`
+	Targets     []TargetSpec `json:"targets"`
 }
