@@ -500,16 +500,17 @@ section.card { margin-bottom: 0; }
 .node-card-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
 
 .due-chip {
-  border: 1px solid var(--amber);
-  color: var(--amber);
+  border: 1px solid var(--green);
+  color: var(--green);
   border-radius: 999px;
   padding: 0 8px;
   font-size: 12px;
 }
 
-/* 过期之后从 amber 升到 red：到期倒计时与逾期是两种状态，「0 天后到期」这类
-   歧义已被 NodeCard 的时间戳比较排除，这里只负责把视觉分量分开。 */
-.due-chip.overdue {
+/* 剩余 >7 天绿色（宽裕）；≤7 天（含已逾期）升到 red：到期倒计时与逾期是两种
+   状态，「0 天后到期」这类歧义已被 NodeCard 的时间戳比较排除，这里只负责把
+   视觉分量按剩余天数分开。 */
+.due-chip.due-soon {
   border-color: var(--red);
   color: var(--red);
 }

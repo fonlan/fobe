@@ -29,9 +29,11 @@ export default function NodeCard({ node }: { node: NodeView }) {
     // 直接比较时间戳：只要不是未来，一律算过期，贴「已过期」标签。
     const msLeft = node.next_due_at * 1000 - Date.now();
     const overdue = msLeft <= 0;
+    // 剩余天数是视觉分档的唯一依据：≤7 天（含已逾期）红色提醒，>7 天绿色放行。
+    const daysLeft = Math.ceil(msLeft / 86400000);
     return (
-      <span className={'due-chip' + (overdue ? ' overdue' : '')}>
-        {overdue ? t('due_overdue') : t('due_in_days', { d: Math.ceil(msLeft / 86400000) })}
+      <span className={'due-chip' + (overdue || daysLeft <= 7 ? ' due-soon' : '')}>
+        {overdue ? t('due_overdue') : t('due_in_days', { d: daysLeft })}
       </span>
     );
   })();
