@@ -88,63 +88,68 @@ export default function Servers() {
       {nodes !== null && nodes.length === 0 && <div className="empty-hint">{t('servers_empty')}</div>}
 
       {nodes !== null && nodes.length > 0 && (
-        <table className="table card">
-          <thead>
-            <tr>
-              <th>{t('name')}</th>
-              <th>{t('col_status')}</th>
-              <th>{t('primary_ip_col')}</th>
-              <th>{t('expiry_col')}</th>
-              <th>{t('col_version')}</th>
-              <th>{t('actions')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {nodes.map((n) => (
-              <tr key={n.id}>
-                <td>
-                  <span className="server-name-cell">
-                    <Flag cc={n.country_code} />
-                    {n.name || n.hostname || n.id}
-                  </span>
-                </td>
-                <td className="nowrap">
-                  <span className={'dot ' + (n.online ? 'on' : 'off')} title={t(n.online ? 'online' : 'offline')} />
-                  <span className="status-label">{t(n.online ? 'online' : 'offline')}</span>
-                </td>
-                <td className="mono">{n.primary_ip || '-'}</td>
-                <td>{dueText(n, t)}</td>
-                <td className="mono">
-                  {n.agent_version || '-'}
-                  {/* §5.5: the target is shown next to the reported version so a
-                      probe that has not followed yet is visible without opening it. */}
-                  {n.agent_target_version && n.agent_target_version !== n.agent_version && (
-                    <span className="hint"> → {n.agent_target_version}</span>
-                  )}
-                </td>
-                <td className="nowrap">
-                  <Link
-                    to={`/settings/servers/${encodeURIComponent(n.id)}`}
-                    className="icon-btn"
-                    title={t('edit_server')}
-                    aria-label={t('edit_server')}
-                  >
-                    <PencilIcon />
-                  </Link>
-                  <button
-                    type="button"
-                    className="icon-btn danger"
-                    title={t('delete_server')}
-                    aria-label={t('delete_server')}
-                    onClick={() => setDeleting(n)}
-                  >
-                    <TrashIcon />
-                  </button>
-                </td>
+        /* The scroll wrapper carries the card: overflow-x on the <table> itself
+           never applied (overflow doesn't fire on table boxes), so wide rows
+           used to widen the whole page on a phone instead of scrolling here. */
+        <div className="card table-card">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('name')}</th>
+                <th>{t('col_status')}</th>
+                <th>{t('primary_ip_col')}</th>
+                <th>{t('expiry_col')}</th>
+                <th>{t('col_version')}</th>
+                <th>{t('actions')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {nodes.map((n) => (
+                <tr key={n.id}>
+                  <td>
+                    <span className="server-name-cell">
+                      <Flag cc={n.country_code} />
+                      {n.name || n.hostname || n.id}
+                    </span>
+                  </td>
+                  <td className="nowrap">
+                    <span className={'dot ' + (n.online ? 'on' : 'off')} title={t(n.online ? 'online' : 'offline')} />
+                    <span className="status-label">{t(n.online ? 'online' : 'offline')}</span>
+                  </td>
+                  <td className="mono">{n.primary_ip || '-'}</td>
+                  <td>{dueText(n, t)}</td>
+                  <td className="mono">
+                    {n.agent_version || '-'}
+                    {/* §5.5: the target is shown next to the reported version so a
+                        probe that has not followed yet is visible without opening it. */}
+                    {n.agent_target_version && n.agent_target_version !== n.agent_version && (
+                      <span className="hint"> → {n.agent_target_version}</span>
+                    )}
+                  </td>
+                  <td className="nowrap">
+                    <Link
+                      to={`/settings/servers/${encodeURIComponent(n.id)}`}
+                      className="icon-btn"
+                      title={t('edit_server')}
+                      aria-label={t('edit_server')}
+                    >
+                      <PencilIcon />
+                    </Link>
+                    <button
+                      type="button"
+                      className="icon-btn danger"
+                      title={t('delete_server')}
+                      aria-label={t('delete_server')}
+                      onClick={() => setDeleting(n)}
+                    >
+                      <TrashIcon />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {deleting && (

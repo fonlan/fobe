@@ -583,7 +583,16 @@ section.card { margin-bottom: 0; }
 
 .table tbody tr:last-child td { border-bottom: none; }
 
-.table.card { padding: 6px 10px; overflow-x: auto; }
+/* Tables that ARE the card (servers / audit / alerts / latency targets) put the
+   card chrome on a wrapper, not on the <table>: overflow does not apply to
+   table boxes, so the old `.table.card { overflow-x: auto }` never scrolled —
+   the table just grew to its min-content width and widened the whole page on a
+   phone (measured 390px viewport, page scrollWidth 587). Same contract as
+   `.table-wrap` above, with the tighter card padding this variant always had. */
+.table-card {
+  padding: 6px 10px;
+  overflow-x: auto;
+}
 
 /* A plain .table inside a section card has no scroll owner (the card neither
    clips nor scrolls), so wide rows — audit log, UA strings, mono values —

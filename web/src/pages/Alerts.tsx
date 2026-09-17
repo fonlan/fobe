@@ -42,34 +42,38 @@ export default function Alerts() {
       {alerts !== null && alerts.length === 0 && <div className="empty-hint">{t('alerts_empty')}</div>}
 
       {alerts !== null && alerts.length > 0 && (
-        <table className="table card">
-          <thead>
-            <tr>
-              <th>{t('audit_time')}</th>
-              <th>{t('alert_kind')}</th>
-              <th>{t('alert_node')}</th>
-              <th>{t('alert_delivered')}</th>
-              <th>{t('alert_status')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {alerts.map((a) => (
-              <tr key={a.id} className={a.recovered_at == null ? 'alert-active' : ''}>
-                <td className="mono nowrap">{fmtTime(a.created_at)}</td>
-                <td>{kindText(t, a.kind)}</td>
-                <td className="mono">{a.node_id || '-'}</td>
-                <td>{a.delivered_at != null ? t('alert_yes') : t('alert_no')}</td>
-                <td>
-                  {a.recovered_at != null ? (
-                    <span className="chip status-ok">{t('alert_recovered')}</span>
-                  ) : (
-                    <span className="chip status-failed">{t('alert_active')}</span>
-                  )}
-                </td>
+        /* Scroll wrapper carries the card — overflow-x on the <table> itself
+           never applied (table boxes are not scroll containers). */
+        <div className="card table-card">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('audit_time')}</th>
+                <th>{t('alert_kind')}</th>
+                <th>{t('alert_node')}</th>
+                <th>{t('alert_delivered')}</th>
+                <th>{t('alert_status')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {alerts.map((a) => (
+                <tr key={a.id} className={a.recovered_at == null ? 'alert-active' : ''}>
+                  <td className="mono nowrap">{fmtTime(a.created_at)}</td>
+                  <td>{kindText(t, a.kind)}</td>
+                  <td className="mono">{a.node_id || '-'}</td>
+                  <td>{a.delivered_at != null ? t('alert_yes') : t('alert_no')}</td>
+                  <td>
+                    {a.recovered_at != null ? (
+                      <span className="chip status-ok">{t('alert_recovered')}</span>
+                    ) : (
+                      <span className="chip status-failed">{t('alert_active')}</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

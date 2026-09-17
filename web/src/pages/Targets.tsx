@@ -134,34 +134,38 @@ export default function Targets() {
       {targets !== null && targets.length === 0 && <div className="empty-hint">{t('targets_empty')}</div>}
 
       {targets !== null && targets.length > 0 && (
-        <table className="table card">
-          <thead>
-            <tr>
-              <th>{t('name')}</th>
-              <th>{t('target_kind')}</th>
-              <th>{t('target_host')}</th>
-              <th>{t('target_port')}</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {targets.map((tg) => (
-              <tr key={tg.id}>
-                <td>{tg.name}</td>
-                <td>
-                  <span className="chip">{tg.kind.toUpperCase()}</span>
-                </td>
-                <td className="mono">{tg.host}</td>
-                <td className="mono">{tg.kind === 'tcp' ? tg.port : '-'}</td>
-                <td className="nowrap">
-                  <button type="button" className="btn danger small" onClick={() => setDeleting(tg)}>
-                    {t('delete')}
-                  </button>
-                </td>
+        /* Scroll wrapper carries the card — overflow-x on the <table> itself
+           never applied (table boxes are not scroll containers). */
+        <div className="card table-card">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('name')}</th>
+                <th>{t('target_kind')}</th>
+                <th>{t('target_host')}</th>
+                <th>{t('target_port')}</th>
+                <th />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {targets.map((tg) => (
+                <tr key={tg.id}>
+                  <td>{tg.name}</td>
+                  <td>
+                    <span className="chip">{tg.kind.toUpperCase()}</span>
+                  </td>
+                  <td className="mono">{tg.host}</td>
+                  <td className="mono">{tg.kind === 'tcp' ? tg.port : '-'}</td>
+                  <td className="nowrap">
+                    <button type="button" className="btn danger small" onClick={() => setDeleting(tg)}>
+                      {t('delete')}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {deleting && (

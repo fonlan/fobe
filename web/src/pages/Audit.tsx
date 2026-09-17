@@ -42,36 +42,40 @@ export default function Audit() {
       {entries !== null && entries.length === 0 && <div className="empty-hint">{t('audit_empty')}</div>}
 
       {entries !== null && entries.length > 0 && (
-        <table className="table card">
-          <thead>
-            <tr>
-              <th>{t('audit_time')}</th>
-              <th>{t('audit_actor')}</th>
-              <th>{t('audit_action')}</th>
-              <th>{t('audit_node')}</th>
-              <th>{t('audit_detail')}</th>
-              <th>{t('audit_source')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {entries.map((e, i) => (
-              <tr key={i}>
-                <td className="mono nowrap">{fmtTime(e.ts)}</td>
-                <td>{e.actor}</td>
-                <td>
-                  <span className="chip">{e.action}</span>
-                  {e.risk === 'risky' && <span className="chip status-failed">risky</span>}
-                </td>
-                {/* node_name falls back to the raw ID once the node is deleted */}
-                <td>{e.node_name || e.node_id || '-'}</td>
-                <td className="detail-cell" title={e.command}>
-                  {e.command || '-'}
-                </td>
-                <td className="mono">{e.source_ip || '-'}</td>
+        /* Scroll wrapper carries the card — overflow-x on the <table> itself
+           never applied (table boxes are not scroll containers). */
+        <div className="card table-card">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>{t('audit_time')}</th>
+                <th>{t('audit_actor')}</th>
+                <th>{t('audit_action')}</th>
+                <th>{t('audit_node')}</th>
+                <th>{t('audit_detail')}</th>
+                <th>{t('audit_source')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {entries.map((e, i) => (
+                <tr key={i}>
+                  <td className="mono nowrap">{fmtTime(e.ts)}</td>
+                  <td>{e.actor}</td>
+                  <td>
+                    <span className="chip">{e.action}</span>
+                    {e.risk === 'risky' && <span className="chip status-failed">risky</span>}
+                  </td>
+                  {/* node_name falls back to the raw ID once the node is deleted */}
+                  <td>{e.node_name || e.node_id || '-'}</td>
+                  <td className="detail-cell" title={e.command}>
+                    {e.command || '-'}
+                  </td>
+                  <td className="mono">{e.source_ip || '-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
