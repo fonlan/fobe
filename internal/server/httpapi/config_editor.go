@@ -131,6 +131,43 @@ func (s *Server) hasLiveConfig(nodeID string) bool {
 	return ok && len(nodes) > 0
 }
 
+// relayableInbound mirrors the renderer's relay leg (§10.2): the relayed
+// outbound terminates on the target's anytls inbound, so only an anytls entry
+// with a reported certificate can carry it (an empty protocol means anytls —
+// the inbound fobe generated itself).
+func relayableInbound(live []singbox.ProxyNode) *singbox.ProxyNode {
+	for i := range live {
+		if (live[i].Protocol == "" || live[i].Protocol == singbox.ProtoAnytls) && live[i].CertPEM != "" {
+			return &live[i]
+		}
+	}
+	return nil
+}
+
+// liveAnytlsPorts lists the anytls inbound ports of the reported config — the
+// ports a §10.2 relay leg can land on. Listeners are equal peers (§9.3 实现
+// 修订 2026-09-17d), so there is no hidden primary port to fall back to; the
+// managed port only answers for a node whose file has not been reported yet.
+func (s *Server) liveAnytlsPorts(nodeID string, sb *store.NodeSingbox) []int {
+	ports := map[int]bool{}
+	if inbounds, ok := s.liveInbounds(nodeID); ok {
+		for _, ib := range inbounds {
+			if ib.Type == singbox.ProtoAnytls && ib.Port > 0 {
+				ports[ib.Port] = true
+			}
+		}
+	}
+	if len(ports) == 0 && sb != nil && sb.Port > 0 {
+		ports[sb.Port] = true
+	}
+	out := make([]int, 0, len(ports))
+	for p := range ports {
+		out = append(out, p)
+	}
+	sort.Ints(out)
+	return out
+}
+
 // --- editing ---
 
 // inboundView is one editable inbound as the panel sees it. `credential` is

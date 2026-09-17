@@ -862,20 +862,16 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 
 		// A relayed entry dials the relay's primary IP and the src port of its
 		// DNAT rule, while the pinned certificate still belongs to the target
-		// (DNAT is layer 4; TLS terminates on B). It lands on the node's anytls
-		// inbound, so only that one inbound is relayed — an adopted or
-		// hand-written inbound is reachable directly, never through the rule.
+		// (DNAT is layer 4; TLS terminates on B). It lands on one of the
+		// target's anytls inbounds — the rule's destination port says which
+		// one, and that matters because equal listeners may carry different
+		// certificates. An adopted or hand-written inbound is reachable
+		// directly, never through the rule.
 		relay, err := s.Store.GetNode(e.RelayNodeID)
 		if err != nil || relay.PrimaryIP == "" {
 			continue // the relay leg is gone (rule deleted / node removed)
 		}
-		var relayed *singbox.ProxyNode
-		for i := range live {
-			if (live[i].Protocol == "" || live[i].Protocol == singbox.ProtoAnytls) && live[i].CertPEM != "" {
-				relayed = &live[i]
-				break
-			}
-		}
+		relayed := s.relayedInbound(e, target, live)
 		if relayed == nil {
 			continue // no anytls inbound on the target: nothing to reach through A
 		}
@@ -889,6 +885,62 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 		})
 	}
 	return nodes
+}
+
+// relayedInbound picks the anytls outbound a relay leg terminates on. The
+// rule's destination port decides when it can be read — listeners are equal
+// peers and may carry different certificates, so pinning the wrong one hands
+// the client a TLS handshake that can never succeed. Without a rule to read
+// (deleted between listing and rendering) it falls back to the first
+// renderable anytls inbound.
+func (s *Server) relayedInbound(e store.SubscriptionEntry, target *store.Node, live []singbox.ProxyNode) *singbox.ProxyNode {
+	dst := s.forwardDstPort(e, target)
+	var first *singbox.ProxyNode
+	for i := range live {
+		n := &live[i]
+		if (n.Protocol == "" || n.Protocol == singbox.ProtoAnytls) && n.CertPEM != "" {
+			if first == nil {
+				first = n
+			}
+			if dst != 0 && n.Port == dst {
+				return n
+			}
+		}
+	}
+	return first
+}
+
+// forwardDstPort re-reads the relay's reported rules to learn which target
+// port this entry lands on (an entry stores only the src side). The ruleset
+// is the source of truth (§21.1); a rule that is gone, or one whose
+// destination no longer names the target, reads as 0.
+func (s *Server) forwardDstPort(e store.SubscriptionEntry, target *store.Node) int {
+	if e.RelayNodeID == "" {
+		return 0
+	}
+	rules, err := s.Store.ListNodeForwards(e.RelayNodeID)
+	if err != nil {
+		return 0
+	}
+	var ips map[string]bool
+	if list, err := s.Store.ListNodeIPs(target.ID); err == nil {
+		ips = map[string]bool{}
+		for _, row := range list {
+			if row.Family == 4 {
+				ips[row.IP] = true
+			}
+		}
+	}
+	for _, r := range rules {
+		if r.Proto != e.Proto || r.SrcPort != e.SrcPort || r.Iface != e.Iface {
+			continue
+		}
+		if ips != nil && !ips[r.DstIP] {
+			continue
+		}
+		return r.DstPort
+	}
+	return 0
 }
 
 // renderSubscription produces the final config body for the chosen format:

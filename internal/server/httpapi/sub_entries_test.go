@@ -85,6 +85,116 @@ func relayEntryOf(t *testing.T, entries []subEntryView, targetID string) subEntr
 	return subEntryView{}
 }
 
+// seedDiscoveredConfig stores what the probe itself would report (§9.3): a
+// config.json the panel never wrote — one-sing.sh's own file — plus the
+// certificate bytes for its anytls listeners. The node keeps an unmanaged
+// node_singbox row (port 0, no cert): exactly what a pure one-sing probe has.
+func seedDiscoveredConfig(t *testing.T, api *Server, nodeID, configJSON string, certs map[int]string) {
+	t.Helper()
+	if err := api.Store.SetNodeSingboxLocal(nodeID, store.NodeSingboxLocal{
+		LocalPresent: true, LocalRunning: true,
+		ConfigJSON: configJSON, LocalHash: "hash-" + nodeID,
+		AnytlsCerts: certs,
+	}, api.Crypt); err != nil {
+		t.Fatalf("seed local config: %v", err)
+	}
+}
+
+// TestRelayEntryFromDiscoveredConfig is the one-sing.sh pairing: neither node
+// was ever installed by the panel — both sing-boxes are the script's own, so
+// the panel knows them only through discovery (reported config.json, no
+// managed port or certificate). A's forward onto B's anytls inbound must still
+// yield the "B via A" entry, and B's direct entry must be offered as
+// available, because the renderer serves both from the reported file.
+func TestRelayEntryFromDiscoveredConfig(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 0) // no managed sing-box
+	seedDiscoveredConfig(t, api, aID, `{"inbounds":[
+		{"type":"anytls","tag":"a-in","listen_port":21001,"users":[{"password":"a-pw"}]}
+	]}`, map[int]string{21001: testCertPEM})
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"anytls","tag":"b-in","listen_port":28711,"users":[{"password":"script-pw"}]},
+		{"type":"vless","tag":"b-vless","listen_port":16929,"users":[{"uuid":"b2f0a2f4-1111-2222-3333-444455556666"}]}
+	]}`, map[int]string{28711: testCertPEM})
+	seedForward(t, api, aID, "tcp", 8080, "198.51.100.7", 28711)
+
+	subID, token := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{{NodeID: bID, Selected: true}})
+
+	entries := listEntries(t, srv, cookie, subID)
+	relay := relayEntryOf(t, entries, bID)
+	if relay.RelayNodeID != aID || relay.SrcPort != 8080 || relay.Proto != "tcp" {
+		t.Fatalf("relay entry = %+v, want relay=%s src_port=8080 tcp", relay, aID)
+	}
+	if !relay.Available || !relay.Selected {
+		t.Errorf("discovered relay entry must be offered and auto-enrolled: %+v", relay)
+	}
+	var direct subEntryView
+	found := false
+	for _, e := range entries {
+		if e.NodeID == bID && e.RelayNodeID == "" {
+			direct, found = e, true
+		}
+	}
+	if !found || !direct.Available || direct.Reason != "" {
+		t.Errorf("discovered direct entry = %+v, want available without a reason", direct)
+	}
+
+	body := string(fetchSub(t, srv, token, "", "").Body)
+	for _, want := range []string{"fobe-B", "fobe-B · A:8080", `"server_port": 8080`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rendered subscription missing %q\n%s", want, body)
+		}
+	}
+	if got := strings.Count(body, "BEGIN CERTIFICATE"); got != 2 {
+		t.Errorf("pinned certificates = %d, want 2 (B direct + B via A)\n%s", got, body)
+	}
+}
+
+// TestRelayPinsTheInboundTheRuleLandsOn: listeners are equal peers and may
+// carry different certificates, so the relayed outbound must pin the cert of
+// the anytls inbound the rule's *destination* names — not just the first one
+// in the file.
+func TestRelayPinsTheInboundTheRuleLandsOn(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	certA, certB := "-----BEGIN CERTIFICATE-----\nPORT28711\n-----END CERTIFICATE-----\n",
+		"-----BEGIN CERTIFICATE-----\nPORT28811\n-----END CERTIFICATE-----\n"
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 0)
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"anytls","tag":"b-1","listen_port":28711,"users":[{"password":"pw-1"}]},
+		{"type":"anytls","tag":"b-2","listen_port":28811,"users":[{"password":"pw-2"}]}
+	]}`, map[int]string{28711: certA, 28811: certB})
+	seedForward(t, api, aID, "tcp", 8081, "198.51.100.7", 28811)
+
+	subID, token := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{{NodeID: bID, Selected: true}})
+	if relay := relayEntryOf(t, listEntries(t, srv, cookie, subID), bID); !relay.Available {
+		t.Fatalf("relay onto the second anytls inbound = %+v", relay)
+	}
+
+	body := string(fetchSub(t, srv, token, "", "").Body)
+	if !strings.Contains(body, "fobe-B · A:8081") {
+		t.Fatalf("relay outbound missing\n%s", body)
+	}
+	// The relayed outbound is the third anytls block; what matters is that the
+	// payload as a whole carries both certificates and the relayed entry pins
+	// the 28811 one. Count pins: 3 outbounds, exactly one may carry 28811's
+	// cert body — and it must sit in the block whose server_port is 8081.
+	if got := strings.Count(body, "PORT28811"); got != 2 {
+		t.Errorf("PORT28811 occurrences = %d, want 2 (certificate + sha256 pin line)\n%s", got, body)
+	}
+	if !strings.Contains(body, "PORT28711") {
+		t.Errorf("the direct 28711 inbound lost its certificate\n%s", body)
+	}
+}
+
 // TestRelayEntryAutoEnrolAndRender is the §10.2 headline: A forwards to B's
 // anytls inbound, so a subscription binding B grows a third entry — B through
 // A — which renders as a second outbound pointing at A while still pinning B's

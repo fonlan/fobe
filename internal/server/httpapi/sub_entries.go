@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/fonlan/fobe/internal/server/singbox"
 	"github.com/fonlan/fobe/internal/server/store"
 )
 
@@ -130,11 +131,15 @@ func (c relayCandidate) entry(nodeID string) store.SubscriptionEntry {
 
 // relayCandidates derives the §10.2 relay entries of one target node from the
 // fleet's forwards snapshot: a tcp rule on some *other* node whose destination
-// is one of this node's IPv4 addresses and its anytls inbound port. The
-// ruleset is the source of truth (§21.1), so this is recomputed on every read
-// instead of being stored as a second opinion.
+// is one of this node's IPv4 addresses and one of its anytls inbound ports.
+// The landable ports come from the reported file — the editor model keeps the
+// listeners equal, so there is no single primary port to match against — and
+// fall back to the managed port for a node whose file has not arrived yet.
+// The ruleset is the source of truth (§21.1), so this is recomputed on every
+// read instead of being stored as a second opinion.
 func (s *Server) relayCandidates(target *store.Node, sb *store.NodeSingbox) []relayCandidate {
-	if sb == nil || sb.Port <= 0 {
+	ports := s.liveAnytlsPorts(target.ID, sb)
+	if len(ports) == 0 {
 		return nil
 	}
 	ips, err := s.Store.ListNodeIPs(target.ID)
@@ -150,21 +155,23 @@ func (s *Server) relayCandidates(target *store.Node, sb *store.NodeSingbox) []re
 	if len(v4) == 0 {
 		return nil
 	}
-	forwards, err := s.Store.ListForwardsToDstPort(sb.Port)
-	if err != nil {
-		return nil
-	}
 	out := []relayCandidate{}
-	for _, f := range forwards {
-		// A rule on the target itself is a self-loop (or a port collision), not
-		// a relay: it would produce an entry identical to the direct one.
-		if f.NodeID == target.ID || !v4[f.Forward.DstIP] {
+	for _, port := range ports {
+		forwards, err := s.Store.ListForwardsToDstPort(port)
+		if err != nil {
 			continue
 		}
-		out = append(out, relayCandidate{
-			RelayNodeID: f.NodeID, Proto: f.Forward.Proto, SrcPort: f.Forward.SrcPort,
-			Iface: f.Forward.Iface, Comment: f.Forward.Comment,
-		})
+		for _, f := range forwards {
+			// A rule on the target itself is a self-loop (or a port collision), not
+			// a relay: it would produce an entry identical to the direct one.
+			if f.NodeID == target.ID || !v4[f.Forward.DstIP] {
+				continue
+			}
+			out = append(out, relayCandidate{
+				RelayNodeID: f.NodeID, Proto: f.Forward.Proto, SrcPort: f.Forward.SrcPort,
+				Iface: f.Forward.Iface, Comment: f.Forward.Comment,
+			})
+		}
 	}
 	return out
 }
@@ -173,15 +180,22 @@ func (s *Server) relayCandidates(target *store.Node, sb *store.NodeSingbox) []re
 // because one of its own DNAT rules steals the port in prerouting (§21.9).
 // Reported, never enforced: the port is the probe's fact, not the panel's call.
 func (s *Server) directEntryShadowed(node *store.Node, sb *store.NodeSingbox) bool {
-	if sb == nil || sb.Port <= 0 {
+	ports := s.liveAnytlsPorts(node.ID, sb)
+	if len(ports) == 0 {
 		return false
 	}
 	rules, err := s.Store.ListNodeForwards(node.ID)
 	if err != nil {
 		return false
 	}
+	stolen := map[int]bool{}
 	for _, r := range rules {
-		if r.Proto == "tcp" && r.SrcPort == sb.Port {
+		if r.Proto == "tcp" {
+			stolen[r.SrcPort] = true
+		}
+	}
+	for _, port := range ports {
+		if stolen[port] {
 			return true
 		}
 	}
@@ -210,6 +224,30 @@ type subEntryView struct {
 	Warning    string `json:"warning,omitempty"`
 	Discovered bool   `json:"discovered"` // derived from a live forward rule
 	Source     string `json:"source,omitempty"`
+}
+
+// targetReadiness is what per-entry availability needs to know about the
+// landing node, computed once per node instead of once per row. The reported
+// file decides first (the editor model), the managed port/certificate pair
+// answers only for a node whose file has not been reported yet. `relayable`
+// is the stricter half: a relay leg terminates on the target's anytls
+// inbound, so a node that renders only non-anytls inbounds can host direct
+// entries but no relay leg.
+type targetReadiness struct {
+	live       []singbox.ProxyNode
+	renderable bool
+	relayable  bool
+}
+
+func (s *Server) targetReadinessOf(target *store.Node, sb *store.NodeSingbox) targetReadiness {
+	live, _ := s.liveNodesFor(target.ID, "", "probe")
+	legacyPair := sb != nil && sb.Port > 0 && sb.CertPEM != ""
+	return targetReadiness{
+		live: live,
+		renderable: target.PrimaryIP != "" &&
+			(len(live) > 0 || legacyPair || (sb != nil && sb.ExtrasPresent)),
+		relayable: relayableInbound(live) != nil || legacyPair,
+	}
 }
 
 // subscriptionEntryViews assembles the entries the panel may offer: the §10
@@ -241,7 +279,7 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 	views := make([]subEntryView, 0, len(nodes))
 	seen := map[string]bool{}
 
-	view := func(target, relay *store.Node, e store.SubscriptionEntry, sb *store.NodeSingbox, discovered bool) subEntryView {
+	view := func(target, relay *store.Node, e store.SubscriptionEntry, sb *store.NodeSingbox, rd targetReadiness, discovered bool) subEntryView {
 		key := entryKey(e)
 		seen[key] = true
 		direct := e.RelayNodeID == ""
@@ -266,11 +304,12 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 		if b, ok := boundByKey[key]; ok {
 			v.Selected, v.Alias = b.Enabled, b.Alias
 		}
-		// Availability is per leg: the target must be renderable (primary IP +
-		// inbound port + certificate, §10), and a relayed entry additionally
-		// needs the relay's primary IP to dial.
+		// Availability is per leg: the target must be renderable — from its
+		// reported file, or from the managed port/certificate pair before the
+		// first report arrives (§10) — and a relayed entry additionally needs
+		// an anytls inbound to terminate on plus the relay's address to dial.
 		switch {
-		case sb == nil || sb.Port <= 0 || target.PrimaryIP == "" || sb.CertPEM == "":
+		case !rd.renderable:
 			v.Available, v.Reason = false, "not_ready"
 		case direct:
 			if s.directEntryShadowed(target, sb) {
@@ -280,6 +319,8 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 			v.Available, v.Reason = false, "relay_not_ready"
 		case !discovered:
 			v.Available, v.Reason = false, "relay_gone"
+		case !rd.relayable:
+			v.Available, v.Reason = false, "not_ready"
 		}
 		return v
 	}
@@ -291,10 +332,11 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 	for i := range nodes {
 		target := &nodes[i]
 		sb, _ := s.Store.GetNodeSingbox(target.ID)
-		if _, bound := boundByKey[entryKey(store.SubscriptionEntry{NodeID: target.ID})]; bound || s.nodeRenderable(target, sb) {
-			views = append(views, view(target, nil, store.SubscriptionEntry{NodeID: target.ID}, sb, false))
+		rd := s.targetReadinessOf(target, sb)
+		if _, bound := boundByKey[entryKey(store.SubscriptionEntry{NodeID: target.ID})]; bound || rd.renderable {
+			views = append(views, view(target, nil, store.SubscriptionEntry{NodeID: target.ID}, sb, rd, false))
 		}
-		if !s.nodeRenderable(target, sb) {
+		if !rd.renderable {
 			// The landing node of a relay entry is the node the client's TLS
 			// session ends on, so it has to be a working anytls node. The relay
 			// itself does not: it only has to route packets (and have an
@@ -306,7 +348,7 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 			if relay == nil || relay.PrimaryIP == "" {
 				continue // nothing to dial: not a usable ingress
 			}
-			v := view(target, relay, c.entry(target.ID), sb, true)
+			v := view(target, relay, c.entry(target.ID), sb, rd, true)
 			v.Source = c.Comment
 			views = append(views, v)
 		}
@@ -322,7 +364,7 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 			continue
 		}
 		sb, _ := s.Store.GetNodeSingbox(target.ID)
-		views = append(views, view(target, byID[e.RelayNodeID], e, sb, false))
+		views = append(views, view(target, byID[e.RelayNodeID], e, sb, s.targetReadinessOf(target, sb), false))
 	}
 	return views, nil
 }
@@ -376,7 +418,10 @@ func (s *Server) reconcileSubscriptionEntries(sub *store.Subscription) int {
 			continue
 		}
 		sb, err := s.Store.GetNodeSingbox(id)
-		if err != nil || sb.Port <= 0 || sb.CertPEM == "" {
+		if err != nil {
+			sb = nil // never managed: the reported file decides on its own
+		}
+		if !s.targetReadinessOf(target, sb).relayable {
 			continue // not renderable yet: enrol when it is, not before
 		}
 		for _, c := range s.relayCandidates(target, sb) {

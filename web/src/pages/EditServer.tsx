@@ -703,6 +703,16 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
   // (desired_uninstall) while the reported half (version/cert) is still there
   // until the probe removes the files and answers "absent".
   const local = sb?.local ?? null;
+  // §9.3 实现修订 2026-09-17f: a sing-box the panel never installed is not
+  // "not installed" — the discovery half reports what the probe already runs
+  // (one-sing.sh's own instance). While the managed half is silent, the
+  // discovered instance answers the status tile and the installed-hint.
+  const localOnly = !!local?.present && (!sb || (!sb.desired_version && !sb.version));
+  const statusValue = localOnly
+    ? t('sb_status_local')
+    : t(statusKey) === statusKey
+      ? status
+      : t(statusKey);
   // Discovery is a snapshot the probe refreshes on its own cadence (it reports
   // when the file changed), so the panel re-reads while a local sing-box is
   // present: an operator who edits config.json by hand sees it appear without
@@ -760,7 +770,7 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
       <div className="tile-grid">
         <Tile label={t('sb_current')} value={sb?.version || '-'} />
         <Tile label={t('sb_desired')} value={sb?.desired_version || '-'} />
-        <Tile label={t('alert_status')} value={t(statusKey) === statusKey ? status : t(statusKey)} />
+        <Tile label={t('alert_status')} value={statusValue} />
       </div>
 
       {sb?.last_error && (
@@ -1124,7 +1134,7 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
         </button>
       </div>
 
-      {(!sb || (!sb.desired_version && !sb.version)) && <div className="hint">{t('sb_not_installed')}</div>}
+      {!localOnly && (!sb || (!sb.desired_version && !sb.version)) && <div className="hint">{t('sb_not_installed')}</div>}
 
       {msg && <span className="form-ok">{msg}</span>}
       {err && <span className="form-error">{err}</span>}
