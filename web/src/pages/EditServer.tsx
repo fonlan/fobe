@@ -856,7 +856,9 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
                             }
                           />
                         </td>
-                        <td>
+                        {/* 状态 chip 是 CJK 短词:不加 nowrap 会被 auto 表格布局
+                            压到单字宽折成两行,超出部分由 .table-wrap 横向滚动接住 */}
+                        <td className="nowrap">
                           <span className="chip">
                             {ib.status === 'running'
                               ? t('sb_inbound_running')
