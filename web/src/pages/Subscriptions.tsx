@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
@@ -420,15 +420,15 @@ function relayAutoOff(v: string): boolean {
 
 // §10.2 entry picker. A subscription binds *entries*, not nodes: the same node
 // can be listed twice — once as its own inbound and once through a relay's
-// nftables DNAT — so every row is a checkbox plus its own naming input, grouped
-// per node with the direct ingress first (the order the renderer emits).
-//
-// Entries that cannot render right now (mid-reinstall, relay rule just removed)
-// stay listed, muted and still checkable: the binding is real and silently
-// dropping it would change what clients fetch with no way to unbind it. Every
-// row shown is sent back on save, unchecked ones included — the server turns an
-// unchecked bound row into a tombstone, which is what keeps the auto-enrolment
-// reconciler from re-adding it.
+// nftables DNAT — so the picker is a flat table, one candidate ingress per row
+// with the binding checkbox in the first column and the row's identity (node,
+// ingress, rule comment) right next to it. Entries that cannot render right
+// now (mid-reinstall, relay rule just removed) stay listed, muted and still
+// checkable: the binding is real and silently dropping it would change what
+// clients fetch with no way to unbind it. Every row shown is sent back on
+// save, unchecked ones included — the server turns an unchecked bound row into
+// a tombstone, which is what keeps the auto-enrolment reconciler from
+// re-adding it.
 function EntryPicker({
   sub,
   reloadKey,
@@ -498,63 +498,56 @@ function EntryPicker({
     }
   };
 
-  // Group by target node, direct ingress first, then relays.
-  const groups = useMemo(() => {
-    const order: string[] = [];
-    const byNode = new Map<string, SubscriptionEntry[]>();
-    for (const e of entries ?? []) {
-      const list = byNode.get(e.node_id);
-      if (list) {
-        list.push(e);
-      } else {
-        byNode.set(e.node_id, [e]);
-        order.push(e.node_id);
-      }
-    }
-    return order.map((nodeID) => {
-      const list = byNode.get(nodeID) ?? [];
-      return {
-        nodeID,
-        nodeName: list[0]?.node_name || nodeID,
-        direct: list.filter((e) => e.relay_node_id === ''),
-        relayed: list.filter((e) => e.relay_node_id !== ''),
-      };
-    });
-  }, [entries]);
+  // Header checkbox: drives every visible row in one click. Indeterminate
+  // marks the "some but not all" state so a mixed list is never read as
+  // all-on or all-off.
+  const list = entries ?? [];
+  const allSelected = list.length > 0 && list.every((e) => e.selected);
+  const someSelected = list.some((e) => e.selected);
+  const toggleAll = () =>
+    setEntries((prev) => (prev === null ? prev : prev.map((e) => ({ ...e, selected: !allSelected }))));
 
-  const anyUnavailable = (entries ?? []).some((e) => !e.available);
+  const anyUnavailable = list.some((e) => !e.available);
 
+  // One candidate ingress per row. The identity cells are read-only; the only
+  // editable things are the checkbox and the alias input.
   const row = (e: SubscriptionEntry) => {
     const key = entryKey(e);
-    const muted = !e.available;
     const effective = e.alias.trim() || e.auto_name;
-    const label =
-      e.relay_node_id === ''
-        ? e.node_name || e.node_id
-        : t('sub_entry_via', { relay: e.relay_name || e.relay_node_id, port: e.src_port });
     return (
-      <div key={key} className={'sub-entry' + (muted ? ' sub-entry-unavailable' : '')}>
-        <div className="row-wrap">
-          <label
-            className={'check-chip' + (muted ? ' chip-muted' : '')}
-            title={e.source || undefined}
-          >
-            <input
-              type="checkbox"
-              checked={e.selected}
-              onChange={() => patch(key, (x) => ({ ...x, selected: !x.selected }))}
-            />
-            {label}
-          </label>
+      <tr key={key} className={e.available ? '' : 'row-muted'}>
+        <td className="sub-entry-check">
+          <input
+            type="checkbox"
+            checked={e.selected}
+            aria-label={e.auto_name || e.node_name || e.node_id}
+            onChange={() => patch(key, (x) => ({ ...x, selected: !x.selected }))}
+          />
+        </td>
+        <td className="nowrap">{e.node_name || e.node_id}</td>
+        <td className="nowrap">
           {e.relay_node_id === '' ? (
             <span className="chip">{t('sub_entry_direct')}</span>
+          ) : (
+            t('sub_entry_via', { relay: e.relay_name || e.relay_node_id, port: e.src_port })
+          )}
+          {e.discovered && (
+            <>
+              {' '}
+              <span className="chip">{t('sub_entry_discovered')}</span>
+            </>
+          )}
+        </td>
+        <td>
+          {e.source !== '' ? (
+            <div className="hint cell-ellipsis" title={e.source}>
+              {t('sub_entry_source', { comment: e.source })}
+            </div>
           ) : null}
-          {e.discovered ? <span className="chip">{t('sub_entry_discovered')}</span> : null}
-          {e.source !== '' ? <span className="hint">{t('sub_entry_source', { comment: e.source })}</span> : null}
-        </div>
-        <div className="cmd-input-row sub-entry-name">
+        </td>
+        <td>
           <input
-            className="mono"
+            className="mono sub-entry-alias"
             value={e.alias}
             maxLength={64}
             placeholder={e.auto_name}
@@ -562,13 +555,18 @@ function EntryPicker({
             aria-label={t('sub_entry_alias')}
             onChange={(ev) => patch(key, (x) => ({ ...x, alias: ev.target.value }))}
           />
-          <span className="hint nowrap">{t('sub_entry_effective', { name: effective })}</span>
-        </div>
-        {!e.available && (
-          <p className="hint sub-entry-reason">{t(ENTRY_REASON_KEYS[e.reason] ?? 'sub_entry_reason_unknown')}</p>
-        )}
-        {e.warning === 'shadowed' && <p className="sub-entry-warn">{t('sub_entry_warning_shadowed')}</p>}
-      </div>
+          {/* The name the renderer will actually use, live while typing. */}
+          <div className="hint sub-entry-effective" title={effective}>
+            {t('sub_entry_effective', { name: effective })}
+          </div>
+        </td>
+        <td>
+          {!e.available && (
+            <div className="hint">{t(ENTRY_REASON_KEYS[e.reason] ?? 'sub_entry_reason_unknown')}</div>
+          )}
+          {e.warning === 'shadowed' && <div className="sub-entry-warn">{t('sub_entry_warning_shadowed')}</div>}
+        </td>
+      </tr>
     );
   };
 
@@ -580,13 +578,34 @@ function EntryPicker({
       {entries === null && !err && <div className="hint">{t('loading')}</div>}
       {entries !== null && entries.length === 0 && <div className="hint">{t('sub_entries_empty')}</div>}
       {anyUnavailable && <p className="hint">{t('sub_entries_unavailable_hint')}</p>}
-      {groups.map((g) => (
-        <div className="sub-entry-group" key={g.nodeID}>
-          <h5 className="sub-entry-node">{g.nodeName}</h5>
-          {g.direct.map(row)}
-          {g.relayed.map(row)}
+      {entries !== null && entries.length > 0 && (
+        <div className="table-wrap">
+          <table className="table sub-entry-table">
+            <thead>
+              <tr>
+                <th className="sub-entry-check">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = someSelected && !allSelected;
+                    }}
+                    aria-label={t('sub_entry_select_all')}
+                    title={t('sub_entry_select_all')}
+                    onChange={toggleAll}
+                  />
+                </th>
+                <th>{t('sub_entry_col_node')}</th>
+                <th>{t('sub_entry_col_ingress')}</th>
+                <th>{t('sub_entry_col_source')}</th>
+                <th>{t('sub_entry_alias')}</th>
+                <th>{t('sub_entry_col_status')}</th>
+              </tr>
+            </thead>
+            <tbody>{entries.map(row)}</tbody>
+          </table>
         </div>
-      ))}
+      )}
       <div className="row-end">
         {saved && <span className="form-ok">{t('server_edit_saved')}</span>}
         <button
