@@ -636,11 +636,6 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
   const [cfgHash, setCfgHash] = useState('');
   const [edits, setEdits] = useState<Record<number, Partial<SingboxInbound>>>({});
   const [newInbound, setNewInbound] = useState<Partial<SingboxInbound> | null>(null);
-  // Which inbounds the operator ticked for "接管" — in the editor model that is
-  // simply an edit that leaves the credential blank, so the merged inbound keeps
-  // serving what it already served.
-  const [picked, setPicked] = useState<Record<number, boolean>>({});
-
   const load = useCallback(async () => {
     try {
       const [st, vs, cv] = await Promise.all([
@@ -717,9 +712,6 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
     }
   };
 
-  const pickedInbounds = (cfg?.inbounds ?? []).filter((i) => picked[i.number] && i.editable);
-  const pickedCount = pickedInbounds.length;
-
   return (
     <div className="stack">
       <div className="tile-grid">
@@ -740,9 +732,10 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
         <span className="hint">{t('sb_cert_until', { time: fmtTime(sb.cert_not_after) })}</span>
       ) : null}
 
-      {/* §9.3 实现修订 2026-09-17b: the probe's own config.json, editable.
-          Nothing here is "adopted": the file is the source of truth, the panel
-          shows exactly what is in it, and an edit is merged back onto it. */}
+      {/* §9.3 实现修订 2026-09-17b, 2026-09-17d: the probe's own config.json,
+          editable. Nothing here is "adopted" and nothing is selected: the file
+          is the source of truth, every inbound in it is already part of the
+          node and of the subscription, and an edit is merged back onto it. */}
       {local?.present && (
         <div className="sb-local">
           <div className="row-wrap">
@@ -780,7 +773,6 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
               <table className="sb-inbound-table">
                 <thead>
                   <tr>
-                    <th />
                     <th>{t('sb_col_type')}</th>
                     <th>{t('sb_col_port')}</th>
                     <th>{t('sb_col_tag')}</th>
@@ -795,19 +787,14 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
                     const locked = ib.port === sb?.port || ib.port === Number(port);
                     return (
                       <tr key={ib.number}>
-                        <td>
-                          {ib.editable ? (
-                            <input
-                              type="checkbox"
-                              title={t('sb_inbound_select')}
-                              checked={!!picked[ib.number]}
-                              onChange={(e) =>
-                                setPicked((cur) => ({ ...cur, [ib.number]: e.target.checked }))
-                              }
-                            />
-                          ) : null}
+                        <td className="mono">
+                          {ib.type}
+                          {ib.port === sb?.port && (
+                            <span className="chip primary-chip sb-own-chip" title={t('sb_local_own_hint')}>
+                              {t('sb_local_own')}
+                            </span>
+                          )}
                         </td>
-                        <td className="mono">{ib.type}</td>
                         <td>
                           <input
                             className="mono sb-num"
@@ -929,35 +916,8 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
             >
               {t('sb_inbound_add')}
             </button>
-            <button
-              type="button"
-              className="btn primary"
-              disabled={busy || pickedCount === 0}
-              onClick={() =>
-                void run(
-                  () =>
-                    api.singboxConfigEdit(nodeId, {
-                      reported_hash: cfgHash,
-                      // Adopting means "this listener serves what my clients
-                      // already have": `adopt` makes the server write the
-                      // credential its subscriptions hand out (the panel cannot
-                      // send that value — no API returns the global password).
-                      update: pickedInbounds.map((ib) => ({
-                        number: ib.number,
-                        type: ib.type,
-                        tag: ib.tag,
-                        port: ib.port,
-                        adopt: ib.type === 'anytls',
-                      })),
-                    }),
-                  t('sb_adopt_queued'),
-                )
-              }
-            >
-              {t('sb_adopt')}
-            </button>
-            <span className="hint">{t('sb_adopt_hint2')}</span>
           </div>
+          <span className="hint">{t('sb_local_auto')}</span>
 
           {newInbound && (
             <div className="row-wrap">

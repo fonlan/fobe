@@ -408,3 +408,110 @@ func TestRecordIPsCountryFallback(t *testing.T) {
 		t.Fatalf("miss wiped state: primary=%q country=%q, want 192.168.123.2/CN", primary, country)
 	}
 }
+
+// --- §9.3 实现修订 2026-09-17d: recognising the probe's own listener ---------
+
+// hubLocalConfig is one-sing.sh's shape: an anytls listener plus a VLESS one.
+const hubLocalConfig = `{"inbounds":[
+  {"type":"anytls","tag":"anytls-in-28711","listen_port":28711,"users":[{"password":"script-pw"}]},
+  {"type":"vless","tag":"vless-in-16929","listen_port":16929,"users":[{"uuid":"b2f0a2f4-1111-2222-3333-444455556666"}]}
+]}`
+
+// A probe that arrives with sing-box already running tells the panel which
+// listener is the node's own; the operator is not asked to pick one. The
+// bookkeeping must stay server-side: no desired state, no sync target, nothing
+// written to the probe.
+func TestRecordSingboxLocalRecognizesTheNodesOwnInbound(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n1")
+
+	h.recordSingboxLocal("n1", &protocol.SingboxLocal{
+		Present: true, ConfigJSON: hubLocalConfig, ConfigSHA256: "cafe",
+	})
+	sb, err := h.store.GetNodeSingbox("n1")
+	if err != nil {
+		t.Fatalf("get singbox: %v", err)
+	}
+	if sb.Port != 28711 {
+		t.Fatalf("port = %d, want the file's last anytls listener (28711)", sb.Port)
+	}
+	// The node is explained, not managed: no version was declared, so no
+	// desired frame goes out and the sync pass (which rewrites configs) does not
+	// consider it a target either.
+	if d := h.buildDesiredState("n1"); d.Singbox != nil {
+		t.Fatalf("recognition pushed desired state: %+v", d.Singbox)
+	}
+	targets, err := h.store.ListSingboxTargets()
+	if err != nil {
+		t.Fatalf("list targets: %v", err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("recognition made the node a sing-box target: %+v", targets)
+	}
+
+	// Once known the listener never moves: clients pin a certificate against
+	// that entry, so re-pointing it would silently change what they reach. The
+	// new listener still reaches the subscription, just with its suffix.
+	h.recordSingboxLocal("n1", &protocol.SingboxLocal{
+		Present: true, ConfigSHA256: "beef",
+		ConfigJSON: `{"inbounds":[{"type":"anytls","listen_port":39999,"users":[{"password":"p"}]}]}`,
+	})
+	sb, err = h.store.GetNodeSingbox("n1")
+	if err != nil {
+		t.Fatalf("get singbox: %v", err)
+	}
+	if sb.Port != 28711 {
+		t.Fatalf("port moved to %d after a re-report", sb.Port)
+	}
+}
+
+// The regression this ordering guards: a probe that already reported the same
+// file on an older build has an *unchanged* snapshot, so the "nothing moved,
+// skip the write" shortcut would return before anything looked at the port —
+// and the file never changes again, so it would never be recognised at all.
+func TestRecordSingboxLocalRecognizesWithoutANewSnapshot(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n1")
+
+	report := &protocol.SingboxLocal{
+		Present: true, ConfigJSON: hubLocalConfig, ConfigSHA256: "cafe",
+		Version: "1.13.0", Running: true,
+	}
+	// The snapshot an older build stored: identical in every field the report
+	// carries, so Same() is true and only recognition is left to do.
+	h.recordSingboxLocal("n1", report)
+	if err := h.store.UpsertNodeSingbox(&store.NodeSingbox{NodeID: "n1", Status: "absent"}); err != nil {
+		t.Fatalf("clear port: %v", err)
+	}
+	h.recordSingboxLocal("n1", report)
+
+	sb, err := h.store.GetNodeSingbox("n1")
+	if err != nil {
+		t.Fatalf("get singbox: %v", err)
+	}
+	if sb.Port != 28711 {
+		t.Fatalf("port = %d, want 28711 recognised on an unchanged snapshot", sb.Port)
+	}
+}
+
+// Two files yield no node of its own: one with no anytls listener at all, and
+// one whose listener sits outside the port range the panel may manage. Both
+// stay fully usable (they render from the file with their own credentials) —
+// they simply have no entry carrying the node's plain name.
+func TestRecordSingboxLocalLeavesAnUnusableListenerAlone(t *testing.T) {
+	for name, cfg := range map[string]string{
+		"no anytls":        `{"inbounds":[{"type":"vless","listen_port":16929,"users":[{"uuid":"x"}]}]}`,
+		"out of range":     `{"inbounds":[{"type":"anytls","listen_port":443,"users":[{"password":"p"}]}]}`,
+		"nothing at all":   `{}`,
+		"not even jsonish": `not json`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestHub(t)
+			mustCreateNode(t, h.store, "n1")
+			h.recordSingboxLocal("n1", &protocol.SingboxLocal{Present: true, ConfigJSON: cfg})
+			if sb, err := h.store.GetNodeSingbox("n1"); err == nil && sb.Port != 0 {
+				t.Fatalf("recognised port %d from %s", sb.Port, cfg)
+			}
+		})
+	}
+}

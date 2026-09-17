@@ -696,7 +696,7 @@ export function singboxConfigEdit(
   body: {
     reported_hash?: string;
     add?: (Partial<SingboxInbound> & { new?: boolean })[];
-    update?: (Partial<SingboxInbound> & { adopt?: boolean })[];
+    update?: Partial<SingboxInbound>[];
     delete?: number[];
   },
 ): Promise<{ ok: boolean; inbounds: number }> {
@@ -707,19 +707,6 @@ export function singboxConfigEdit(
  *  file" path — the subscription renders from the last reported file). */
 export function singboxRefresh(id: string): Promise<{ ok: boolean; command_id: string }> {
   return request(`/api/nodes/${encodeURIComponent(id)}/singbox/refresh`, { method: 'POST', body: {} });
-}
-
-/** Adopt inbounds the probe already runs into fobe's desired config
- *  (§9.3 实现修订 2026-09-17). Each pick is a (type, port) pair — the identity
- *  of an inbound inside config.json. */
-export function singboxAdopt(
-  id: string,
-  inbounds: { type: string; port: number }[],
-): Promise<{ ok: boolean; adopted: number; desired_version: string }> {
-  return request(`/api/nodes/${encodeURIComponent(id)}/singbox/adopt`, {
-    method: 'POST',
-    body: { inbounds },
-  });
 }
 
 export function singboxSetPort(id: string, port: number): Promise<{ ok: boolean; port: number }> {

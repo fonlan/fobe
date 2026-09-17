@@ -1,18 +1,17 @@
-// §9.3 实现修订 2026-09-17: local sing-box discovery and adoption.
+// §9.3 实现修订 2026-09-17d: local sing-box discovery.
 //
 // The scenario these tests pin down is the one that motivated the feature: a
-// probe that one-sing.sh already manages. The agent reports its config.json,
-// the panel must be able to see it *without* fobe managing anything yet, and
-// clicking adopt must put those inbounds into fobe's desired state with their
-// ports and credentials intact.
+// probe that one-sing.sh already manages. The agent reports its config.json and
+// the panel serves clients out of that same file. There is no adoption step to
+// take — nothing here writes to the probe, and a listener the script created
+// keeps handing out the credential its clients already hold.
 package httpapi
 
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"net/http"
-	"os"
+	"strings"
 	"testing"
 
 	"github.com/fonlan/fobe/internal/server/singbox"
@@ -58,7 +57,9 @@ const oneSingLocalConfig = `{
 }`
 
 // seedLocalSnapshot stores what the agent's discovery frame would have stored,
-// encrypted exactly like the hub does.
+// encrypted exactly like the hub does. The certificate bytes ride along the way
+// the agent reports them: config.json only names a *path*, and a client can
+// only pin bytes.
 func seedLocalSnapshot(t *testing.T, api *Server, nodeID string, running bool) {
 	t.Helper()
 	snap := store.NodeSingboxLocal{
@@ -70,6 +71,7 @@ func seedLocalSnapshot(t *testing.T, api *Server, nodeID string, running bool) {
 		LocalUnit:    running,
 		LocalUnitOK:  true,
 		ConfigJSON:   oneSingLocalConfig,
+		AnytlsCerts:  map[int]string{28711: testCertPEM},
 	}
 	if err := api.Store.SetNodeSingboxLocal(nodeID, snap, api.Crypt); err != nil {
 		t.Fatalf("seed local snapshot: %v", err)
@@ -81,9 +83,6 @@ func TestSingboxDiscoveryShowsLocalInstallWithoutManagedState(t *testing.T) {
 	cookie := loginSession(t, srv)
 	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
 	seedLocalSnapshot(t, api, id, true)
-	// A cached version is what adoption will declare; the discovery endpoint
-	// itself must not need one.
-	seedCachedVersion(t, api, "1.13.0-beta.7")
 
 	r := doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+id+"/singbox", cookie, nil)
 	if r.Status != 200 {
@@ -102,7 +101,7 @@ func TestSingboxDiscoveryShowsLocalInstallWithoutManagedState(t *testing.T) {
 					Type      string `json:"type"`
 					Port      int    `json:"port"`
 					CredSet   bool   `json:"cred_set"`
-					Adoptable bool   `json:"adoptable"`
+					Supported bool   `json:"supported"`
 				} `json:"inbounds"`
 			} `json:"local"`
 		} `json:"singbox"`
@@ -123,7 +122,7 @@ func TestSingboxDiscoveryShowsLocalInstallWithoutManagedState(t *testing.T) {
 		t.Fatalf("discovery = %+v", sb.Local)
 	}
 	if sb.Local.Adopted != 0 {
-		t.Fatalf("adopted = %d, want 0 before any adoption", sb.Local.Adopted)
+		t.Fatalf("adopted = %d, want 0 (nothing is imported any more)", sb.Local.Adopted)
 	}
 	if len(sb.Local.Inbounds) != 2 {
 		t.Fatalf("inbounds = %+v", sb.Local.Inbounds)
@@ -139,236 +138,102 @@ func TestSingboxDiscoveryShowsLocalInstallWithoutManagedState(t *testing.T) {
 	}
 }
 
-func errorsIsNotFound(err error) bool { return errors.Is(err, store.ErrNotFound) }
-
-func TestSingboxAdoptMergesLocalInboundsIntoDesiredState(t *testing.T) {
-	srv, api := newTestServer(t)
-	cookie := loginSession(t, srv)
-	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
-	seedCachedVersion(t, api, "1.13.0-beta.7")
-	seedLocalSnapshot(t, api, id, true)
-
-	// A node fobe already manages: the port exists, nothing adopted yet.
-	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
-		NodeID: id, Version: "1.13.0-beta.7", DesiredVersion: "1.13.0-beta.7",
-		Status: "running", Port: 22039, CertPEM: testCertPEM, CertSHA256: "f00d",
-	}); err != nil {
-		t.Fatalf("seed singbox: %v", err)
-	}
-
-	r := doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+id+"/singbox/adopt", cookie,
-		map[string]any{"inbounds": []map[string]any{
-			{"type": "anytls", "port": 28711},
-			{"type": "vless", "port": 16929},
-		}})
-	if r.Status != 200 {
-		t.Fatalf("adopt = %d %s", r.Status, r.Body)
-	}
-
-	// The desired config is what the agent will apply: it must contain the
-	// panel's own inbound *and* the operator's two, with his credentials.
-	cfg, err := api.Store.GetSetting("singbox_config:" + id)
-	if err != nil {
-		t.Fatalf("stored config: %v", err)
-	}
-	var doc struct {
-		Inbounds []map[string]any `json:"inbounds"`
-	}
-	if err := json.Unmarshal([]byte(cfg), &doc); err != nil {
-		t.Fatalf("stored config is not JSON: %v", err)
-	}
-	byPort := map[int]map[string]any{}
-	for _, in := range doc.Inbounds {
-		byPort[int(in["listen_port"].(float64))] = in
-	}
-	if len(byPort) != 3 {
-		t.Fatalf("generated config has %d inbounds, want 3: %v", len(byPort), byPort)
-	}
-	anytls := byPort[28711]
-	if anytls == nil || anytls["type"] != "anytls" {
-		t.Fatalf("adopted anytls inbound missing: %v", byPort)
-	}
-	users, _ := anytls["users"].([]any)
-	if len(users) == 0 {
-		t.Fatalf("adopted anytls lost its users: %v", anytls)
-	}
-	if u, _ := users[0].(map[string]any); u["password"] != "AnyTlsScriptPw1" {
-		t.Fatalf("adopted anytls password = %v (must not be rotated)", users[0])
-	}
-	if _, ok := anytls["padding_scheme"]; !ok {
-		t.Fatalf("unmodelled inbound options were dropped: %v", anytls)
-	}
-	vless := byPort[16929]
-	if vless == nil {
-		t.Fatalf("adopted vless inbound missing: %v", byPort)
-	}
-	tls, _ := vless["tls"].(map[string]any)
-	reality, _ := tls["reality"].(map[string]any)
-	if reality == nil || reality["public_key"] == "" {
-		t.Fatalf("reality public key was not derived: %v", vless)
-	}
-
-	// Adoption must NOT rotate the global credential: the panel's inbound keeps
-	// the password the rest of the fleet shares, and the script's password
-	// travels with the adopted inbound instead (see the subscription test).
-	override, err := api.Store.GetNodeSingboxPasswordOverride(id)
-	if err != nil && !errorsIsNotFound(err) {
-		t.Fatalf("read override: %v", err)
-	}
-	if override != "" {
-		t.Fatalf("adoption wrote a password override (%q): the panel's inbound must stay on the global password", override)
-	}
-	panel := byPort[22039]
-	panelUsers, _ := panel["users"].([]any)
-	if len(panelUsers) == 0 || panelUsers[0].(map[string]any)["password"] == "AnyTlsScriptPw1" {
-		t.Fatalf("the panel's inbound was rotated to the script password: %v", panel)
-	}
-
-	// And the desired version is declared, or the probe would never converge.
-	sb, err := api.Store.GetNodeSingbox(id)
-	if err != nil {
-		t.Fatalf("get singbox: %v", err)
-	}
-	if sb.DesiredVersion != "1.13.0-beta.7" {
-		t.Fatalf("desired_version = %q", sb.DesiredVersion)
-	}
-	if sb.ConfigHash != singbox.ConfigHash([]byte(cfg)) {
-		t.Fatalf("config hash does not describe the stored config")
-	}
-	if !sb.ExtrasPresent {
-		t.Fatal("ExtrasPresent = false after adoption")
-	}
-}
-
-// Re-adopting must add to the set, not replace it: the panel shows the
-// inbounds it knows about, and clicking a second one cannot drop the first.
-func TestSingboxAdoptIsAdditive(t *testing.T) {
-	srv, api := newTestServer(t)
-	cookie := loginSession(t, srv)
-	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
-	seedCachedVersion(t, api, "1.13.0-beta.7")
-	seedLocalSnapshot(t, api, id, true)
-	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
-		NodeID: id, DesiredVersion: "1.13.0-beta.7", Status: "running", Port: 22039,
-		CertPEM: testCertPEM, CertSHA256: "f00d",
-	}); err != nil {
-		t.Fatalf("seed singbox: %v", err)
-	}
-
-	adopt := func(picks []map[string]any) {
-		t.Helper()
-		r := doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+id+"/singbox/adopt", cookie,
-			map[string]any{"inbounds": picks})
-		if r.Status != 200 {
-			t.Fatalf("adopt = %d %s", r.Status, r.Body)
+// proxyNodeAt finds the rendered entry for one port.
+func proxyNodeAt(nodes []singbox.ProxyNode, port int) *singbox.ProxyNode {
+	for i := range nodes {
+		if nodes[i].Port == port {
+			return &nodes[i]
 		}
 	}
-	adopt([]map[string]any{{"type": "vless", "port": 16929}})
-	adopt([]map[string]any{{"type": "anytls", "port": 28711}})
-
-	extras, err := api.Store.GetNodeSingboxExtraInbounds(id, api.Crypt)
-	if err != nil {
-		t.Fatalf("read adopted: %v", err)
-	}
-	if len(extras) != 2 {
-		t.Fatalf("adopted set = %d entries, want 2: %+v", len(extras), extras)
-	}
+	return nil
 }
 
-// Adoption refuses what it cannot serve instead of writing a half state.
-func TestSingboxAdoptRejectsWhatItCannotDo(t *testing.T) {
-	srv, api := newTestServer(t)
-	cookie := loginSession(t, srv)
+// The whole point of the editor model plus the auto-recognised listener: the
+// panel renders the probe's own file, with the file's credentials, without
+// anyone adopting anything and without the global anytls password leaking into
+// a listener it does not own.
+func TestLocalInboundsRenderFromTheFileWithoutAdoption(t *testing.T) {
+	_, api := newTestServer(t)
+	// A credential that exists and must NOT show up on the script's listener.
+	setEncryptedPassword(t, api, "GlobalPanelPw1")
 	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
-	seedCachedVersion(t, api, "1.13.0-beta.7")
-
-	// 1. no discovery reported yet
-	r := doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+id+"/singbox/adopt", cookie,
-		map[string]any{"inbounds": []map[string]any{{"type": "vless", "port": 16929}}})
-	if r.Status != http.StatusBadRequest || !bytes.Contains(r.Body, []byte("no_local_config")) {
-		t.Fatalf("adopt without a snapshot = %d %s", r.Status, r.Body)
-	}
-
 	seedLocalSnapshot(t, api, id, true)
 
-	// 2. a port that is not in the file at all
-	r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+id+"/singbox/adopt", cookie,
-		map[string]any{"inbounds": []map[string]any{{"type": "socks", "port": 19999}}})
-	if r.Status != http.StatusBadRequest || !bytes.Contains(r.Body, []byte("nothing_to_adopt")) {
-		t.Fatalf("adopt of an unknown inbound = %d %s", r.Status, r.Body)
+	// Nothing is managed and no port was recognised yet: the file alone makes
+	// both inbounds dialable.
+	nodes, ok := api.liveNodesFor(id, "HK-Sharon", "203.0.113.9")
+	if !ok {
+		t.Fatal("the reported config did not render")
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("rendered %d nodes from the file, want 2: %+v", len(nodes), nodes)
+	}
+	for _, n := range nodes {
+		if n.NameSuffix == "" {
+			t.Fatalf("port %d took the node's plain name before being recognised: %+v", n.Port, n)
+		}
 	}
 
-	// 3. a pending removal is not silently cancelled by an adoption
+	// The hub recognises the node's own listener from the same report; the
+	// renderer must follow it and keep the file's credential.
 	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
-		NodeID: id, DesiredUninstall: true, Port: 28711,
+		NodeID: id, Port: 28711, Status: "absent",
 	}); err != nil {
-		t.Fatalf("seed singbox: %v", err)
+		t.Fatalf("seed recognised port: %v", err)
 	}
-	r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+id+"/singbox/adopt", cookie,
-		map[string]any{"inbounds": []map[string]any{{"type": "vless", "port": 16929}}})
-	if r.Status != http.StatusBadRequest || !bytes.Contains(r.Body, []byte("uninstall_pending")) {
-		t.Fatalf("adopt while uninstalling = %d %s", r.Status, r.Body)
+	nodes, _ = api.liveNodesFor(id, "HK-Sharon", "203.0.113.9")
+	own := proxyNodeAt(nodes, 28711)
+	if own == nil {
+		t.Fatalf("the node's own inbound vanished: %+v", nodes)
+	}
+	if own.Name != "HK-Sharon" || own.NameSuffix != "" {
+		t.Fatalf("the node's own inbound lost its plain name: %+v", own)
+	}
+	if own.Password != "AnyTlsScriptPw1" {
+		t.Fatalf("password = %q, want the file's (rotating it breaks every client holding the script's URI)", own.Password)
+	}
+	if own.CertPEM != testCertPEM {
+		t.Fatalf("certificate = %q, want the bytes the probe reported for that port", own.CertPEM)
+	}
+	other := proxyNodeAt(nodes, 16929)
+	if other == nil || other.NameSuffix == "" {
+		t.Fatalf("the second inbound must keep its suffix: %+v", nodes)
+	}
+	if other.RealityPublicKey == "" {
+		t.Fatalf("vless reality key not derived: %+v", other)
 	}
 }
 
-// A probe the panel never installed has no inbound port of its own. Adoption
-// takes over the anytls inbound that is already there rather than forcing the
-// operator to install a second one — same port, same service, panel-managed.
-func TestSingboxAdoptPromotesLocalAnytlsPort(t *testing.T) {
-	srv, api := newTestServer(t)
-	cookie := loginSession(t, srv)
-	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
-	seedCachedVersion(t, api, "1.13.0-beta.7")
-	seedLocalSnapshot(t, api, id, true)
-
-	r := doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+id+"/singbox/adopt", cookie,
-		map[string]any{"inbounds": []map[string]any{
-			{"type": "anytls", "port": 28711},
-			{"type": "vless", "port": 16929},
-		}})
-	if r.Status != 200 {
-		t.Fatalf("adopt = %d %s", r.Status, r.Body)
+// A node adopted before the editor model existed still carries its inbounds:
+// `extra_inbounds` is read on every regeneration even though nothing writes it
+// any more (§9.3 实现修订 2026-09-17d). Losing them would take the operator's
+// services down on the next install or port change.
+func TestLegacyAdoptedInboundsSurviveRegeneration(t *testing.T) {
+	_, api := newTestServer(t)
+	setEncryptedPassword(t, api, "shared-pw")
+	id, _ := seedNode(t, api, "legacy", "m-legacy", "203.0.113.10")
+	extras := []singbox.ExtraInbound{{
+		Type: singbox.ProtoVLESS, Tag: "vless-in-16929", ListenPort: 16929,
+		Users: []singbox.ExtraUser{{UUID: "b2f0a2f4-1111-2222-3333-444455556666"}},
+	}}
+	if err := api.Store.SetNodeSingboxExtraInbounds(id, extras, api.Crypt); err != nil {
+		t.Fatalf("seed extras: %v", err)
 	}
 	sb, err := api.Store.GetNodeSingbox(id)
 	if err != nil {
 		t.Fatalf("get singbox: %v", err)
 	}
-	if sb.Port != 28711 {
-		t.Fatalf("panel port = %d, want the adopted anytls port 28711", sb.Port)
-	}
-	if sb.DesiredVersion != "1.13.0-beta.7" {
-		t.Fatalf("desired_version = %q", sb.DesiredVersion)
-	}
-	extras, err := api.Store.GetNodeSingboxExtraInbounds(id, api.Crypt)
-	if err != nil {
-		t.Fatalf("read adopted: %v", err)
-	}
-	// The anytls inbound is the panel's own now (regenerated from the template),
-	// so only the VLESS one is stored as an adopted extra.
-	if len(extras) != 1 || extras[0].Type != "vless" || extras[0].ListenPort != 16929 {
-		t.Fatalf("adopted extras = %+v", extras)
+	if err := api.applySingboxDesired(id, sb, "1.13.0-beta.7", 22039, "installing"); err != nil {
+		t.Fatalf("apply desired: %v", err)
 	}
 	cfg, err := api.Store.GetSetting("singbox_config:" + id)
 	if err != nil {
 		t.Fatalf("stored config: %v", err)
 	}
-	if !bytes.Contains([]byte(cfg), []byte(`"listen_port": 28711`)) {
-		t.Fatalf("the panel's inbound is not on the adopted port:\n%s", cfg)
+	if !strings.Contains(cfg, `"listen_port": 16929`) {
+		t.Fatalf("regeneration dropped the adopted inbound:\n%s", cfg)
 	}
-}
-
-// seedCachedVersion writes a fake cached release into the DL directory, which
-// is what adoption declares as the desired version.
-func seedCachedVersion(t *testing.T, api *Server, version string) {
-	t.Helper()
-	if api.DLDir == "" {
-		api.DLDir = t.TempDir()
-	}
-	dir := api.DLDir + "/singbox/" + version
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", dir, err)
-	}
-	if err := os.WriteFile(dir+"/linux-amd64", []byte("fake"), 0o644); err != nil {
-		t.Fatalf("write artifact: %v", err)
+	if !strings.Contains(cfg, `"listen_port": 22039`) {
+		t.Fatalf("regeneration dropped the panel's own inbound:\n%s", cfg)
 	}
 }

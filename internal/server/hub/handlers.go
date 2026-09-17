@@ -10,6 +10,7 @@ import (
 
 	"github.com/fonlan/fobe/internal/protocol"
 	"github.com/fonlan/fobe/internal/server/quota"
+	"github.com/fonlan/fobe/internal/server/singbox"
 	"github.com/fonlan/fobe/internal/server/store"
 )
 
@@ -442,11 +443,13 @@ func (h *Hub) recordSingboxState(nodeID string, s *protocol.SingboxState) {
 // recordSingboxLocal stores what sing-box the probe runs outside fobe's
 // desired state (§9.3 实现修订 2026-09-17).
 //
-// It is deliberately inert: no alert, no status change, no desired-state
-// change. Discovery explains a node; it must never act on one — the operator
-// decides whether to adopt what fobe found. The only side effect is the stored
-// snapshot, and even that is written solely when something moved, so a probe
-// that reports the same file every minute costs one read.
+// It is deliberately inert with respect to the probe: no alert, no status
+// change, no desired-state change, nothing written to the machine. Discovery
+// explains a node; it never acts on one. The stored snapshot is written solely
+// when something moved, so a probe that reports the same file every minute
+// costs one read — and the one piece of bookkeeping it triggers is
+// recognizeLocalInboundPort below, which only records in the *database* which
+// listener on that machine is the node's own.
 //
 // A malformed payload is kept rather than dropped: the panel's whole job here
 // is to show the operator what is on his machine, and "fobe received a
@@ -464,6 +467,13 @@ func (h *Hub) recordSingboxLocal(nodeID string, s *protocol.SingboxLocal) {
 		ConfigJSON:   s.ConfigJSON,
 		Error:        s.Error,
 	}
+	// Recognition runs before the "nothing moved" shortcut, on purpose: a probe
+	// that reported this same file on an older build has an unchanged snapshot
+	// and no port, and it would never report a *change* — its file is stable.
+	// Skipping it there would leave exactly the nodes this feature is for
+	// without an inbound of their own. It is cheap either way: one read, and an
+	// early return once the port is known.
+	h.recognizeLocalInboundPort(nodeID, s.ConfigJSON)
 	// Skip the write when the whole snapshot is unchanged. Comparing the file
 	// hash alone would freeze every other field: the report gains fields over
 	// time (config_path, unit state), and a probe whose config nobody touches
@@ -475,6 +485,55 @@ func (h *Hub) recordSingboxLocal(nodeID string, s *protocol.SingboxLocal) {
 	if err := h.store.SetNodeSingboxLocal(nodeID, snap, h.crypt); err != nil {
 		h.log.Warn("store local sing-box snapshot", "node", nodeID, "err", err)
 	}
+}
+
+// recognizeLocalInboundPort makes the listener the probe already serves the
+// node's own, without asking the operator to pick anything
+// (§9.3 实现修订 2026-09-17d).
+//
+// A probe can arrive with sing-box already running (one-sing.sh's layout is
+// fobe's layout on purpose), and the node's own inbound — the subscription
+// entry that carries the node's plain name and the certificate clients pin —
+// used to exist only after the operator clicked "接管". The file already says
+// which listener serves this machine, so the server reads it: the last anytls
+// inbound in file order becomes the node's own.
+//
+// Three deliberate limits:
+//
+//   - an established port is never moved. Clients pin a certificate against
+//     that entry, so re-pointing it at another listener would silently change
+//     what they reach. Changing the port on the probe therefore leaves the
+//     node's own entry where it was (the new listener still shows up in the
+//     subscription, just with its `type:port` suffix).
+//   - only a port the panel could itself manage (10000-60000) is taken. A
+//     script's listener on 443 keeps working — it renders from the file with
+//     its own credential — but the panel must not declare a port it could
+//     never install on.
+//   - nothing is written to the probe and no desired state is pushed. Setting
+//     `port` alone is inert: ListSingboxTargets needs `desired_version` and
+//     buildDesiredState needs a version or a config hash, so a node the panel
+//     never installed stays exactly as it is.
+func (h *Hub) recognizeLocalInboundPort(nodeID, configJSON string) {
+	sb, err := h.store.GetNodeSingbox(nodeID)
+	if errors.Is(err, store.ErrNotFound) {
+		sb = &store.NodeSingbox{NodeID: nodeID, Status: "absent"}
+	} else if err != nil {
+		h.log.Warn("recognize local inbound: read state", "node", nodeID, "err", err)
+		return
+	}
+	if singbox.ValidPort(sb.Port) {
+		return
+	}
+	port := singbox.PanelInboundPort(configJSON)
+	if !singbox.ValidPort(port) {
+		return
+	}
+	sb.Port = port
+	if err := h.store.UpsertNodeSingbox(sb); err != nil {
+		h.log.Warn("recognize local inbound: store port", "node", nodeID, "err", err)
+		return
+	}
+	h.log.Info("recognized the probe's own sing-box listener", "node", nodeID, "port", port)
 }
 
 // alertSingboxState raises/recovers the §15 sing-box alerts off the status

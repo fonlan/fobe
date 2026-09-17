@@ -208,10 +208,12 @@ func (s *Server) Handler() http.Handler {
 	// uninstall is not one of the start/stop/restart commands on purpose —
 	// it is a desired-state write (§9.2 实现修订 2026-09-16).
 	mux.HandleFunc("POST /api/nodes/{id}/singbox/uninstall", s.requireSession(s.handleSingboxUninstall))
-	// §9.3 实现修订 2026-09-17: adopting the inbounds the probe already runs
-	// (one-sing.sh's VLESS/SS/Socks/anytls) into fobe's desired config. Literal
-	// path, so it keeps winning over the {action} wildcard below.
-	mux.HandleFunc("POST /api/nodes/{id}/singbox/adopt", s.requireSession(s.handleSingboxAdopt))
+	// §9.3 实现修订 2026-09-17d: there is no adoption endpoint any more. The
+	// probe's file is the source of truth (§9.3 实现修订 2026-09-17b) and the
+	// panel only reads it, so "take these inbounds over" stopped being an
+	// operator decision: the node's own listener is recognised from the report
+	// (hub.recognizeLocalInboundPort) and every other inbound renders from the
+	// file with its own credential.
 	mux.HandleFunc("POST /api/nodes/{id}/singbox/{action}", s.requireSession(s.handleSingboxAction))
 	mux.HandleFunc("PUT /api/nodes/{id}/singbox/port", s.requireSession(s.handleSingboxPort))
 	// §9.3 实现修订 2026-09-17b (editor model): the probe's config.json is the

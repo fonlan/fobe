@@ -14,6 +14,10 @@ import "strconv"
 // *not* relayed through §10.2's DNAT entries, which are derived from rules
 // targeting the node's anytls port — a client aiming at a relay's src port
 // would reach the wrong inbound.
+//
+// Since §9.3 实现修订 2026-09-17d this file has two entry points: ProxyNodesFor
+// renders the extras of a node adopted before the editor model existed, and
+// LiveProxyNodes renders whatever the probe's own file declares today.
 
 // ProxyNodesFor renders every adopted inbound of one host as subscription
 // nodes. `server` is the host a client should dial (the target's primary IP)
@@ -137,12 +141,18 @@ func extraRealityShortID(e ExtraInbound) string {
 // having been adopted, because the payload is rendered from the file the probe
 // reported rather than from a server-side desired state.
 //
-// panelPort is the inbound the *panel* owns (the one the install flow declares
-// and whose certificate the node reports). It gets the panel's credential and
-// the reported certificate for pinning, plus the node's plain name — it is the
-// entry every existing client already holds. Everything else carries what the
-// file says, including the certificate path in the file.
-func LiveProxyNodes(configJSON, nodeID, name, server string, panelPort int, panelPassword string, certs map[int]string) []ProxyNode {
+// Every entry carries what the file says, credential included (§9.3 实现修订
+// 2026-09-17d): the file is what the probe is serving right now, so a listener
+// one-sing.sh set up keeps handing out the password its clients already have.
+// The panel's global anytls password only reaches a listener the *panel* wrote
+// (install / edit), and from then on the file carries it like any other value.
+//
+// panelPort is the inbound recognised as the node's own (the one the install
+// flow declares, or the one auto-recognised from the file). It gets the node's
+// plain name — it is the entry every existing client already holds. Everything
+// else keeps the `type:port` suffix that keeps proxies apart in a client's
+// group.
+func LiveProxyNodes(configJSON, nodeID, name, server string, panelPort int, certs map[int]string) []ProxyNode {
 	inbounds, err := ParseLocalInbounds(configJSON)
 	if err != nil {
 		return nil
@@ -156,13 +166,6 @@ func LiveProxyNodes(configJSON, nodeID, name, server string, panelPort int, pane
 		built := ProxyNodesFor([]ExtraInbound{e}, nodeID, name, server, certs[ib.Port])
 		for _, n := range built {
 			if n.Port == panelPort {
-				if n.Protocol == ProtoAnytls {
-					// The panel's inbound is the file's entry at that port, but
-					// its credential is the panel's: a re-install regenerates the
-					// listener from the template, so the file's password is not
-					// what clients were handed.
-					n.Password = panelPassword
-				}
 				n.Name = name
 				n.NameSuffix = ""
 			}

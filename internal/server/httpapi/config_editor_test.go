@@ -139,11 +139,18 @@ func TestSubscriptionRendersLiveConfigFile(t *testing.T) {
 	if len(byPort) != 3 {
 		t.Fatalf("got %d outbounds, want 3 (the whole file): %v", len(byPort), byPort)
 	}
-	// The panel's own inbound: reported certificate pinning + the panel's
-	// credential, and the node's plain name.
+	// The panel's own inbound: the file's credential and the reported
+	// certificate for pinning, plus the node's plain name. The credential is
+	// the file's — §9.3 实现修订 2026-09-17d: the probe is what actually serves
+	// it, so a global password the file does not carry would hand clients a
+	// secret that cannot authenticate. (On a node the panel installed, the
+	// file *is* the global password, so nothing changes there.)
 	panel := byPort[22039]
-	if panel == nil || panel["type"] != "anytls" || panel["password"] != "shared-proxy-pw" {
+	if panel == nil || panel["type"] != "anytls" || panel["password"] != "panel-generated-pw" {
 		t.Fatalf("panel inbound = %v", panel)
+	}
+	if panel["password"] == "shared-proxy-pw" {
+		t.Fatal("the global anytls password replaced the credential the probe serves")
 	}
 	if panel["tag"] != "fobe-HK-Sharon" {
 		t.Fatalf("panel inbound tag = %v, want the node name unsuffixed", panel["tag"])
@@ -388,52 +395,48 @@ func TestSubscriptionFallsBackToManagedPairWithoutReport(t *testing.T) {
 	}
 }
 
-// "接管" in the editor model is an edit with a blank credential: the inbound
-// becomes the panel-managed listener, keeps its port, and serves the credential
-// subscriptions hand out (so existing clients keep working).
-func TestPutConfigAdoptInboundGetsPanelCredential(t *testing.T) {
+// A node the panel has never installed has no inbound of its own. The panel
+// does not ask which one to use: when it writes the file it takes the last
+// anytls inbound (§9.3 实现修订 2026-09-17d). That port is what gives one
+// subscription entry the node's plain name and its pinned certificate.
+func TestPutConfigPicksTheNodesOwnPortFromTheFile(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := loginSession(t, srv)
 	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
 	seedLiveConfig(t, api, id, liveConfigWithPanelInbound)
-	setAnytlsPassword(t, srv, cookie)
 	// No port on the node row: nothing was ever installed through the panel.
 	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{NodeID: id, Status: "absent"}); err != nil {
 		t.Fatalf("seed singbox: %v", err)
 	}
 
-	// `adopt` tells the server to write the credential its subscriptions hand
-	// out — the panel does not know that value (no API returns the global anytls
-	// password), so it cannot send it.
+	// A plain edit — no "adopt" flag exists any more.
 	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+id+"/singbox/config", cookie,
 		map[string]any{
 			"reported_hash": hashOf(liveConfigWithPanelInbound),
 			"update": []map[string]any{{
-				"number": 1, "type": "anytls", "port": 28711,
-				"tag": "anytls-in-28711", "adopt": true,
+				"number": 2, "type": "vless", "port": 16929, "tag": "vless-in-16929",
 			}},
 		})
 	if r.Status != 200 {
-		t.Fatalf("adopt = %d %s", r.Status, r.Body)
+		t.Fatalf("edit = %d %s", r.Status, r.Body)
 	}
 	sb, err := api.Store.GetNodeSingbox(id)
 	if err != nil {
 		t.Fatalf("get singbox: %v", err)
 	}
-	// The sole anytls inbound became the node's own: that port is what pins the
-	// reported certificate and carries the panel credential.
 	if sb.Port != 28711 {
-		t.Fatalf("node port = %d, want the adopted 28711", sb.Port)
+		t.Fatalf("node port = %d, want the file's last anytls listener 28711", sb.Port)
 	}
 	if !api.configEdited(id) {
 		t.Fatal("the node is not marked as panel-edited: startup sync would overwrite the file")
 	}
+	// The edit touched the VLESS inbound only: both anytls credentials in the
+	// file are exactly as the operator wrote them.
 	cfg, _ := api.Store.GetSetting("singbox_config:" + id)
-	if !bytes.Contains([]byte(cfg), []byte("shared-proxy-pw")) {
-		t.Fatalf("the adopted inbound did not take the panel credential:\n%s", cfg)
-	}
-	if bytes.Contains([]byte(cfg), []byte("AnyTlsScriptPw1")) {
-		t.Fatalf("the adopted inbound kept a credential the subscription does not hand out:\n%s", cfg)
+	for _, pw := range []string{"AnyTlsScriptPw1", "panel-generated-pw"} {
+		if !bytes.Contains([]byte(cfg), []byte(pw)) {
+			t.Fatalf("the merge rotated a credential it did not touch (%s):\n%s", pw, cfg)
+		}
 	}
 }
 

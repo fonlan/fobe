@@ -100,11 +100,11 @@ func (s *Server) liveProxyNodes(nodeID, name, server string) ([]singbox.ProxyNod
 // liveNodesFor renders a node's reported config.json into subscription
 // entries.
 //
-// It deliberately does NOT ensure the global anytls password: the panel's own
-// inbound needs a credential (a re-install regenerates the listener from the
-// template), but the node list and the access log call this for every node on
-// the fleet, and minting a credential for a probe that never installed sing-box
-// was the trap §10.1 实现修订 closed.
+// The credentials come from the file, not from the panel's global anytls
+// password (§9.3 实现修订 2026-09-17d): the file is what the probe serves, so a
+// listener one-sing.sh created has to keep handing out the password its clients
+// already hold. That also means this read path never mints a credential — the
+// global password is only demanded by the paths that *write* a listener.
 func (s *Server) liveNodesFor(nodeID, name, server string) ([]singbox.ProxyNode, bool) {
 	local, err := s.Store.GetNodeSingboxLocal(nodeID, s.Crypt)
 	if err != nil || strings.TrimSpace(local.ConfigJSON) == "" {
@@ -116,23 +116,19 @@ func (s *Server) liveNodesFor(nodeID, name, server string) ([]singbox.ProxyNode,
 	if sb != nil {
 		port, cert = sb.Port, sb.CertPEM
 	}
-	password := ""
-	if port > 0 {
-		// Only a node with a panel-managed inbound needs the global credential.
-		password = s.nodeAnytlsPassword(nodeID, s.peekAnytlsPassword())
-	}
-	// Certificates: the probe's per-inbound PEMs for the ports in the file, with
-	// the reported panel certificate winning for the panel's own port (it is the
-	// same file, but the reported one is what the node already advertises and is
-	// what clients are pinning right now).
+	// Certificates: the probe's per-inbound PEMs for the ports in the file. The
+	// managed certificate is only a fallback for the node's own port — the file
+	// wins, because the bytes the probe reported for that port are the ones a
+	// client has to pin (a re-signed certificate on the probe must not be
+	// crossed with the one the panel stored when it installed the node).
 	certs := map[int]string{}
 	for p, pem := range local.AnytlsCerts {
 		certs[p] = pem
 	}
-	if cert != "" && port > 0 {
+	if _, ok := certs[port]; !ok && cert != "" && port > 0 {
 		certs[port] = cert
 	}
-	nodes := singbox.LiveProxyNodes(local.ConfigJSON, nodeID, name, server, port, password, certs)
+	nodes := singbox.LiveProxyNodes(local.ConfigJSON, nodeID, name, server, port, certs)
 	return nodes, true
 }
 
@@ -173,7 +169,7 @@ type inboundView struct {
 func inboundViewOf(ib singbox.LocalInbound, n int) inboundView {
 	v := inboundView{
 		Type: ib.Type, Tag: ib.Tag, Port: ib.Port, Label: ib.Label, Number: n,
-		Editable: singbox.AdoptableProtocol(ib.Type) && ib.Port > 0,
+		Editable: singbox.SupportedProtocol(ib.Type) && ib.Port > 0,
 	}
 	if u := singbox.InboundUser(ib.Inbound); u != nil {
 		v.UUID, _ = u["uuid"].(string)
@@ -260,11 +256,6 @@ type inboundEdit struct {
 	// New marks an inbound the panel creates: there is nothing in the file to
 	// inherit, so a missing credential is an error rather than "keep".
 	New bool `json:"new,omitempty"`
-	// Adopt marks "this listener becomes the node's own" (the panel-managed
-	// anytls listener). The server then writes the credential its subscriptions
-	// hand out, which is knowledge the panel deliberately does not have — the
-	// global anytls password is never returned by an API (§10.1).
-	Adopt bool `json:"adopt,omitempty"`
 }
 
 // handlePutNodeSingboxConfig applies the edits and pushes the merged file
@@ -325,7 +316,7 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 			writeErr(w, http.StatusBadRequest, "bad_index")
 			return
 		}
-		next, err := applyInboundEdit(inbounds[up.Number], up, s, id)
+		next, err := applyInboundEdit(inbounds[up.Number], up)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, errCodeOf(err))
 			return
@@ -333,7 +324,7 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 		inbounds[up.Number] = next
 	}
 	for _, add := range req.Add {
-		next, err := applyInboundEdit(nil, add, s, id)
+		next, err := applyInboundEdit(nil, add)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, errCodeOf(err))
 			return
@@ -421,8 +412,8 @@ func badConfig(code string) error { return errCode(code) }
 // did not touch keep whatever the file had, including options fobe does not
 // model (sniff, multiplex, padding_scheme…), because losing a hand-written
 // option is indistinguishable from breaking the operator's service.
-func applyInboundEdit(existing any, edit inboundEdit, s *Server, nodeID string) (map[string]any, error) {
-	if !singbox.AdoptableProtocol(edit.Type) {
+func applyInboundEdit(existing any, edit inboundEdit) (map[string]any, error) {
+	if !singbox.SupportedProtocol(edit.Type) {
 		return nil, badConfig("unsupported_type")
 	}
 	if edit.Port <= 0 || edit.Port > 65535 {
@@ -498,14 +489,6 @@ func applyInboundEdit(existing any, edit inboundEdit, s *Server, nodeID string) 
 		}
 	case singbox.ProtoAnytls:
 		cred := pickCredential(edit.Credential, user["password"])
-		if edit.Adopt {
-			// §9.3 实现修订 2026-09-17b: ticking "接管" means this listener must
-			// serve what the operator's clients already have. The panel cannot
-			// send that value (the global anytls password is never returned by
-			// an API), so the server fills it in. A per-node override wins when
-			// one exists.
-			cred = s.nodeAnytlsPassword(nodeID, s.peekAnytlsPassword())
-		}
 		if edit.New && cred == "" {
 			// A brand-new inbound has no identity to inherit: inventing a secret
 			// the operator never sees is how a client ends up unable to
@@ -554,26 +537,6 @@ func pickCredential(fromEdit string, existing any) string {
 	return ""
 }
 
-// anytlsPorts lists the ports of a document's anytls inbounds, in file order.
-func anytlsPorts(doc string) []int {
-	var parsed struct {
-		Inbounds []map[string]any `json:"inbounds"`
-	}
-	if err := json.Unmarshal([]byte(doc), &parsed); err != nil {
-		return nil
-	}
-	var ports []int
-	for _, in := range parsed.Inbounds {
-		if t, _ := in["type"].(string); t != singbox.ProtoAnytls {
-			continue
-		}
-		if p := intFieldOf(in["listen_port"]); p > 0 {
-			ports = append(ports, p)
-		}
-	}
-	return ports
-}
-
 // pickPanelPort answers "which inbound is the node's own" for a document, given
 // the port the node already owns (0 when it has none yet).
 //
@@ -588,7 +551,7 @@ func anytlsPorts(doc string) []int {
 // panel adds its own inbound it sits at the end, and before that the last entry
 // is the one the operator set up most recently.
 func pickPanelPort(doc string, current int) int {
-	ports := anytlsPorts(doc)
+	ports := singbox.AnytlsPorts(doc)
 	for _, p := range ports {
 		if p == current {
 			return current

@@ -428,8 +428,8 @@ export interface SingboxLocalInbound {
   port: number;
   label: string;
   cred_set: boolean;
-  /** False = fobe found it but will not import this protocol. */
-  adoptable: boolean;
+  /** False = fobe found it but does not model this protocol. */
+  supported: boolean;
 }
 
 /** One editable inbound of the probe's own config.json (the editor model,
@@ -452,7 +452,6 @@ export interface SingboxInbound {
   number: number;
   /** Set on a write to make this listener the node's own (the panel writes its
    *  own credential, which no API hands out). */
-  adopt?: boolean;
 }
 
 export interface SingboxConfigPayload {
@@ -473,7 +472,8 @@ export interface SingboxLocalDiscovery {
   hash?: string;
   error?: string;
   inbounds: SingboxLocalInbound[];
-  /** How many inbounds of the desired config came from adoption. */
+  /** How many inbounds of the stored config came from a takeover performed
+   *  before the editor model (legacy nodes). Always 0 on newer ones. */
   adopted: number;
 }
 

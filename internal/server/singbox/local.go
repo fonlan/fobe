@@ -77,12 +77,14 @@ type LocalInbound struct {
 // LocalInboundSummary is the panel-facing view: no secrets, just the shape and
 // whether a credential came with it.
 type LocalInboundSummary struct {
-	Type      string `json:"type"`
-	Tag       string `json:"tag"`
-	Port      int    `json:"port"`
-	Label     string `json:"label"`
-	CredSet   bool   `json:"cred_set"`
-	Adoptable bool   `json:"adoptable"`
+	Type    string `json:"type"`
+	Tag     string `json:"tag"`
+	Port    int    `json:"port"`
+	Label   string `json:"label"`
+	CredSet bool   `json:"cred_set"`
+	// Supported marks the protocols fobe models: they show up in the editor
+	// and in the subscription. The rest stay visible but are not editable.
+	Supported bool `json:"supported"`
 }
 
 // Summary renders the panel-facing view.
@@ -93,18 +95,18 @@ func (i LocalInbound) Summary() LocalInboundSummary {
 		Port:      i.Port,
 		Label:     i.Label,
 		CredSet:   inboundCredential(i.Inbound) != "",
-		Adoptable: i.Port > 0,
+		Supported: i.Port > 0,
 	}
 }
 
-// Summaries maps a whole inventory for the API. `adoptable` marks the subset
-// adoption accepts; the rest is surfaced as "found but not imported" so the
-// operator sees the whole file instead of wondering where an inbound went.
+// Summaries maps a whole inventory for the API. `supported` marks the subset
+// fobe models; the rest is surfaced as "found but not modelled" so the operator
+// sees the whole file instead of wondering where an inbound went.
 func Summaries(list []LocalInbound) []LocalInboundSummary {
 	out := make([]LocalInboundSummary, 0, len(list))
 	for _, i := range list {
 		s := i.Summary()
-		s.Adoptable = adoptableProtocol(i.Type) && i.Port > 0
+		s.Supported = supportedProtocol(i.Type) && i.Port > 0
 		out = append(out, s)
 	}
 	return out
@@ -137,7 +139,7 @@ func ParseLocalInbounds(configJSON string) ([]LocalInbound, error) {
 		if ib.Label == "" {
 			ib.Label = fmt.Sprintf("%s:%d", typ, port)
 		}
-		if !adoptableProtocol(typ) || port <= 0 {
+		if !supportedProtocol(typ) || port <= 0 {
 			// Keep it in the inventory (the panel shows it as not importable)
 			// instead of dropping it: an operator who added a `mixed` inbound
 			// must be able to see that fobe noticed and chose not to take it.
@@ -150,16 +152,51 @@ func ParseLocalInbounds(configJSON string) ([]LocalInbound, error) {
 	return out, nil
 }
 
-// AdoptableProtocol is the allow-list of protocols the panel can model and
+// SupportedProtocol is the allow-list of protocols the panel can model and
 // edit. Anything else stays visible in the inventory but is not editable: a
 // read-only display of a `mixed` inbound is honest, an editor that silently
 // drops its fields is not.
-func AdoptableProtocol(typ string) bool { return adoptableProtocol(typ) }
+func SupportedProtocol(typ string) bool { return supportedProtocol(typ) }
 
-// adoptableProtocol is the allow-list: the four protocols one-sing.sh writes
+// AnytlsPorts lists the listen ports of a config.json's anytls inbounds, in
+// file order. Non-anytls inbounds and entries without a port are skipped.
+func AnytlsPorts(configJSON string) []int {
+	inbounds, err := ParseLocalInbounds(configJSON)
+	if err != nil {
+		return nil
+	}
+	var ports []int
+	for _, ib := range inbounds {
+		if ib.Type == ProtoAnytls && ib.Port > 0 {
+			ports = append(ports, ib.Port)
+		}
+	}
+	return ports
+}
+
+// PanelInboundPort answers "which listener on this probe is the node's own"
+// for a file the panel did not write (design §9.3 实现修订 2026-09-17d).
+//
+// The answer has to be derived without asking the operator, and it has to be
+// stable: the node's own inbound is what gives one subscription entry the
+// node's plain name, and re-pointing it later would move a client's pinned
+// certificate onto a different service. So the rule is "the last anytls inbound
+// in file order" — one-sing.sh appends to the array, so the listener the
+// operator set up most recently sits at the end. Zero means the file has no
+// anytls listener at all, and the node simply has no inbound of its own (a
+// VLESS-only probe renders its inbounds with their suffixes).
+func PanelInboundPort(configJSON string) int {
+	ports := AnytlsPorts(configJSON)
+	if len(ports) == 0 {
+		return 0
+	}
+	return ports[len(ports)-1]
+}
+
+// supportedProtocol is the allow-list: the four protocols one-sing.sh writes
 // plus their aliases. Anything else (a `tun`, a `mixed`, a future type) stays
 // in the "found but not imported" list.
-func adoptableProtocol(typ string) bool {
+func supportedProtocol(typ string) bool {
 	switch typ {
 	case ProtoAnytls, ProtoShadowsocks, ProtoSocks, "socks5", ProtoVLESS:
 		return true

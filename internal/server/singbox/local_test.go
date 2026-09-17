@@ -67,7 +67,7 @@ func TestParseLocalInbounds(t *testing.T) {
 	}
 
 	summaries := Summaries(list)
-	if !summaries[0].CredSet || !summaries[0].Adoptable {
+	if !summaries[0].CredSet || !summaries[0].Supported {
 		t.Fatalf("anytls summary = %+v", summaries[0])
 	}
 	if !summaries[1].CredSet {
@@ -92,9 +92,9 @@ func TestParseLocalInboundsRejectsNonJSON(t *testing.T) {
 	}
 }
 
-// Inbounds fobe cannot adopt stay in the inventory with adoptable=false, so
-// the operator sees that they were noticed rather than silently dropped.
-func TestUnsupportedInboundIsListedNotAdoptable(t *testing.T) {
+// Inbounds fobe does not model stay in the inventory with supported=false,
+// so the operator sees that they were noticed rather than silently dropped.
+func TestUnsupportedInboundIsListedButNotMarkedSupported(t *testing.T) {
 	cfg := `{"inbounds":[{"type":"mixed","tag":"mixed-in","listen_port":1080}]}`
 	list, err := ParseLocalInbounds(cfg)
 	if err != nil {
@@ -104,9 +104,9 @@ func TestUnsupportedInboundIsListedNotAdoptable(t *testing.T) {
 		t.Fatalf("got %d inbounds, want 1", len(list))
 	}
 	s := list[0].Summary()
-	s.Adoptable = false
-	if Summaries(list)[0].Adoptable {
-		t.Fatal("mixed must not be adoptable")
+	s.Supported = false
+	if Summaries(list)[0].Supported {
+		t.Fatal("mixed must not be marked supported")
 	}
 	if s.Type != "mixed" || s.Port != 1080 {
 		t.Fatalf("summary = %+v", s)
