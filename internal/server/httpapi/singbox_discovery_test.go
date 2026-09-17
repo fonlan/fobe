@@ -148,17 +148,14 @@ func proxyNodeAt(nodes []singbox.ProxyNode, port int) *singbox.ProxyNode {
 	return nil
 }
 
-// The whole point of the editor model plus the auto-recognised listener: the
-// panel renders the probe's own file, with the file's credentials, without
-// anyone adopting anything and without the global anytls password leaking into
-// a listener it does not own.
-func TestLocalInboundsRenderFromTheFileWithoutAdoption(t *testing.T) {
+// The editor renders every inbound from the probe's own file, with that
+// listener's credential, without electing a primary entry.
+func TestLocalInboundsRenderFromTheFileAsEqualEntries(t *testing.T) {
 	_, api := newTestServer(t)
 	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
 	seedLocalSnapshot(t, api, id, true)
 
-	// Nothing is managed and no port was recognised yet: the file alone makes
-	// both inbounds dialable.
+	// Nothing is managed: the file alone makes both inbounds dialable.
 	nodes, ok := api.liveNodesFor(id, "HK-Sharon", "203.0.113.9")
 	if !ok {
 		t.Fatal("the reported config did not render")
@@ -166,41 +163,27 @@ func TestLocalInboundsRenderFromTheFileWithoutAdoption(t *testing.T) {
 	if len(nodes) != 2 {
 		t.Fatalf("rendered %d nodes from the file, want 2: %+v", len(nodes), nodes)
 	}
-	for _, n := range nodes {
-		if n.NameSuffix == "" {
-			t.Fatalf("port %d took the node's plain name before being recognised: %+v", n.Port, n)
-		}
+	anytls := proxyNodeAt(nodes, 28711)
+	if anytls == nil {
+		t.Fatalf("anytls inbound vanished: %+v", nodes)
 	}
-
-	// The hub recognises the node's own listener from the same report; the
-	// renderer must follow it and keep the file's credential.
-	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
-		NodeID: id, Port: 28711, Status: "absent",
-	}); err != nil {
-		t.Fatalf("seed recognised port: %v", err)
+	if anytls.NameSuffix != "anytls:28711" {
+		t.Fatalf("anytls inbound lost its suffix: %+v", anytls)
 	}
-	nodes, _ = api.liveNodesFor(id, "HK-Sharon", "203.0.113.9")
-	own := proxyNodeAt(nodes, 28711)
-	if own == nil {
-		t.Fatalf("the node's own inbound vanished: %+v", nodes)
-	}
-	if own.Name != "HK-Sharon" || own.NameSuffix != "" {
-		t.Fatalf("the node's own inbound lost its plain name: %+v", own)
-	}
-	if own.Password != "AnyTlsScriptPw1" {
-		t.Fatalf("password = %q, want the file's (rotating it breaks every client holding the script's URI)", own.Password)
+	if anytls.Password != "AnyTlsScriptPw1" {
+		t.Fatalf("password = %q, want the file's (rotating it breaks every client holding the script's URI)", anytls.Password)
 	}
 	// Reading a node's file is not a moment that mints anything: the credential
 	// belongs to that inbound and nowhere else (§10.1 实现修订 2026-09-17e).
 	if _, err := api.Store.GetSetting("anytls_password"); err == nil {
 		t.Fatal("rendering the file minted a global anytls password")
 	}
-	if own.CertPEM != testCertPEM {
-		t.Fatalf("certificate = %q, want the bytes the probe reported for that port", own.CertPEM)
+	if anytls.CertPEM != testCertPEM {
+		t.Fatalf("certificate = %q, want the bytes the probe reported for that port", anytls.CertPEM)
 	}
 	other := proxyNodeAt(nodes, 16929)
-	if other == nil || other.NameSuffix == "" {
-		t.Fatalf("the second inbound must keep its suffix: %+v", nodes)
+	if other == nil || other.NameSuffix != "vless:16929" {
+		t.Fatalf("vless inbound must keep its suffix: %+v", nodes)
 	}
 	if other.RealityPublicKey == "" {
 		t.Fatalf("vless reality key not derived: %+v", other)

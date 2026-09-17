@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -105,13 +104,6 @@ func TestAIMetaToolsForceConfirmation(t *testing.T) {
 			arguments:  `{"version":"1.10.0","reason":"upgrade attempt"}`,
 			kind:       "install_singbox",
 			payloadHas: `"version":"1.10.0"`,
-		},
-		{
-			name:       "set_singbox_port",
-			tool:       "set_singbox_port",
-			arguments:  `{"port":24443,"reason":"port move"}`,
-			kind:       "set_singbox_port",
-			payloadHas: `"port":24443`,
 		},
 	}
 	for _, test := range tests {
@@ -221,42 +213,6 @@ func TestAIRestartSingboxQueuesCommand(t *testing.T) {
 	}
 	if len(cmds) != 1 || cmds[0].Kind != "restart_singbox" || cmds[0].Actor != "ai" || cmds[0].Payload != "{}" {
 		t.Fatalf("commands = %+v", cmds)
-	}
-}
-
-func TestAIStructuredContentSetPort(t *testing.T) {
-	server, api := newTestServer(t)
-	defer server.Close()
-	nodeID := createAINode(t, api, "ai-structured")
-	cookie := loginCookie(t, server.URL)
-	// model answers with structured JSON instead of tool_calls
-	upstream := upstreamAI(t,
-		`{"choices":[{"message":{"content":"{\"tool\":\"set_singbox_port\",\"arguments\":{\"port\":70000}}"}}]}`, nil)
-	defer upstream.Close()
-	configureAI(t, api, upstream.URL, "k", "m")
-
-	resp, body := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "move the port"})
-	defer resp.Body.Close()
-	tool := body["tool_call"].(map[string]any)
-	if tool["status"] != "invalid" { // 70000 is outside the valid port range
-		t.Fatalf("tool_call = %v, want invalid", tool)
-	}
-
-	// valid port, nested tool_call shape this time
-	upstream2 := upstreamAI(t,
-		`{"choices":[{"message":{"content":"{\"tool_call\":{\"name\":\"set_singbox_port\",\"arguments\":{\"port\":24443}}}"}}]}`, nil)
-	defer upstream2.Close()
-	configureAI(t, api, upstream2.URL, "k", "m")
-	resp2, body2 := postAIChat(t, server.URL, cookie, aiChatRequest{
-		NodeID: nodeID, SessionID: body["session_id"].(string), Message: "move the port for real",
-	})
-	defer resp2.Body.Close()
-	tool2 := body2["tool_call"].(map[string]any)
-	if tool2["status"] != "needs_confirmation" || tool2["action_id"] == "" {
-		t.Fatalf("tool_call = %v, want needs_confirmation", tool2)
-	}
-	if n := nodeCommandCount(t, api, nodeID); n != 0 {
-		t.Fatalf("commands queued = %d, want 0", n)
 	}
 }
 
@@ -400,67 +356,4 @@ func TestAIContextIncludesNodesAndLatency(t *testing.T) {
 			t.Fatalf("system context missing %s:\n%s", want, system)
 		}
 	}
-}
-
-func TestAIConfirmSetPortAppliesDesired(t *testing.T) {
-	server, api := newTestServer(t)
-	defer server.Close()
-	nodeID := createAINode(t, api, "ai-confirm-port")
-	cookie := loginCookie(t, server.URL)
-	upstream := upstreamAI(t, chatToolCall("call-port", "set_singbox_port", `{"port":24443}`), nil)
-	defer upstream.Close()
-	configureAI(t, api, upstream.URL, "k", "m")
-	_, body := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "change port"})
-	actionID := body["tool_call"].(map[string]any)["action_id"].(string)
-
-	confirmResp, confirmBody := postJSONCookie(t, server.URL, cookie, "POST", "/api/ai/actions/"+actionID+"/confirm", nil)
-	defer confirmResp.Body.Close()
-	if confirmResp.StatusCode != http.StatusOK {
-		t.Fatalf("confirm status = %d (%v)", confirmResp.StatusCode, confirmBody)
-	}
-	if confirmBody["status"] != "applied" {
-		t.Fatalf("confirm body = %v", confirmBody)
-	}
-	sb, err := api.Store.GetNodeSingbox(nodeID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sb.Port != 24443 || sb.DesiredVersion != "" {
-		t.Fatalf("node singbox = %+v", sb)
-	}
-	if cfg, err := api.Store.GetSetting("singbox_config:" + nodeID); err != nil || !strings.Contains(cfg, "24443") {
-		t.Fatalf("singbox_config = %q err=%v", cfg, err)
-	}
-	if n := nodeCommandCount(t, api, nodeID); n != 0 {
-		t.Fatalf("commands queued = %d, want 0", n)
-	}
-}
-
-// postJSONCookie performs an authenticated JSON request and decodes the body.
-func postJSONCookie(t *testing.T, baseURL, cookie, method, path string, payload any) (*http.Response, map[string]any) {
-	t.Helper()
-	var reader io.Reader
-	if payload != nil {
-		raw, err := json.Marshal(payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		reader = bytes.NewReader(raw)
-	}
-	req, err := http.NewRequest(method, baseURL+path, reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Cookie", cookie)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var body map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		resp.Body.Close()
-		t.Fatal(err)
-	}
-	return resp, body
 }

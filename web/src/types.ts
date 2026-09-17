@@ -448,10 +448,10 @@ export interface SingboxInbound {
   flow?: string;
   username?: string;
   method?: string;
+  /** `pending` until the agent confirms local TCP reachability, then `running`. */
+  status: 'pending' | 'running' | string;
   /** Position in the file's inbound array — every edit carries it back. */
   number: number;
-  /** Set on a write to make this listener the node's own (the panel writes its
-   *  own credential, which no API hands out). */
 }
 
 export interface SingboxConfigPayload {

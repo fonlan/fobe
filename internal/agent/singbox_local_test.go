@@ -1,14 +1,31 @@
 package agent
 
 import (
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/fonlan/fobe/internal/agent/service"
 	"github.com/fonlan/fobe/internal/protocol"
 )
+
+func TestEffectiveInboundPortsReportsOnlyReachableListeners(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	config := `{"inbounds":[{"listen_port":` + strconv.Itoa(port) + `},{"listen_port":65534},{"listen_port":` + strconv.Itoa(port) + `}]}`
+	ports := effectiveInboundPorts([]byte(config))
+	if len(ports) != 1 || ports[0] != port {
+		t.Fatalf("effective ports = %v, want [%d]", ports, port)
+	}
+}
 
 // The local discovery scan is what makes a one-sing.sh host visible to the
 // panel at all (§9.3 实现修订 2026-09-17). It runs against the effective

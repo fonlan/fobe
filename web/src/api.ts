@@ -709,13 +709,6 @@ export function singboxRefresh(id: string): Promise<{ ok: boolean; command_id: s
   return request(`/api/nodes/${encodeURIComponent(id)}/singbox/refresh`, { method: 'POST', body: {} });
 }
 
-export function singboxSetPort(id: string, port: number): Promise<{ ok: boolean; port: number }> {
-  return request(`/api/nodes/${encodeURIComponent(id)}/singbox/port`, {
-    method: 'PUT',
-    body: { port },
-  });
-}
-
 // --- nftables port forwarding (design §21) ----------------------------------
 
 /**

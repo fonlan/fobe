@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
-	"strconv"
 
 	"github.com/fonlan/fobe/internal/protocol"
 	"github.com/fonlan/fobe/internal/server/singbox"
@@ -284,51 +283,6 @@ func (s *Server) handleSingboxAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": cmdID})
-}
-
-type singboxPortReq struct {
-	Port int `json:"port"`
-}
-
-// handleSingboxPort changes the inbound port: regenerate config, update the
-// desired state and push (§9.3: 默认随机高位端口,面板可改).
-func (s *Server) handleSingboxPort(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	var req singboxPortReq
-	if err := decodeJSON(r, &req); err != nil || !singbox.ValidPort(req.Port) {
-		writeErr(w, http.StatusBadRequest, "bad_port")
-		return
-	}
-	sb, err := s.Store.GetNodeSingbox(id)
-	if errors.Is(err, store.ErrNotFound) {
-		sb = &store.NodeSingbox{NodeID: id, Status: "absent"}
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	// A removal is pending: writing here would cancel it (§9.2 实现修订
-	// 2026-09-16). A node that simply has no desired version is still allowed —
-	// preparing an inbound port before installing is a legitimate flow and the
-	// pre-existing behaviour.
-	if sb.DesiredUninstall {
-		writeErr(w, http.StatusBadRequest, "uninstall_pending")
-		return
-	}
-	if err := s.applySingboxDesired(id, sb, sb.DesiredVersion, req.Port, sb.Status); err != nil {
-		singboxWriteErr(w, err)
-		return
-	}
-	s.Store.InsertAudit(&store.AuditEntry{
-		Actor: "panel", NodeID: id, Action: "singbox_port", Command: strconv.Itoa(req.Port), SourceIP: s.Trust.RealIP(r),
-	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "port": req.Port})
 }
 
 // applySingboxDesired is the single write path for node sing-box desired

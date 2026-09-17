@@ -625,7 +625,6 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
   const [sb, setSb] = useState<SingboxStatus | null>(null);
   const [versions, setVersions] = useState<SingboxVersion[]>([]);
   const [version, setVersion] = useState('');
-  const [port, setPort] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -646,7 +645,6 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
       setSb(st.singbox);
       setVersions(vs.versions ?? []);
       setVersion((cur) => cur || (vs.versions ?? [])[0]?.version || '');
-      setPort((cur) => cur || (st.singbox?.port ? String(st.singbox.port) : ''));
       setCfg(cv);
       setCfgHash((cv as { hash?: string } | null)?.hash ?? '');
       setErr(null);
@@ -695,6 +693,17 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
     return () => window.clearInterval(h);
   }, [installing, uninstalling, onlineNow, load]);
 
+  // A new inbound is visible from the desired-state record before the agent's
+  // local config report catches up. Re-read quickly only for that short pending
+  // interval, so its status turns to running as soon as the agent confirms the
+  // listener instead of waiting for the normal discovery refresh.
+  const hasPendingInbound = cfg?.inbounds.some((inbound) => inbound.status === 'pending') ?? false;
+  useEffect(() => {
+    if (!hasPendingInbound || !onlineNow) return;
+    const h = window.setInterval(() => void load(), 5000);
+    return () => window.clearInterval(h);
+  }, [hasPendingInbound, onlineNow, load]);
+
   const run = async (fn: () => Promise<unknown>, okMsg: string) => {
     if (busy) return;
     setBusy(true);
@@ -717,7 +726,6 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
       <div className="tile-grid">
         <Tile label={t('sb_current')} value={sb?.version || '-'} />
         <Tile label={t('sb_desired')} value={sb?.desired_version || '-'} />
-        <Tile label={t('sb_port')} value={sb?.desired_version && sb?.port ? ':' + sb.port : '-'} />
         <Tile label={t('alert_status')} value={t(statusKey) === statusKey ? status : t(statusKey)} />
       </div>
 
@@ -775,6 +783,7 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
                   <tr>
                     <th>{t('sb_col_type')}</th>
                     <th>{t('sb_col_port')}</th>
+                    <th>{t('sb_col_status')}</th>
                     <th>{t('sb_col_tag')}</th>
                     <th>{t('sb_col_cred')}</th>
                     <th />
@@ -784,17 +793,9 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
                   {cfg.inbounds.map((ib) => {
                     const edit = { ...ib, ...edits[ib.number] };
                     const dirty = !!edits[ib.number];
-                    const locked = ib.port === sb?.port || ib.port === Number(port);
                     return (
-                      <tr key={ib.number}>
-                        <td className="mono">
-                          {ib.type}
-                          {ib.port === sb?.port && (
-                            <span className="chip primary-chip sb-own-chip" title={t('sb_local_own_hint')}>
-                              {t('sb_local_own')}
-                            </span>
-                          )}
-                        </td>
+                      <tr key={`${ib.number}:${ib.port}`}>
+                        <td className="mono">{ib.type}</td>
                         <td>
                           <input
                             className="mono sb-num"
@@ -810,6 +811,11 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
                               }))
                             }
                           />
+                        </td>
+                        <td>
+                          <span className="chip">
+                            {ib.status === 'running' ? t('sb_inbound_running') : t('sb_inbound_pending')}
+                          </span>
                         </td>
                         <td>
                           <input
@@ -879,8 +885,8 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
                               <button
                                 type="button"
                                 className="btn danger"
-                                disabled={busy || locked || cfg.inbounds.length <= 1}
-                                title={locked ? t('sb_inbound_locked') : t('sb_inbound_delete')}
+                                disabled={busy || cfg.inbounds.length <= 1}
+                                title={t('sb_inbound_delete')}
                                 onClick={() => {
                                   if (!window.confirm(t('sb_inbound_delete_confirm', { port: String(ib.port) })))
                                     return;
@@ -1082,33 +1088,6 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
       </div>
 
       {(!sb || (!sb.desired_version && !sb.version)) && <div className="hint">{t('sb_not_installed')}</div>}
-
-      <div className="cmd-input-row">
-        <input
-          className="mono"
-          type="number"
-          min={10000}
-          max={60000}
-          value={port}
-          placeholder={t('sb_port')}
-          disabled={!sb?.desired_version}
-          onChange={(e) => setPort(e.target.value)}
-        />
-        <button
-          type="button"
-          className="btn"
-          disabled={
-            busy ||
-            !sb?.desired_version ||
-            !/^\d{4,5}$/.test(port.trim()) ||
-            Number(port) < 10000 ||
-            Number(port) > 60000
-          }
-          onClick={() => void run(() => api.singboxSetPort(nodeId, Number(port)), t('sb_desired_pushed'))}
-        >
-          {t('sb_change_port')}
-        </button>
-      </div>
 
       {msg && <span className="form-ok">{msg}</span>}
       {err && <span className="form-error">{err}</span>}

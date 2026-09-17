@@ -25,9 +25,9 @@ import (
 	"github.com/fonlan/fobe/internal/server/store"
 )
 
-// nodeProxyPassword returns the credential the node's own anytls inbound
-// serves, resolved from the node's own configuration, in the order that
-// answers "what is the probe serving right now":
+// nodeProxyPassword returns the credential of the explicitly chosen inbound,
+// resolved from the node's configuration in the order that answers "what is the
+// probe serving right now":
 //
 //  1. the document the panel last wrote (`singbox_config:<node_id>`);
 //  2. the file the probe last reported (a node the panel never installed —
@@ -35,18 +35,16 @@ import (
 //  3. §19.9's per-node override column: nothing writes it since the editor
 //     model, but a value set by hand must still win over minting a new one.
 //
-// `port` is the port the node owns (0 when it has none yet); both lookups use
-// pickPanelPort, so a caller that is *moving* the listener to a new port still
-// finds the old inbound's credential — a port change must not rotate a
-// password. Empty means "this node has no inbound of its own yet".
+// `port` identifies the listener. Empty means there is no credential at that
+// port; callers creating an entry may then mint one.
 func (s *Server) nodeProxyPassword(nodeID string, port int) string {
 	if doc, err := s.Store.GetSetting("singbox_config:" + nodeID); err == nil && strings.TrimSpace(doc) != "" {
-		if pw := singbox.InboundPasswordAtPort(doc, pickPanelPort(doc, port)); pw != "" {
+		if pw := singbox.InboundPasswordAtPort(doc, port); pw != "" {
 			return pw
 		}
 	}
 	if local, err := s.Store.GetNodeSingboxLocal(nodeID, s.Crypt); err == nil {
-		if pw := singbox.InboundPasswordAtPort(local.ConfigJSON, pickPanelPort(local.ConfigJSON, port)); pw != "" {
+		if pw := singbox.InboundPasswordAtPort(local.ConfigJSON, port); pw != "" {
 			return pw
 		}
 	}

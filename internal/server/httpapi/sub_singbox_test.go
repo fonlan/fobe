@@ -483,21 +483,6 @@ func TestSingboxInstallAndDesiredPush(t *testing.T) {
 		t.Fatalf("GET singbox: %s", r.Body)
 	}
 
-	// port change regenerates the config and re-pushes desired
-	r = doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+nodeID+"/singbox/port", cookie, map[string]any{"port": 34567})
-	if r.Status != 200 {
-		t.Fatalf("port change: %d %s", r.Status, r.Body)
-	}
-	env = readType(protocol.TypeDesired)
-	var desired2 protocol.DesiredState
-	_ = json.Unmarshal(env.Payload, &desired2)
-	if desired2.Singbox == nil || desired2.Singbox.Port != 34567 {
-		t.Fatalf("desired after port change: %+v", desired2.Singbox)
-	}
-	if !strings.Contains(desired2.Singbox.ConfigJSON, `"listen_port": 34567`) {
-		t.Fatalf("config not regenerated:\n%s", desired2.Singbox.ConfigJSON)
-	}
-
 	// start/stop/restart go through the commands queue with existing kinds
 	for _, action := range []string{"start", "stop", "restart"} {
 		r := doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+nodeID+"/singbox/"+action, cookie, nil)
@@ -609,13 +594,6 @@ func TestSingboxUninstallIsDesiredStateNotACommand(t *testing.T) {
 		t.Fatalf("GET node missing desired_uninstall: %s", dm)
 	}
 
-	// while the removal is pending the port endpoint refuses: a write there
-	// would cancel the removal the operator just asked for
-	r = doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+nodeID+"/singbox/port", cookie, map[string]any{"port": 30000})
-	if r.Status != http.StatusBadRequest || r.errCode(t) != "uninstall_pending" {
-		t.Fatalf("port change while a removal is pending: %d %s", r.Status, r.Body)
-	}
-
 	// a second click while the removal is still pending re-arms it (the
 	// declaration may have been missed) instead of failing
 	if r = doReq(t, &http.Client{}, "POST", srv.URL+"/api/nodes/"+nodeID+"/singbox/uninstall", cookie, nil); r.Status != 200 {
@@ -661,10 +639,5 @@ func TestSingboxUninstallIsDesiredStateNotACommand(t *testing.T) {
 	}
 	if sb, err = api.Store.GetNodeSingbox(nodeID); err != nil || sb.DesiredUninstall || sb.DesiredVersion != "1.11.5" || sb.Port != 23456 {
 		t.Fatalf("state after reinstall: %+v err=%v", sb, err)
-	}
-	// the removal guard is gone: the port can be re-pointed again
-	r = doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+nodeID+"/singbox/port", cookie, map[string]any{"port": 30000})
-	if r.Status != 200 {
-		t.Fatalf("port change after reinstall: %d %s", r.Status, r.Body)
 	}
 }

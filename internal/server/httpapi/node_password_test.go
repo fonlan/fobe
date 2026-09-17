@@ -64,9 +64,11 @@ func generationAudits(t *testing.T, api *Server, secret string) int {
 	return n
 }
 
-func setPort(t *testing.T, srv string, cookie string, nodeID string, port int) httpResult {
+func installSingboxAtPort(t *testing.T, srv, cookie, nodeID string, port int) httpResult {
 	t.Helper()
-	return doReq(t, &http.Client{}, "PUT", srv+"/api/nodes/"+nodeID+"/singbox/port", cookie, map[string]any{"port": port})
+	return doReq(t, &http.Client{}, "POST", srv+"/api/nodes/"+nodeID+"/singbox/install", cookie, map[string]any{
+		"version": "1.13.0-beta.7", "port": port,
+	})
 }
 
 func installSingbox(t *testing.T, srv, cookie, nodeID, version string) httpResult {
@@ -79,8 +81,8 @@ func TestInstallMintsAnInboundCredential(t *testing.T) {
 	cookie := panelCookie(t, srv)
 	nodeID, _ := seedNode(t, api, "fresh", "m-mint-1", "198.51.100.20")
 
-	if r := setPort(t, srv.URL, cookie, nodeID, 34567); r.Status != http.StatusOK {
-		t.Fatalf("set port = %d %s", r.Status, r.Body)
+	if r := installSingboxAtPort(t, srv.URL, cookie, nodeID, 34567); r.Status != http.StatusOK {
+		t.Fatalf("install = %d %s", r.Status, r.Body)
 	}
 	password := configPassword(t, api, nodeID, 34567)
 	if !anytlsPasswordRE.MatchString(password) {
@@ -103,11 +105,11 @@ func TestEachNodeGetsItsOwnCredential(t *testing.T) {
 	first, _ := seedNode(t, api, "one", "m-own-1", "198.51.100.21")
 	second, _ := seedNode(t, api, "two", "m-own-2", "198.51.100.22")
 
-	if r := setPort(t, srv.URL, cookie, first, 34567); r.Status != http.StatusOK {
-		t.Fatalf("first set port = %d %s", r.Status, r.Body)
+	if r := installSingboxAtPort(t, srv.URL, cookie, first, 34567); r.Status != http.StatusOK {
+		t.Fatalf("first install = %d %s", r.Status, r.Body)
 	}
-	if r := setPort(t, srv.URL, cookie, second, 34568); r.Status != http.StatusOK {
-		t.Fatalf("second set port = %d %s", r.Status, r.Body)
+	if r := installSingboxAtPort(t, srv.URL, cookie, second, 34568); r.Status != http.StatusOK {
+		t.Fatalf("second install = %d %s", r.Status, r.Body)
 	}
 	one := configPassword(t, api, first, 34567)
 	two := configPassword(t, api, second, 34568)
@@ -121,32 +123,27 @@ func TestEachNodeGetsItsOwnCredential(t *testing.T) {
 	}
 }
 
-// Regeneration is not a rotation: moving the port or reinstalling the version
-// must keep the credential the clients already hold.
-func TestPortChangeAndReinstallKeepTheCredential(t *testing.T) {
+// Regeneration is not a rotation: reinstalling the version keeps the
+// credential the clients already hold. Later per-rule port edits go through the
+// config editor instead of regenerating the whole document.
+func TestReinstallKeepsTheCredential(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
 	nodeID, _ := seedNode(t, api, "keep", "m-keep", "198.51.100.23")
 
-	if r := setPort(t, srv.URL, cookie, nodeID, 34567); r.Status != http.StatusOK {
-		t.Fatalf("set port = %d %s", r.Status, r.Body)
+	if r := installSingboxAtPort(t, srv.URL, cookie, nodeID, 34567); r.Status != http.StatusOK {
+		t.Fatalf("install = %d %s", r.Status, r.Body)
 	}
 	password := configPassword(t, api, nodeID, 34567)
 
-	if r := setPort(t, srv.URL, cookie, nodeID, 34568); r.Status != http.StatusOK {
-		t.Fatalf("move port = %d %s", r.Status, r.Body)
-	}
-	if got := configPassword(t, api, nodeID, 34568); got != password {
-		t.Fatalf("port change rotated the credential: %q -> %q", password, got)
-	}
 	if r := installSingbox(t, srv.URL, cookie, nodeID, "1.13.0-beta.7"); r.Status != http.StatusOK {
 		t.Fatalf("install = %d %s", r.Status, r.Body)
 	}
-	if got := configPassword(t, api, nodeID, 34568); got != password {
+	if got := configPassword(t, api, nodeID, 34567); got != password {
 		t.Fatalf("reinstall rotated the credential: %q -> %q", password, got)
 	}
 	if n := generationAudits(t, api, password); n != 1 {
-		t.Fatalf("generation audited %d times, want 1 across three writes", n)
+		t.Fatalf("generation audited %d times, want 1 across two writes", n)
 	}
 }
 
@@ -158,7 +155,7 @@ func TestInstallOverAScriptListenerKeepsItsPassword(t *testing.T) {
 	cookie := panelCookie(t, srv)
 	nodeID, _ := seedNode(t, api, "HK-Sharon", "m-script-pw", "203.0.113.31")
 	seedLocalSnapshot(t, api, nodeID, true)
-	// What the hub recognises from that report (§9.3 实现修订 2026-09-17d).
+	// The legacy managed port identifies the initial install target.
 	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{NodeID: nodeID, Port: 28711, Status: "absent"}); err != nil {
 		t.Fatalf("seed recognised port: %v", err)
 	}
@@ -180,8 +177,8 @@ func TestSubscriptionCarriesTheNodesOwnCredential(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
 	nodeID, _ := seedNode(t, api, "probe-1", "m-mint-sub", "203.0.113.30")
-	if r := setPort(t, srv.URL, cookie, nodeID, 23456); r.Status != http.StatusOK {
-		t.Fatalf("set port = %d %s", r.Status, r.Body)
+	if r := installSingboxAtPort(t, srv.URL, cookie, nodeID, 23456); r.Status != http.StatusOK {
+		t.Fatalf("install = %d %s", r.Status, r.Body)
 	}
 	// The reported managed pair: no config report yet, so the subscription uses
 	// the fallback render path, which must read the same credential.
@@ -222,7 +219,7 @@ func TestUnreadableReportIsNotMintedOver(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if r := setPort(t, srv.URL, cookie, nodeID, 34569); r.Status != http.StatusInternalServerError {
+	if r := installSingboxAtPort(t, srv.URL, cookie, nodeID, 34569); r.Status != http.StatusInternalServerError {
 		t.Fatalf("unreadable report = %d %s, want 500", r.Status, r.Body)
 	}
 	if _, err := api.Store.GetSetting("singbox_config:" + nodeID); err == nil {

@@ -110,25 +110,15 @@ func (s *Server) liveNodesFor(nodeID, name, server string) ([]singbox.ProxyNode,
 	if err != nil || strings.TrimSpace(local.ConfigJSON) == "" {
 		return nil, false
 	}
-	sb, _ := s.Store.GetNodeSingbox(nodeID)
-	var port int
-	var cert string
-	if sb != nil {
-		port, cert = sb.Port, sb.CertPEM
-	}
-	// Certificates: the probe's per-inbound PEMs for the ports in the file. The
-	// managed certificate is only a fallback for the node's own port — the file
-	// wins, because the bytes the probe reported for that port are the ones a
-	// client has to pin (a re-signed certificate on the probe must not be
-	// crossed with the one the panel stored when it installed the node).
+	// Certificates are keyed by listener. The file the agent reported is the
+	// authority, so every anytls inbound must carry its own reported PEM; using
+	// node_singbox.cert_pem as a hidden primary-entry fallback would make one
+	// listener special again.
 	certs := map[int]string{}
 	for p, pem := range local.AnytlsCerts {
 		certs[p] = pem
 	}
-	if _, ok := certs[port]; !ok && cert != "" && port > 0 {
-		certs[port] = cert
-	}
-	nodes := singbox.LiveProxyNodes(local.ConfigJSON, nodeID, name, server, port, certs)
+	nodes := singbox.LiveProxyNodes(local.ConfigJSON, nodeID, name, server, certs)
 	return nodes, true
 }
 
@@ -160,6 +150,10 @@ type inboundView struct {
 	Flow       string `json:"flow,omitempty"`
 	Username   string `json:"username,omitempty"`
 	Method     string `json:"method,omitempty"`
+	// Status is pending until the agent reports that this exact listener accepts
+	// a local TCP connection, then running. A desired config is not proof that
+	// sing-box bound every inbound it contains.
+	Status string `json:"status"`
 	// Number is the position in the file's inbound array. Every edit carries
 	// the number it was rendered from, so an edit can be rejected instead of
 	// applied to a different inbound than the operator clicked.
@@ -208,9 +202,38 @@ func (s *Server) handleGetNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, map[string]any{"inbounds": []inboundView{}, "reported": false})
 		return
 	}
-	views := make([]inboundView, 0, len(inbounds))
+	states, err := s.Store.ListNodeSingboxInbounds(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	byPort := map[int]store.NodeSingboxInbound{}
+	for _, state := range states {
+		byPort[state.Port] = state
+	}
+	views := make([]inboundView, 0, len(inbounds)+len(states))
+	livePorts := map[int]bool{}
 	for i, ib := range inbounds {
-		views = append(views, inboundViewOf(ib, i))
+		view := inboundViewOf(ib, i)
+		view.Status = "pending"
+		if state, ok := byPort[ib.Port]; ok && state.Status == "running" {
+			view.Status = "running"
+		}
+		views = append(views, view)
+		livePorts[ib.Port] = true
+	}
+	// The endpoint normally mirrors the last report. Keep a just-added listener
+	// visible before that report arrives, otherwise the user sees no row during
+	// the interval its pending state matters.
+	for _, state := range states {
+		if livePorts[state.Port] {
+			continue
+		}
+		views = append(views, inboundView{
+			Type: state.Type, Tag: state.Tag, Port: state.Port,
+			Label:  fmt.Sprintf("%s:%d", state.Type, state.Port),
+			Status: state.Status, Number: -1,
+		})
 	}
 	local, _ := s.Store.GetNodeSingboxLocal(id, s.Crypt)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -295,12 +318,16 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 	// then update by number, then append. Order matters: the numbers the panel
 	// sent describe the file it rendered, not the file being built.
 	drop := map[int]bool{}
+	deletedPorts := []int{}
 	for _, n := range req.Delete {
 		if n < 0 || n >= len(inbounds) {
 			writeErr(w, http.StatusBadRequest, "bad_index")
 			return
 		}
 		drop[n] = true
+		if inbound, ok := inbounds[n].(map[string]any); ok {
+			deletedPorts = append(deletedPorts, intFieldOf(inbound["listen_port"]))
+		}
 	}
 	if len(drop) > 0 {
 		kept := make([]any, 0, len(inbounds)-len(drop))
@@ -346,9 +373,34 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := s.pushConfigDocument(id, string(merged), "panel"); err != nil {
+	// Record additions before sending desired state. An online agent can apply
+	// and report immediately; writing this afterwards could overwrite a genuine
+	// running acknowledgement back to pending.
+	for _, add := range req.Add {
+		if err := s.Store.SetNodeSingboxInboundPending(id, store.NodeSingboxInbound{
+			Port: add.Port,
+			Type: add.Type,
+			Tag:  add.Tag,
+		}); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+	}
+	if err := s.pushConfigDocument(id, string(merged)); err != nil {
+		for _, add := range req.Add {
+			_ = s.Store.DeleteNodeSingboxInbound(id, add.Port)
+		}
 		singboxWriteErr(w, err)
 		return
+	}
+	for _, port := range deletedPorts {
+		if port <= 0 {
+			continue
+		}
+		if err := s.Store.DeleteNodeSingboxInbound(id, port); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
 	}
 	s.markConfigEdited(id)
 	s.Store.InsertAudit(&store.AuditEntry{
@@ -367,7 +419,7 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 // The desired frame carries ConfigJSON, which in this model means "write these
 // bytes and restart" — the agent applies it only when the bytes differ, so a
 // push that merged to the same content is a no-op.
-func (s *Server) pushConfigDocument(nodeID, doc, actor string) error {
+func (s *Server) pushConfigDocument(nodeID, doc string) error {
 	sb, err := s.Store.GetNodeSingbox(nodeID)
 	if errors.Is(err, store.ErrNotFound) {
 		sb = &store.NodeSingbox{NodeID: nodeID, Status: "absent"}
@@ -376,14 +428,6 @@ func (s *Server) pushConfigDocument(nodeID, doc, actor string) error {
 	}
 	if err := s.Store.SetSetting("singbox_config:"+nodeID, doc, false); err != nil {
 		return err
-	}
-	// The node's own inbound port has to be known: it is what tells the
-	// subscription renderer which entry is the panel's (certificate pinning +
-	// the global credential). A node the panel never installed has none, so an
-	// edit that leaves exactly one anytls inbound adopts that port — the first
-	// adopt is what makes "the panel owns this listener" true.
-	if p := s.panelPortFor(doc, sb.Port, actor); p > 0 {
-		sb.Port = p
 	}
 	sb.ConfigHash = singbox.ConfigHash([]byte(doc))
 	if sb.Status == "" || sb.Status == "absent" {
@@ -394,7 +438,6 @@ func (s *Server) pushConfigDocument(nodeID, doc, actor string) error {
 	}
 	s.pushDesired(nodeID)
 	s.publishEvent("node_updated", nodeID)
-	_ = actor
 	return nil
 }
 
@@ -573,35 +616,6 @@ func pickCredential(fromEdit string, existing any) string {
 	return ""
 }
 
-// pickPanelPort answers "which inbound is the node's own" for a document, given
-// the port the node already owns (0 when it has none yet).
-//
-// The node's own inbound is not a protocol concept: it is the listener the
-// panel installed, the one whose credential subscriptions hand out and whose
-// certificate the probe reports. It is identified by port, so the answer has to
-// be stable across edits — an edit must never silently move it onto a different
-// anytls listener (that would repoint certificate pinning at another service).
-//
-// When there is no port yet, the last anytls inbound in file order becomes it.
-// "Last" rather than "only" because one-sing.sh appends to the array: after the
-// panel adds its own inbound it sits at the end, and before that the last entry
-// is the one the operator set up most recently.
-func pickPanelPort(doc string, current int) int {
-	ports := singbox.AnytlsPorts(doc)
-	for _, p := range ports {
-		if p == current {
-			return current
-		}
-	}
-	if current != 0 {
-		return current // the panel's listener is not anytls (or was removed)
-	}
-	if len(ports) == 0 {
-		return 0
-	}
-	return ports[len(ports)-1]
-}
-
 // checkPortsUnique refuses two inbounds on one port: sing-box would fail to
 // bind the second, the service would flap under Restart=always, and the panel
 // would report a version while nothing served the port.
@@ -684,21 +698,4 @@ func (s *Server) nodeRenderable(node *store.Node, sb *store.NodeSingbox) bool {
 		return true
 	}
 	return subRenderable(node, sb)
-}
-
-// panelPortFor decides which inbound of a just-written document is the node's
-// own.
-//
-// For a *panel* write the answer is exact: the document was merged from the
-// live file plus this edit, and anytlsPortInDoc(doc) is the port that inbound
-// has now — no need to read back a report that may still be one agent cadence
-// behind (the agent has not applied anything yet). Other writers fall back to
-// "the port the node already owns, else the file's last anytls".
-func (s *Server) panelPortFor(doc string, current int, actor string) int {
-	if current == 0 && actor == "panel" {
-		if p := store.SoleAnytlsPortInDoc(doc); p > 0 {
-			return p
-		}
-	}
-	return pickPanelPort(doc, current)
 }

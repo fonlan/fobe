@@ -274,6 +274,20 @@ CREATE TABLE IF NOT EXISTS node_singbox (
     updated_at       INTEGER NOT NULL DEFAULT 0
 );
 
+-- A listener is pending as soon as the panel adds it. Only the agent's local
+-- TCP observation may promote it to running. reported=0 preserves a just-pushed
+-- listener while the most recent local-config report still describes old bytes.
+CREATE TABLE IF NOT EXISTS node_singbox_inbounds (
+    node_id    TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    port       INTEGER NOT NULL,
+    type       TEXT NOT NULL DEFAULT '',
+    tag        TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'pending', -- pending|running
+    reported   INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (node_id, port)
+);
+
 CREATE TABLE IF NOT EXISTS commands (
     id          TEXT PRIMARY KEY,
     node_id     TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,

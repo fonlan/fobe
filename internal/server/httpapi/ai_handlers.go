@@ -462,19 +462,18 @@ func decodeAIContent(raw json.RawMessage) string {
 
 // aiToolKinds are the tool names the model may invoke (§12.2). run_shell
 // keeps its own path; restart/stop/start_singbox map onto the commands
-// queue, install/port are server-side meta operations, tail_logs is a
+// queue, install is a server-side meta operation, tail_logs is a
 // read-only agent command. (The global-password rotation tool is gone with the
 // global password itself, §10.1 实现修订 2026-09-17e: a node's credential is
 // generated when the panel creates its inbound, and re-typing it through the
 // AI is what the editor already does.)
 var aiToolKinds = map[string]bool{
-	"run_shell":        true,
-	"restart_singbox":  true,
-	"stop_singbox":     true,
-	"start_singbox":    true,
-	"install_singbox":  true,
-	"set_singbox_port": true,
-	"tail_logs":        true,
+	"run_shell":       true,
+	"restart_singbox": true,
+	"stop_singbox":    true,
+	"start_singbox":   true,
+	"install_singbox": true,
+	"tail_logs":       true,
 }
 
 // aiToolAction is one parsed model tool request: the tool name plus raw
@@ -615,13 +614,6 @@ func aiToolsSpec() []aiOpenAIToolSpec {
 				"reason":  reason,
 			},
 			"version"),
-		tool("set_singbox_port",
-			"Change the sing-box inbound port and regenerate the node config. Always requires operator confirmation.",
-			map[string]any{
-				"port":   map[string]any{"type": "integer"},
-				"reason": reason,
-			},
-			"port"),
 		tool("tail_logs",
 			"Read the latest sing-box service log lines from the selected node (read-only).",
 			map[string]any{
@@ -642,8 +634,6 @@ func (s *Server) handleAIAction(w http.ResponseWriter, r *http.Request, session 
 		return s.handleAINodeCommand(r, session, action, toolCall)
 	case "install_singbox":
 		return s.handleAIInstallSingbox(r, session, action, toolCall)
-	case "set_singbox_port":
-		return s.handleAISetSingboxPort(r, session, action, toolCall)
 	case "tail_logs":
 		return s.handleAITailLogs(r, session, action, toolCall)
 	default:
@@ -822,27 +812,6 @@ func (s *Server) handleAIInstallSingbox(r *http.Request, session *store.AISessio
 	return toolCall
 }
 
-// handleAISetSingboxPort stages a port change (§9.3, forced confirmation).
-func (s *Server) handleAISetSingboxPort(r *http.Request, session *store.AISession, action *aiToolAction, toolCall map[string]any) map[string]any {
-	var args struct {
-		Port   int    `json:"port"`
-		Reason string `json:"reason"`
-	}
-	if err := json.Unmarshal(action.Args, &args); err != nil || !singbox.ValidPort(args.Port) {
-		toolCall["status"] = "invalid"
-		return toolCall
-	}
-	pendingID, ok := s.requestAIConfirmation(r, session, "set_singbox_port", map[string]int{"port": args.Port}, args.Reason, "forced")
-	if !ok {
-		toolCall["status"] = "internal"
-		return toolCall
-	}
-	toolCall["status"] = "needs_confirmation"
-	toolCall["action_id"] = pendingID
-	toolCall["reason"] = args.Reason
-	return toolCall
-}
-
 // handleAITailLogs answers a tail_logs tool call with real node logs
 // (§12.1): enqueue kind=tail_logs, wait ≤8s for the agent's cmd_result and
 // hand the capped stdout back. The output is also persisted as a tool
@@ -1003,9 +972,6 @@ func (s *Server) handleConfirmAIAction(w http.ResponseWriter, r *http.Request) {
 	case "install_singbox":
 		s.confirmAIInstallSingbox(w, r, action)
 		return
-	case "set_singbox_port":
-		s.confirmAISetSingboxPort(w, r, action)
-		return
 	}
 	allowed, reason, err := s.Store.CheckAICommandGate(action.NodeID, aiCommandLimit, nowUnix())
 	if err != nil {
@@ -1081,45 +1047,5 @@ func (s *Server) confirmAIInstallSingbox(w http.ResponseWriter, r *http.Request,
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_id": action.SessionID, "action_id": action.ID, "status": "applied", "port": port,
-	})
-}
-
-// confirmAISetSingboxPort applies the staged port change: regenerate the
-// config, update desired state and push (§9.3).
-func (s *Server) confirmAISetSingboxPort(w http.ResponseWriter, r *http.Request, action *store.AIPendingAction) {
-	var payload struct {
-		Port int `json:"port"`
-	}
-	if err := json.Unmarshal([]byte(action.Payload), &payload); err != nil || !singbox.ValidPort(payload.Port) {
-		writeErr(w, http.StatusBadRequest, "bad_port")
-		return
-	}
-	sb, err := s.Store.GetNodeSingbox(action.NodeID)
-	if errors.Is(err, store.ErrNotFound) {
-		sb = &store.NodeSingbox{NodeID: action.NodeID, Status: "absent"}
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	// Same guard as the panel's PUT /singbox/port (design §9.2 实现修订
-	// 2026-09-16): a pending removal must not be cancelled by a port write.
-	if sb.DesiredUninstall {
-		writeErr(w, http.StatusBadRequest, "uninstall_pending")
-		return
-	}
-	if err := s.applySingboxDesired(action.NodeID, sb, sb.DesiredVersion, payload.Port, sb.Status); err != nil {
-		singboxWriteErr(w, err)
-		return
-	}
-	s.Store.InsertAudit(&store.AuditEntry{
-		Actor: "ai", NodeID: action.NodeID, Action: "singbox_port", Command: strconv.Itoa(payload.Port),
-		Reason: action.Reason, Risk: action.Risk, SourceIP: s.Trust.RealIP(r), AISessionID: action.SessionID,
-	})
-	if err := s.Store.ConfirmAIPendingAction(action.ID, "", nowUnix()); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"session_id": action.SessionID, "action_id": action.ID, "status": "applied", "port": payload.Port,
 	})
 }

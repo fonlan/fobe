@@ -220,7 +220,18 @@ type SingboxLocal struct {
 	// (§9.3), and this map is the same PEM the node reports for the inbound the
 	// panel installed.
 	AnytlsCerts map[int]string `json:"anytls_certs,omitempty"`
-	Error       string         `json:"error,omitempty"`
+	// EffectiveInboundPorts is the set of configured listeners that the agent
+	// could reach locally while sing-box was running. It is deliberately an
+	// agent observation rather than a server-side guess from ConfigJSON: a
+	// running process may still have failed to bind one of several inbounds.
+	// Missing means an older agent, so the server must keep an entry pending.
+	EffectiveInboundPorts []int `json:"effective_inbound_ports,omitempty"`
+	// InboundChecksKnown distinguishes a new agent that checked every listener
+	// and found none from an older one that has no listener-check capability.
+	// It lets the server demote a previously running entry when it later stops
+	// accepting connections, without treating an omitted old-agent field as bad.
+	InboundChecksKnown bool   `json:"inbound_checks_known,omitempty"`
+	Error              string `json:"error,omitempty"`
 }
 
 // SingboxState is what the agent actually observes locally. Optional fields

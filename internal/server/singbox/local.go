@@ -158,22 +158,6 @@ func ParseLocalInbounds(configJSON string) ([]LocalInbound, error) {
 // drops its fields is not.
 func SupportedProtocol(typ string) bool { return supportedProtocol(typ) }
 
-// AnytlsPorts lists the listen ports of a config.json's anytls inbounds, in
-// file order. Non-anytls inbounds and entries without a port are skipped.
-func AnytlsPorts(configJSON string) []int {
-	inbounds, err := ParseLocalInbounds(configJSON)
-	if err != nil {
-		return nil
-	}
-	var ports []int
-	for _, ib := range inbounds {
-		if ib.Type == ProtoAnytls && ib.Port > 0 {
-			ports = append(ports, ib.Port)
-		}
-	}
-	return ports
-}
-
 // InboundPasswordAtPort returns the credential the document's inbound on `port`
 // serves, or "" when there is no inbound there (or it carries no password).
 //
@@ -195,25 +179,6 @@ func InboundPasswordAtPort(configJSON string, port int) string {
 		}
 	}
 	return ""
-}
-
-// PanelInboundPort answers "which listener on this probe is the node's own"
-// for a file the panel did not write (design §9.3 实现修订 2026-09-17d).
-//
-// The answer has to be derived without asking the operator, and it has to be
-// stable: the node's own inbound is what gives one subscription entry the
-// node's plain name, and re-pointing it later would move a client's pinned
-// certificate onto a different service. So the rule is "the last anytls inbound
-// in file order" — one-sing.sh appends to the array, so the listener the
-// operator set up most recently sits at the end. Zero means the file has no
-// anytls listener at all, and the node simply has no inbound of its own (a
-// VLESS-only probe renders its inbounds with their suffixes).
-func PanelInboundPort(configJSON string) int {
-	ports := AnytlsPorts(configJSON)
-	if len(ports) == 0 {
-		return 0
-	}
-	return ports[len(ports)-1]
 }
 
 // supportedProtocol is the allow-list: the four protocols one-sing.sh writes

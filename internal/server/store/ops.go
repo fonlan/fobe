@@ -356,6 +356,157 @@ type NodeSingbox struct {
 	UpdatedAt     int64 `json:"updated_at"`
 }
 
+// NodeSingboxInbound is the panel-facing lifecycle record for one listener.
+// The agent is authoritative for Running: desired config alone is never proof
+// that sing-box actually bound a port.
+type NodeSingboxInbound struct {
+	Port   int
+	Type   string
+	Tag    string
+	Status string
+}
+
+// ListNodeSingboxInbounds returns the known listener lifecycle records keyed
+// by port. Empty is an ordinary result for a probe that predates the report.
+func (s *Store) ListNodeSingboxInbounds(nodeID string) ([]NodeSingboxInbound, error) {
+	rows, err := s.db.Query(
+		`SELECT port, type, tag, status FROM node_singbox_inbounds WHERE node_id = ? ORDER BY port`,
+		nodeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []NodeSingboxInbound{}
+	for rows.Next() {
+		var inbound NodeSingboxInbound
+		if err := rows.Scan(&inbound.Port, &inbound.Type, &inbound.Tag, &inbound.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, inbound)
+	}
+	return out, rows.Err()
+}
+
+// SetNodeSingboxInboundPending records a panel-created listener immediately,
+// before the agent has had a chance to apply and report the new document.
+func (s *Store) SetNodeSingboxInboundPending(nodeID string, inbound NodeSingboxInbound) error {
+	_, err := s.db.Exec(
+		`INSERT INTO node_singbox_inbounds (node_id, port, type, tag, status, reported, updated_at)
+		 VALUES (?, ?, ?, ?, 'pending', 0, ?)
+		 ON CONFLICT(node_id, port) DO UPDATE SET
+		   type = excluded.type, tag = excluded.tag, status = 'pending',
+		   reported = 0, updated_at = excluded.updated_at`,
+		nodeID,
+		inbound.Port,
+		inbound.Type,
+		inbound.Tag,
+		now(),
+	)
+	return err
+}
+
+// DeleteNodeSingboxInbound drops a lifecycle record when the panel removes its
+// listener from the desired document.
+func (s *Store) DeleteNodeSingboxInbound(nodeID string, port int) error {
+	_, err := s.db.Exec(`DELETE FROM node_singbox_inbounds WHERE node_id = ? AND port = ?`, nodeID, port)
+	return err
+}
+
+// ReconcileNodeSingboxInbounds records the config that the agent actually saw.
+// An older report that lacks a freshly added listener must not erase that
+// pending row (reported=0); confirmed, missing rows from a prior report are
+// removed. Only effective ports become running. effectiveKnown is false for an
+// older agent that did not send the wire field, whose report must not demote a
+// listener that a newer agent had already confirmed.
+func (s *Store) ReconcileNodeSingboxInbounds(
+	nodeID string,
+	inbounds []NodeSingboxInbound,
+	effectivePorts []int,
+	effectiveKnown bool,
+) error {
+	effective := map[int]bool{}
+	for _, port := range effectivePorts {
+		effective[port] = true
+	}
+	reported := map[int]bool{}
+	for _, inbound := range inbounds {
+		if inbound.Port > 0 {
+			reported[inbound.Port] = true
+		}
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, inbound := range inbounds {
+		if inbound.Port <= 0 {
+			continue
+		}
+		status := "pending"
+		if effective[inbound.Port] {
+			status = "running"
+		}
+		if !effectiveKnown {
+			if _, err := tx.Exec(
+				`INSERT INTO node_singbox_inbounds (node_id, port, type, tag, status, reported, updated_at)
+				 VALUES (?, ?, ?, ?, 'pending', 1, ?)
+				 ON CONFLICT(node_id, port) DO UPDATE SET
+				   type = excluded.type, tag = excluded.tag, reported = 1,
+				   updated_at = excluded.updated_at`,
+				nodeID,
+				inbound.Port,
+				inbound.Type,
+				inbound.Tag,
+				now(),
+			); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO node_singbox_inbounds (node_id, port, type, tag, status, reported, updated_at)
+			 VALUES (?, ?, ?, ?, ?, 1, ?)
+			 ON CONFLICT(node_id, port) DO UPDATE SET
+			   type = excluded.type, tag = excluded.tag, status = excluded.status,
+			   reported = 1, updated_at = excluded.updated_at`,
+			nodeID,
+			inbound.Port,
+			inbound.Type,
+			inbound.Tag,
+			status,
+			now(),
+		); err != nil {
+			return err
+		}
+	}
+	rows, err := tx.Query(`SELECT port FROM node_singbox_inbounds WHERE node_id = ? AND reported = 1`, nodeID)
+	if err != nil {
+		return err
+	}
+	stale := []int{}
+	for rows.Next() {
+		var port int
+		if err := rows.Scan(&port); err != nil {
+			rows.Close()
+			return err
+		}
+		if !reported[port] {
+			stale = append(stale, port)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, port := range stale {
+		if _, err := tx.Exec(`DELETE FROM node_singbox_inbounds WHERE node_id = ? AND port = ?`, nodeID, port); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) GetNodeSingbox(nodeID string) (*NodeSingbox, error) {
 	n := &NodeSingbox{}
 	err := s.db.QueryRow(
@@ -528,14 +679,18 @@ type NodeSingboxLocal struct {
 	// probe reported it. Config.json only names a path; a subscription client
 	// needs the bytes to pin the server, so the probe ships them (§9.3 实现修订
 	// 2026-09-17b).
-	AnytlsCerts  map[int]string `json:"anytls_certs,omitempty"`
-	LocalVersion string         `json:"local_version"`
-	LocalRunning bool           `json:"local_running"`
-	LocalUnit    bool           `json:"local_unit_active"`
-	LocalUnitOK  bool           `json:"local_unit_known"`
-	LocalPresent bool           `json:"local_present"`
-	ConfigJSON   string         `json:"config_json"`
-	Error        string         `json:"error"`
+	AnytlsCerts map[int]string `json:"anytls_certs,omitempty"`
+	// EffectiveInboundPorts is the agent's local TCP acknowledgement for each
+	// listener. Missing means an older agent rather than a failed listener.
+	EffectiveInboundPorts []int  `json:"effective_inbound_ports,omitempty"`
+	InboundChecksKnown    bool   `json:"inbound_checks_known,omitempty"`
+	LocalVersion          string `json:"local_version"`
+	LocalRunning          bool   `json:"local_running"`
+	LocalUnit             bool   `json:"local_unit_active"`
+	LocalUnitOK           bool   `json:"local_unit_known"`
+	LocalPresent          bool   `json:"local_present"`
+	ConfigJSON            string `json:"config_json"`
+	Error                 string `json:"error"`
 }
 
 // GetNodeSingboxLocal reads the discovery snapshot (metadata + config bytes),
@@ -982,11 +1137,18 @@ func (l NodeSingboxLocal) Same(other NodeSingboxLocal) bool {
 		l.LocalVersion != other.LocalVersion || l.LocalRunning != other.LocalRunning ||
 		l.LocalUnit != other.LocalUnit || l.LocalUnitOK != other.LocalUnitOK ||
 		l.LocalPresent != other.LocalPresent || l.ConfigJSON != other.ConfigJSON ||
-		l.Error != other.Error || len(l.AnytlsCerts) != len(other.AnytlsCerts) {
+		l.InboundChecksKnown != other.InboundChecksKnown || l.Error != other.Error ||
+		len(l.AnytlsCerts) != len(other.AnytlsCerts) ||
+		len(l.EffectiveInboundPorts) != len(other.EffectiveInboundPorts) {
 		return false
 	}
 	for port, pem := range l.AnytlsCerts {
 		if other.AnytlsCerts[port] != pem {
+			return false
+		}
+	}
+	for i, port := range l.EffectiveInboundPorts {
+		if other.EffectiveInboundPorts[i] != port {
 			return false
 		}
 	}

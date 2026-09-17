@@ -147,12 +147,10 @@ func extraRealityShortID(e ExtraInbound) string {
 // The panel's global anytls password only reaches a listener the *panel* wrote
 // (install / edit), and from then on the file carries it like any other value.
 //
-// panelPort is the inbound recognised as the node's own (the one the install
-// flow declares, or the one auto-recognised from the file). It gets the node's
-// plain name — it is the entry every existing client already holds. Everything
-// else keeps the `type:port` suffix that keeps proxies apart in a client's
-// group.
-func LiveProxyNodes(configJSON, nodeID, name, server string, panelPort int, certs map[int]string) []ProxyNode {
+// Every listener keeps a `type:port` suffix. Several inbounds on a node are
+// peers: none is a hidden primary entry with a special name or subscription
+// meaning.
+func LiveProxyNodes(configJSON, nodeID, name, server string, certs map[int]string) []ProxyNode {
 	inbounds, err := ParseLocalInbounds(configJSON)
 	if err != nil {
 		return nil
@@ -165,10 +163,6 @@ func LiveProxyNodes(configJSON, nodeID, name, server string, panelPort int, cert
 		e := ExtraInboundFrom(ib)
 		built := ProxyNodesFor([]ExtraInbound{e}, nodeID, name, server, certs[ib.Port])
 		for _, n := range built {
-			if n.Port == panelPort {
-				n.Name = name
-				n.NameSuffix = ""
-			}
 			if n.Protocol == ProtoAnytls && n.CertPEM == "" {
 				// The file names a certificate *path*; a client needs the bytes
 				// to pin. No bytes → skip: rendering insecure=true is the one

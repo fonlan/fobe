@@ -143,21 +143,21 @@ func TestSubscriptionRendersLiveConfigFile(t *testing.T) {
 	if len(byPort) != 3 {
 		t.Fatalf("got %d outbounds, want 3 (the whole file): %v", len(byPort), byPort)
 	}
-	// The panel's own inbound: the file's credential and the reported
-	// certificate for pinning, plus the node's plain name. The credential is
+	// Every inbound keeps the file's credential and the reported certificate for
+	// pinning. The credential is
 	// the file's — §9.3 实现修订 2026-09-17d: the probe is what actually serves
 	// it, so a global password the file does not carry would hand clients a
 	// secret that cannot authenticate. (On a node the panel installed, the
 	// file *is* the global password, so nothing changes there.)
-	panel := byPort[22039]
-	if panel == nil || panel["type"] != "anytls" || panel["password"] != "panel-generated-pw" {
-		t.Fatalf("panel inbound = %v", panel)
+	first := byPort[22039]
+	if first == nil || first["type"] != "anytls" || first["password"] != "panel-generated-pw" {
+		t.Fatalf("first inbound = %v", first)
 	}
-	if panel["password"] == "shared-proxy-pw" {
+	if first["password"] == "shared-proxy-pw" {
 		t.Fatal("the global anytls password replaced the credential the probe serves")
 	}
-	if panel["tag"] != "fobe-HK-Sharon" {
-		t.Fatalf("panel inbound tag = %v, want the node name unsuffixed", panel["tag"])
+	if first["tag"] != "fobe-HK-Sharon · anytls:22039" {
+		t.Fatalf("first inbound tag = %v, want a protocol:port suffix", first["tag"])
 	}
 	// The hand-added anytls keeps the script's password and gets a suffixed name.
 	added := byPort[28711]
@@ -405,6 +405,56 @@ func TestPutNodeSingboxConfigMintsCredentialsForNewInbounds(t *testing.T) {
 	}
 }
 
+// A newly added listener must be visible at once: the GET endpoint normally
+// reflects the last agent report, which still has the old file until the probe
+// applies the desired document. The status stays pending until the agent sends
+// a positive local-listener acknowledgement.
+func TestPutNodeSingboxConfigShowsNewInboundAsPendingBeforeReport(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := loginSession(t, srv)
+	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
+	seedLiveConfig(t, api, id, liveConfigWithPanelInbound)
+	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
+		NodeID: id, DesiredVersion: "1.13.0-beta.7", Port: 22039, CertPEM: testCertPEM,
+	}); err != nil {
+		t.Fatalf("seed singbox: %v", err)
+	}
+
+	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+id+"/singbox/config", cookie,
+		map[string]any{
+			"reported_hash": hashOf(liveConfigWithPanelInbound),
+			"add":           []map[string]any{{"type": "socks", "tag": "pending-socks", "port": 1080, "credential": "sock-pw", "new": true}},
+		})
+	if r.Status != http.StatusOK {
+		t.Fatalf("add inbound = %d %s", r.Status, r.Body)
+	}
+
+	r = doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+id+"/singbox/config", cookie, nil)
+	if r.Status != http.StatusOK {
+		t.Fatalf("GET config = %d %s", r.Status, r.Body)
+	}
+	var body struct {
+		Inbounds []struct {
+			Port   int    `json:"port"`
+			Type   string `json:"type"`
+			Status string `json:"status"`
+			Number int    `json:"number"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(r.Body, &body); err != nil {
+		t.Fatalf("decode config payload: %v", err)
+	}
+	for _, inbound := range body.Inbounds {
+		if inbound.Port == 1080 {
+			if inbound.Type != singbox.ProtoSocks || inbound.Status != "pending" || inbound.Number != -1 {
+				t.Fatalf("pending inbound = %+v", inbound)
+			}
+			return
+		}
+	}
+	t.Fatalf("new pending inbound absent from %+v", body.Inbounds)
+}
+
 // A node the panel installs from scratch still works: no file reported yet, so
 // the managed pair renders (the editor model must not break the original flow).
 func TestSubscriptionFallsBackToManagedPairWithoutReport(t *testing.T) {
@@ -434,11 +484,9 @@ func TestSubscriptionFallsBackToManagedPairWithoutReport(t *testing.T) {
 	}
 }
 
-// A node the panel has never installed has no inbound of its own. The panel
-// does not ask which one to use: when it writes the file it takes the last
-// anytls inbound (§9.3 实现修订 2026-09-17d). That port is what gives one
-// subscription entry the node's plain name and its pinned certificate.
-func TestPutConfigPicksTheNodesOwnPortFromTheFile(t *testing.T) {
+// Editing one inbound never elects another inbound as a hidden primary entry.
+// Every listener keeps its own credential and subscription identity.
+func TestPutConfigKeepsInboundsEqual(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := loginSession(t, srv)
 	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
@@ -463,8 +511,8 @@ func TestPutConfigPicksTheNodesOwnPortFromTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get singbox: %v", err)
 	}
-	if sb.Port != 28711 {
-		t.Fatalf("node port = %d, want the file's last anytls listener 28711", sb.Port)
+	if sb.Port != 0 {
+		t.Fatalf("node port = %d, want no auto-selected inbound", sb.Port)
 	}
 	if !api.configEdited(id) {
 		t.Fatal("the node is not marked as panel-edited: startup sync would overwrite the file")

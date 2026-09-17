@@ -215,6 +215,10 @@ func (m *singboxManager) Run() {
 		select {
 		case <-m.kick:
 			m.converge()
+			// A panel edit changes both managed state and the local config snapshot.
+			// Scan before the next 60s tick so a newly added inbound can promptly
+			// acknowledge that it is reachable.
+			m.scanLocal()
 		case <-tick.C:
 			if m.needWatch() {
 				m.converge()
@@ -276,12 +280,18 @@ func localEqual(a, b *protocol.SingboxLocal) bool {
 	if a.Present != b.Present || a.Version != b.Version || a.Running != b.Running ||
 		a.UnitActive != b.UnitActive || a.UnitKnown != b.UnitKnown ||
 		a.ConfigPath != b.ConfigPath || a.ConfigJSON != b.ConfigJSON ||
-		a.ConfigSHA256 != b.ConfigSHA256 || a.Error != b.Error ||
-		len(a.AnytlsCerts) != len(b.AnytlsCerts) {
+		a.ConfigSHA256 != b.ConfigSHA256 || a.InboundChecksKnown != b.InboundChecksKnown || a.Error != b.Error ||
+		len(a.AnytlsCerts) != len(b.AnytlsCerts) ||
+		len(a.EffectiveInboundPorts) != len(b.EffectiveInboundPorts) {
 		return false
 	}
 	for port, pem := range a.AnytlsCerts {
 		if b.AnytlsCerts[port] != pem {
+			return false
+		}
+	}
+	for i, port := range a.EffectiveInboundPorts {
+		if b.EffectiveInboundPorts[i] != port {
 			return false
 		}
 	}
@@ -402,6 +412,10 @@ func detectLocal() *protocol.SingboxLocal {
 		out.ConfigJSON = string(raw)
 		out.ConfigSHA256 = sha256Hex(raw)
 		out.AnytlsCerts = readAnytlsCerts(raw)
+		out.InboundChecksKnown = true
+		if out.Running {
+			out.EffectiveInboundPorts = effectiveInboundPorts(raw)
+		}
 	case os.IsNotExist(err):
 		problems = append(problems, "config file does not exist")
 	default:
@@ -410,6 +424,30 @@ func detectLocal() *protocol.SingboxLocal {
 
 	out.Error = strings.Join(problems, "; ")
 	return out
+}
+
+// effectiveInboundPorts reports every configured listener that accepts a local
+// TCP connection. The raw config only declares intent; this is the evidence the
+// server needs before changing a newly added listener from pending to running.
+func effectiveInboundPorts(configJSON []byte) []int {
+	var cfg struct {
+		Inbounds []struct {
+			ListenPort int `json:"listen_port"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(configJSON, &cfg); err != nil {
+		return nil
+	}
+	ports := make([]int, 0, len(cfg.Inbounds))
+	seen := map[int]bool{}
+	for _, inbound := range cfg.Inbounds {
+		if inbound.ListenPort <= 0 || seen[inbound.ListenPort] || !tcpConnectable(inbound.ListenPort) {
+			continue
+		}
+		seen[inbound.ListenPort] = true
+		ports = append(ports, inbound.ListenPort)
+	}
+	return ports
 }
 
 // needWatch reports whether the desired instance lost its process (fallback

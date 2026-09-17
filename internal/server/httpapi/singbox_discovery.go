@@ -12,8 +12,7 @@
 // API may return, and the subscription renderer (§9.3 实现修订 2026-09-17b)
 // serves clients straight out of it. Nothing here is "adopted": there is no
 // takeover step left to take, no desired state to write and no credential to
-// rotate — the one piece of bookkeeping a report triggers lives in the hub
-// (recognizeLocalInboundPort, which records which listener is the node's own).
+// rotate. Each listener in the report is an equal subscription entry.
 //
 // `extra_inbounds` still exists for nodes adopted before the editor model
 // existed: their stored config has to keep carrying those inbounds when an

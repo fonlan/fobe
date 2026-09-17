@@ -169,10 +169,10 @@ section.card { margin-bottom: 0; }
 .row-actions { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
 .row-actions .btn { flex: 0 0 auto; white-space: nowrap; }
 
-/* Bare "input + button" rows (sing-box port, subscription name, UA filter,
-   subscription template picker). These controls sit outside a .field label, so
-   they need their own layout — the visual styling is shared with .field input
-   further down. */
+/* Bare "input + button" rows (subscription name, UA filter, subscription
+   template picker). These controls sit outside a .field label, so they need
+   their own layout — the visual styling is shared with .field input further
+   down. */
 .cmd-input-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
 .cmd-input-row input,
 .cmd-input-row select { flex: 1; min-width: 0; }
@@ -221,9 +221,6 @@ section.card { margin-bottom: 0; }
    five digits. Both out-specify the rule above, so order matters: keep them last. */
 .sb-inbound-table input.sb-text { width: 100%; min-width: 90px; }
 .sb-inbound-table input.sb-num { width: 84px; }
-/* "This listener is the node's own" badge beside the protocol: it is a fact
-   about the row, not a control, so it stays small and never wraps the type. */
-.sb-own-chip { margin-left: 6px; white-space: nowrap; }
 .sb-num { width: 84px; }
 .sb-local-list { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .sb-local-list li { display: block; }
