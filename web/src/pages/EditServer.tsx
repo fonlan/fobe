@@ -218,11 +218,11 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
           the node is offline and its caps are stale, so gating the button on
           caps would hide the one path that still works (§4.2 revision). */}
       <div className="stack">
-        <p className="hint">
-          {node.agent_caps_seen && !node.agent_self_update
-            ? t(unsupported ? 'agent_no_supervisor_hint' : 'agent_reinstall_hint')
-            : t('agent_reissue_hint')}
-        </p>
+        {/* 只在探针自己报告"不支持自更新"时保留一句解释；重发凭据的来龙去脉
+            不在面板里长篇展开（二次确认弹窗与 README 已覆盖），按钮始终给出。 */}
+        {node.agent_caps_seen && !node.agent_self_update && (
+          <p className="hint">{t(unsupported ? 'agent_no_supervisor_hint' : 'agent_reinstall_hint')}</p>
+        )}
         <div className="row-gap">
           <button type="button" className="btn" disabled={busy} onClick={() => void reinstall()}>
             {t('agent_reinstall_title')}
@@ -315,6 +315,31 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // 「已续费」（design §15 实现修订 2026-09-17）：按当前周期把下次到期日顺延。
+  // 滚动始终以原到期日为基准整周期推进（不在上一步的结果上累加），与流量周期
+  // 的滚动规则同款 —— 月末/2·29 被钳制后不逐次漂移；原到期日已过或没填时从
+  // 今天起算。只改表单里的日期字段，和其他改动一样等「保存节点设置」落库。
+  const canRenew = cycleType !== 'none' && Number.isFinite(Number(billingDays)) && Number(billingDays) >= 1;
+  const renew = () => {
+    if (!canRenew) return;
+    const len = Number(billingDays);
+    const today = dateStrToUnix(toDateString(Date.now() / 1000)) ?? 0;
+    const base = dateStrToUnix(nextDue) ?? today;
+    const addCycles = (unix: number, k: number): number => {
+      const d = new Date(unix * 1000);
+      if (cycleType === 'month') d.setMonth(d.getMonth() + k);
+      else if (cycleType === 'year') d.setFullYear(d.getFullYear() + k);
+      else d.setDate(d.getDate() + k);
+      return Math.floor(d.getTime() / 1000);
+    };
+    let k = 1;
+    let next = addCycles(base, len * k);
+    while (next <= today) next = addCycles(base, len * ++k);
+    const nextStr = toDateString(next);
+    setNextDue(nextStr);
+    setMsg(t('billing_renew_applied', { date: nextStr }));
+  };
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -478,7 +503,14 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
         </label>
         <label className="field">
           <span>{t('billing_note')}</span>
-          <input value={billingNote} onChange={(e) => setBillingNote(e.target.value)} />
+          {/* 已续费按钮挂在费用输入框右侧（design §15 实现修订 2026-09-17）：
+              一键把下次到期日按周期顺延，省掉手算日期。 */}
+          <div className="row-gap">
+            <input value={billingNote} onChange={(e) => setBillingNote(e.target.value)} />
+            <button type="button" className="btn" disabled={!canRenew} title={t('billing_renew_title')} onClick={renew}>
+              {t('billing_renewed')}
+            </button>
+          </div>
         </label>
       </div>
 
@@ -929,7 +961,6 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
               {t('sb_inbound_add')}
             </button>
           </div>
-          <span className="hint">{t('sb_local_auto')}</span>
 
           {newInbound && (
             <div className="row-wrap">

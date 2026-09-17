@@ -489,6 +489,13 @@ section.card { margin-bottom: 0; }
   font-size: 12px;
 }
 
+/* 过期之后从 amber 升到 red：到期倒计时与逾期是两种状态，「0 天后到期」这类
+   歧义已被 NodeCard 的时间戳比较排除，这里只负责把视觉分量分开。 */
+.due-chip.overdue {
+  border-color: var(--red);
+  color: var(--red);
+}
+
 /* 费用 tag on the overview card: operator-entered data, so it takes the accent
    colour instead of a status colour (amber = due, red = offline). Qualified
    with .chip on purpose — this rule sits above the .chip block, and equal

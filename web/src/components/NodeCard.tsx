@@ -24,10 +24,14 @@ export default function NodeCard({ node }: { node: NodeView }) {
 
   const dueChip = (() => {
     if (node.next_due_at == null || node.next_due_at <= 0) return null;
-    const days = Math.ceil((node.next_due_at * 1000 - Date.now()) / 86400000);
+    // 到期日存的是本地零点（dateStrToUnix），过了零点之后 Math.ceil(负的零点几)
+    // 会得到 -0，而 -0 >= 0 为 true —— 已过期的节点于是显示成「0 天后到期」。
+    // 直接比较时间戳：只要不是未来，一律算过期，贴「已过期」标签。
+    const msLeft = node.next_due_at * 1000 - Date.now();
+    const overdue = msLeft <= 0;
     return (
-      <span className="due-chip">
-        {days >= 0 ? t('due_in_days', { d: days }) : t('due_overdue')}
+      <span className={'due-chip' + (overdue ? ' overdue' : '')}>
+        {overdue ? t('due_overdue') : t('due_in_days', { d: Math.ceil(msLeft / 86400000) })}
       </span>
     );
   })();
