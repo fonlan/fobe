@@ -152,8 +152,18 @@ func TestAIShellSentinelIsHowACommandFinishes(t *testing.T) {
 	if len(sent) != 2 {
 		t.Fatalf("sent %d payloads (%q), want exactly the clear and the command", len(sent), sent)
 	}
-	if sent[0] != "\x15\x03" {
-		t.Fatalf("first payload = %q, want Ctrl+U Ctrl+C", sent[0])
+	if sent[0] != aiTerminalClearKeys {
+		t.Fatalf("first payload = %q, want Ctrl+U Ctrl+C plus the sacrificial byte", sent[0])
+	}
+	// The clear payload must carry a byte AFTER the interrupt. bash discards
+	// the first byte pending when it handles the SIGINT Ctrl+C raises, so
+	// without that sacrifice the byte it eats is the command's own first
+	// character — and the screen still echoes the whole line, which is what
+	// makes the corruption invisible (see aiTerminalClearKeys). Asserted
+	// separately from the equality above so a "tidy up the constant" edit
+	// cannot quietly delete the protection.
+	if !strings.HasPrefix(sent[0], "\x15\x03") || len(sent[0]) <= len("\x15\x03") {
+		t.Fatalf("clear payload = %q, want a sacrificial byte after Ctrl+U Ctrl+C", sent[0])
 	}
 	if !strings.Contains(sent[1], "$?") || !strings.HasSuffix(sent[1], "\n") {
 		t.Fatalf("second payload = %q, want the sentinel command plus Enter", sent[1])
@@ -208,7 +218,7 @@ func TestAIShellTimeoutNeverKillsTheCommand(t *testing.T) {
 	// Nothing in the lifecycle may send a signal: the only bytes are the clear
 	// and the command itself.
 	for _, payload := range fake.sent {
-		if strings.Contains(payload, "\x03") && !strings.HasPrefix(payload, "\x15\x03") {
+		if strings.Contains(payload, "\x03") && !strings.HasPrefix(payload, aiTerminalClearKeys) {
 			t.Fatalf("unexpected interrupt sent: %q", payload)
 		}
 	}

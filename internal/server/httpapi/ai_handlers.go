@@ -588,7 +588,7 @@ func aiToolsSpec() []aiOpenAIToolSpec {
 			},
 			"command", "reason", "risky"),
 		tool(aiToolSendKeys,
-			"Send raw keys to the same terminal, for the states where no command can be typed: a program waiting for input (send \"y\\n\"), a pager or editor to quit (\"q\"), an interrupt (Ctrl+C is \"\\u0003\"). Use it to get out of a stuck state, then read_terminal to see the result.",
+			"Send raw keys to the same terminal, for the states where no command can be typed: a program waiting for input (send \"y\\n\"), a pager or editor to quit (\"q\"), an interrupt (Ctrl+C is \"\\u0003\"). bash swallows the very next byte it reads after an interrupt, so end a payload with Ctrl+C instead of following it with more keys. Use it to get out of a stuck state, then read_terminal to see the result.",
 			map[string]any{
 				"data":   map[string]any{"type": "string"},
 				"reason": reason,

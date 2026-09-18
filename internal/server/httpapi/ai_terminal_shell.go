@@ -59,6 +59,29 @@ const (
 // one's; the format is documented in §12.7.3.
 const aiTerminalSentinelPrefix = "__FOBE_"
 
+// aiTerminalClearKeys is the blind "give me a fresh input line" keystroke:
+// Ctrl+U kills the operator's half-typed line, Ctrl+C aborts whatever owns the
+// foreground.
+//
+// The trailing SPACE is load-bearing, not tidiness. bash's readline DISCARDS
+// the one byte that is already pending when it handles the SIGINT that Ctrl+C
+// raises, so typing the command straight after the interrupt makes the shell
+// eat its first character. The failure is close to undetectable from the
+// outside: the shell still ECHOES the whole line (the echo is what the model
+// reads back), while what actually runs is a command with its head bitten off —
+// `ip addr` executes as `p addr` and reports `bash: p: command not found`,
+// exit 127. Measured on Debian 12 / bash 5.2: two frames typed back to back
+// lost the first byte in 10 of 12 runs, and in 12 of 12 when the keystrokes and
+// the command went into a single write; a 2ms pause lost none. macOS bash 3.2
+// never lost a byte, which is why this reproduced only on a real probe.
+//
+// Sending a space first means the byte that gets eaten is one the shell would
+// have ignored anyway: leading blanks are not part of the command line (the
+// only side effect is that hosts with HISTCONTROL=ignorespace stop recording
+// AI commands — §12.7.3). A tab would be inert to the parser too, but an
+// UNEATEN tab would fire readline completion on the operator's screen.
+const aiTerminalClearKeys = "\x15\x03 "
+
 // aiSentinelRE matches the marker as the shell prints it: the nonce plus the
 // exit status. It deliberately does NOT match the echoed command line (that one
 // still contains the literal `%d` of the printf format), so the exit status can
@@ -216,7 +239,11 @@ func (s *Server) execAIShell(ctx context.Context, io aiTerminalIO, command strin
 	// Ctrl+U/Ctrl+C mean something else to whatever is running. The operator
 	// accepted that; it is why the result of a failed read says "unknown"
 	// instead of pretending the command ran.
-	if !io.Send("\x15\x03") {
+	//
+	// The payload carries a sacrificial trailing byte (aiTerminalClearKeys);
+	// it absorbs the byte bash swallows after the interrupt so the command
+	// arrives intact.
+	if !io.Send(aiTerminalClearKeys) {
 		return aiShellResult{}, hub.ErrNoTerminalBrowser
 	}
 	if !io.Send(wrapped + "\n") {
