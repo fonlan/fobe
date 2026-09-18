@@ -25,7 +25,7 @@ func NextReset(cycleType string, nextResetAt *int64, tz string, now time.Time) *
 func CycleWindow(cycleType string, nextResetAt *int64, tz string, now time.Time) (int64, *int64) {
 	loc := loadTZ(tz)
 	now = now.In(loc)
-	if (cycleType != "month" && cycleType != "year") || nextResetAt == nil || *nextResetAt <= 0 {
+	if (cycleType != "month" && cycleType != "quarter" && cycleType != "year") || nextResetAt == nil || *nextResetAt <= 0 {
 		return 0, nil
 	}
 	anchor := time.Unix(*nextResetAt, 0).In(loc)
@@ -46,13 +46,19 @@ func CycleWindow(cycleType string, nextResetAt *int64, tz string, now time.Time)
 func cycleAt(anchor time.Time, cycleType string, step int) time.Time {
 	loc := anchor.Location()
 	year, month := anchor.Year(), anchor.Month()
-	if cycleType == "year" {
-		year += step
-	} else {
-		totalMonths := year*12 + int(month) - 1 + step
-		year = totalMonths / 12
-		month = time.Month(totalMonths%12 + 1)
+	// step counts whole cycles; months is the calendar jump it stands for.
+	// year/quarter are just 12- and 3-month steps, so month-end and leap-day
+	// clamping (monthDay) behaves identically for every cycle type.
+	months := step
+	switch cycleType {
+	case "year":
+		months = step * 12
+	case "quarter":
+		months = step * 3
 	}
+	totalMonths := year*12 + int(month) - 1 + months
+	year = totalMonths / 12
+	month = time.Month(totalMonths%12 + 1)
 	return monthDay(year, month, anchor.Day(), anchor, loc)
 }
 

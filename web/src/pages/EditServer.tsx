@@ -263,9 +263,12 @@ const MODES = ['in', 'out', 'both', 'max'] as const;
 const CYCLE_LEN_LABEL: Record<string, string> = {
   day: 'cycle_days',
   month: 'cycle_months',
+  quarter: 'cycle_quarters',
   year: 'cycle_years',
 };
-const CYCLE_UNIT_DAYS: Record<string, number> = { day: 1, month: 30, year: 365 };
+// 91d ≈ a calendar quarter (the app's month unit is a flat 30d, so 3 months would
+// read as 90d; either converts to "1 quarter" cleanly).
+const CYCLE_UNIT_DAYS: Record<string, number> = { day: 1, month: 30, quarter: 91, year: 365 };
 
 // Switching the unit converts the number so it stays meaningful (30 days -> 1
 // month); "none" has no unit, so the raw text is kept as typed.
@@ -304,7 +307,7 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
   const [quotaGb, setQuotaGb] = useState(
     net?.quota_bytes != null ? String(Math.round((net.quota_bytes / 2 ** 30) * 100) / 100) : '',
   );
-  const [trafficCycleType, setTrafficCycleType] = useState<'none' | 'month' | 'year'>(trafficCycle?.cycle_type ?? 'none');
+  const [trafficCycleType, setTrafficCycleType] = useState<'none' | 'month' | 'quarter' | 'year'>(trafficCycle?.cycle_type ?? 'none');
   const [nextReset, setNextReset] = useState(
     trafficCycle?.next_reset_at != null ? toDatetimeLocalInZone(trafficCycle.next_reset_at, node.tz) : '',
   );
@@ -329,6 +332,7 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
     const addCycles = (unix: number, k: number): number => {
       const d = new Date(unix * 1000);
       if (cycleType === 'month') d.setMonth(d.getMonth() + k);
+      else if (cycleType === 'quarter') d.setMonth(d.getMonth() + 3 * k);
       else if (cycleType === 'year') d.setFullYear(d.getFullYear() + k);
       else d.setDate(d.getDate() + k);
       return Math.floor(d.getTime() / 1000);
@@ -359,7 +363,7 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
           quota_bytes: quotaBytes != null && isFinite(quotaBytes) ? quotaBytes : null,
         },
         traffic_cycle: {
-          cycle_type: trafficCycleType as 'none' | 'month' | 'year',
+          cycle_type: trafficCycleType as 'none' | 'month' | 'quarter' | 'year',
           next_reset_at: trafficCycleType === 'none' ? null : datetimeLocalInZoneToUnix(nextReset, node.tz),
         },
         billing: {
@@ -456,9 +460,10 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
         </label>
         <label className="field">
           <span>{t('traffic_cycle_type')}</span>
-          <select value={trafficCycleType} onChange={(e) => setTrafficCycleType(e.target.value as 'none' | 'month' | 'year')}>
+          <select value={trafficCycleType} onChange={(e) => setTrafficCycleType(e.target.value as 'none' | 'month' | 'quarter' | 'year')}>
             <option value="none">{t('cycle_none')}</option>
             <option value="month">{t('cycle_month')}</option>
+            <option value="quarter">{t('cycle_quarter')}</option>
             <option value="year">{t('cycle_year')}</option>
           </select>
         </label>
@@ -489,6 +494,7 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
           >
             <option value="none">{t('cycle_none')}</option>
             <option value="month">{t('cycle_month')}</option>
+            <option value="quarter">{t('cycle_quarter')}</option>
             <option value="day">{t('cycle_day')}</option>
             <option value="year">{t('cycle_year')}</option>
           </select>

@@ -385,7 +385,7 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 			case "none":
 				net.CycleType = "none"
 				net.NextResetAt = nil
-			case "month", "year":
+			case "month", "quarter", "year":
 				if req.TrafficCycle.NextResetAt == nil || *req.TrafficCycle.NextResetAt <= 0 {
 					writeErr(w, http.StatusBadRequest, "next_reset_required")
 					return

@@ -13,7 +13,7 @@ type NodeNetwork struct {
 	Iface       string `json:"iface"`
 	Mode        string `json:"mode"`        // in|out|both|max
 	QuotaBytes  *int64 `json:"quota_bytes"` // nil = no quota
-	CycleType   string `json:"cycle_type"`  // none|month|year
+	CycleType   string `json:"cycle_type"`  // none|month|quarter|year
 	NextResetAt *int64 `json:"next_reset_at"`
 	TZ          string `json:"tz"`
 }

@@ -98,7 +98,7 @@ export interface NodeNetwork {
 }
 
 export interface NodeTrafficCycle {
-  cycle_type: 'none' | 'month' | 'year';
+  cycle_type: 'none' | 'month' | 'quarter' | 'year';
   next_reset_at: number | null;
 }
 

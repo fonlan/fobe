@@ -51,6 +51,40 @@ func TestYearlyCycleClampsLeapDay(t *testing.T) {
 	}
 }
 
+func TestQuarterlyCycleRollsInThreeMonthSteps(t *testing.T) {
+	// Jan 31 + one quarter lands on Apr 30 (clamped), and the following
+	// quarter is back on Jul 31: clamping a short month must not move the
+	// anchor, exactly like the month/year cycles.
+	reset := mustUTC(t, "2026-01-31T12:34:56Z").Unix()
+	now := mustUTC(t, "2026-04-30T13:00:00Z")
+	start := PeriodStart("quarter", &reset, "UTC", now)
+	wantStart := mustUTC(t, "2026-04-30T12:34:56Z").Unix()
+	if start != wantStart {
+		t.Fatalf("start=%d, want %d", start, wantStart)
+	}
+	next := NextReset("quarter", &reset, "UTC", now)
+	wantNext := mustUTC(t, "2026-07-31T12:34:56Z").Unix()
+	if next == nil || *next != wantNext {
+		t.Fatalf("next=%v, want %d", next, wantNext)
+	}
+}
+
+func TestQuarterlyCycleCrossesYearBoundary(t *testing.T) {
+	// Nov -> Feb -> May: the 3-month step has to carry the year over.
+	reset := mustUTC(t, "2026-11-15T01:02:03Z").Unix()
+	now := mustUTC(t, "2027-02-20T00:00:00Z")
+	start := PeriodStart("quarter", &reset, "UTC", now)
+	wantStart := mustUTC(t, "2027-02-15T01:02:03Z").Unix()
+	if start != wantStart {
+		t.Fatalf("start=%d, want %d", start, wantStart)
+	}
+	next := NextReset("quarter", &reset, "UTC", now)
+	wantNext := mustUTC(t, "2027-05-15T01:02:03Z").Unix()
+	if next == nil || *next != wantNext {
+		t.Fatalf("next=%v, want %d", next, wantNext)
+	}
+}
+
 func TestCycleTimezone(t *testing.T) {
 	// Local Feb 1 00:00 Asia/Shanghai = Jan 31 16:00 UTC.
 	reset := mustUTC(t, "2026-01-31T16:00:07Z").Unix()

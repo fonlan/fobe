@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS node_network (
     quota_bytes INTEGER,                      -- NULL = no quota
     cycle_days INTEGER,                       -- NULL = inherit billing anchor monthly
     anchor_at  INTEGER,                       -- cycle anchor (rolling, design §14)
-    cycle_type TEXT NOT NULL DEFAULT 'none',  -- none|month|year
+    cycle_type TEXT NOT NULL DEFAULT 'none',  -- none|month|quarter|year
     next_reset_at INTEGER,                    -- next automatic traffic reset (unix seconds)
     tz         TEXT NOT NULL DEFAULT 'UTC'
 );
@@ -119,8 +119,8 @@ CREATE TABLE IF NOT EXISTS node_interfaces (
 
 CREATE TABLE IF NOT EXISTS node_billing (
     node_id    TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-    cycle_type TEXT NOT NULL DEFAULT 'none',  -- none|month|day|year (记账口径, 不驱动到期计算)
-    cycle_days INTEGER,                       -- 周期长度, 单位随 cycle_type (month=月/year=年/day=天)
+    cycle_type TEXT NOT NULL DEFAULT 'none',  -- none|month|quarter|day|year (记账口径, 不驱动到期计算)
+    cycle_days INTEGER,                       -- 周期长度, 单位随 cycle_type (month=月/quarter=季/year=年/day=天)
     next_due_at INTEGER,
     note       TEXT NOT NULL DEFAULT ''
 );
