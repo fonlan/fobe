@@ -985,24 +985,22 @@ section.card { margin-bottom: 0; }
 
 /* --- AI 侧栏的流式对话 (design §12.5/§12.6) -------------------------------- */
 
-/* Model + thinking-level pickers, one panel above the transcript. The provider
-   grouping is a native <optgroup>, so it needs no styling of its own. */
-.ai-controls {
-  display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
+/* Model + thinking-level pickers, on the same line as the send/stop button
+   (§12.5). The provider grouping is a native <optgroup>, so it needs no styling
+   of its own. Wrapping is deliberate: below ~420px the panel is narrower than
+   two selects plus a button, and squeezing a <select> under its content width
+   hides the model name — the one value that must stay readable. */
 .ai-select-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .ai-select-field > span { font-size: 12px; color: var(--text-dim); }
 .ai-select-field select { width: 100%; font-size: 13px; }
 /* "This model exposes no adjustable level": a sentence, not an empty dropdown. */
 .ai-level-none { margin: 0; height: 38px; display: flex; align-items: center; }
-.ai-control-row { display: flex; align-items: flex-end; gap: 8px; }
-.ai-control-row > .ai-select-field { flex: 1 1 auto; }
-.ai-control-row > .btn { flex: none; }
+.ai-composer-row { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: flex-end; gap: 8px; margin-top: 8px; }
+/* The model takes the slack (its id is the longest text in the row and the one
+   value that must stay readable); the thinking level keeps a fixed width. */
+.ai-composer-row > .ai-select-field { flex: 1 1 120px; }
+.ai-composer-row > .ai-level-field { flex: 0 1 140px; }
+.ai-composer-row > .btn { flex: none; }
 
 /* Reasoning text (§12.5): collapsed by default, click to expand. */
 .ai-thinking { margin: 0 0 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }

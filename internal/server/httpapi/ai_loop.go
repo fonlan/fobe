@@ -422,7 +422,19 @@ func (s *Server) emitAIUpstreamError(sse *aiSSEWriter, sessionID string, err err
 	s.finishAITurn(sse, sessionID, "upstream_error", 0, nil)
 }
 
+// persistAssistantTurn stores one assistant turn. A turn that produced neither
+// text, nor tool calls, nor native blocks is NOT stored: it is not a message.
+// That happens whenever the upstream fails before the first delta, or the
+// operator stops immediately. The panel already hides such a row (it drops
+// assistant rows with no text and no thinking), so the row buys nothing — while
+// costing everything on the wire: `openai-completions` has no native-block
+// concept to rebuild it from, so it used to go out as a bare
+// {"role":"assistant"}, which gateways reject with "content or tool_calls must
+// be set" — 400ing every LATER request of the session, far from the cause.
 func (s *Server) persistAssistantTurn(sessionID, text string, raw json.RawMessage, calls []aiprotocol.ToolCall) error {
+	if strings.TrimSpace(text) == "" && len(calls) == 0 && len(raw) == 0 {
+		return nil
+	}
 	envelope := aiMessageEnvelope{Raw: raw, ToolCalls: calls}
 	encoded, err := json.Marshal(envelope)
 	if err != nil {

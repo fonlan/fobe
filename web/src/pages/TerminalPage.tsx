@@ -634,60 +634,12 @@ function AssistantPanel({
       {defaultUnavailable && <p className="hint warn-hint">{t('ai_default_unavailable')}</p>}
       {catalogErr && <div className="form-error">{catalogErr}</div>}
 
-      {catalog === null ? (
-        catalogErr === null && <p className="hint">{t('ai_loading_models')}</p>
-      ) : (
-        <div className="ai-controls">
-          {usable.length === 0 ? (
-            <p className="hint">{t('ai_no_models')}</p>
-          ) : (
-            <>
-              <label className="ai-select-field">
-                <span>{t('ai_model_label')}</span>
-                <select
-                  value={encodePair(providerId, modelId)}
-                  onChange={(event) => selectModel(event.target.value)}
-                >
-                  {groups.map((group) => (
-                    <optgroup key={group.provider.id} label={group.provider.name}>
-                      {group.models.map((model) => (
-                        <option key={model.id} value={encodePair(group.provider.id, model.id)}>
-                          {model.display_name || model.id}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
-              </label>
-              <div className="ai-control-row">
-                <label className="ai-select-field">
-                  <span>{t('ai_reasoning_label')}</span>
-                  {levels.length === 0 ? (
-                    // Not an empty dropdown: the honest statement is that this
-                    // model exposes no adjustable level through this provider.
-                    <span className="hint ai-level-none">{t('ai_reasoning_none')}</span>
-                  ) : (
-                    <select value={reasoning} onChange={(event) => setReasoning(event.target.value)}>
-                      <option value="">{t('ai_reasoning_default')}</option>
-                      {levels.map((level) => (
-                        <option key={level} value={level}>{level}</option>
-                      ))}
-                    </select>
-                  )}
-                </label>
-                <button
-                  type="button"
-                  className="btn small"
-                  disabled={savingDefault || isServerDefault}
-                  onClick={() => void saveDefault()}
-                >
-                  {savingDefault ? t('loading') : isServerDefault ? t('ai_default_is_current') : t('ai_set_default')}
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
+      {/* The pickers live in the composer row below, next to the send button
+          (§12.5): this block only reports the two states in which there is
+          nothing to pick. */}
+      {catalog === null
+        ? catalogErr === null && <p className="hint">{t('ai_loading_models')}</p>
+        : usable.length === 0 && <p className="hint">{t('ai_no_models')}</p>}
 
       <div className="ai-messages" ref={listRef}>
         {entries.length === 0 && (
@@ -816,15 +768,78 @@ function AssistantPanel({
           placeholder={t('ai_input_placeholder')}
           onChange={(event) => setMessage(event.target.value)}
         />
-        <div className="row-end">
-          {/* Always rendered (disabled when idle) so the two buttons never
-              swap places under the pointer. */}
-          <button type="button" className="btn danger" disabled={!busy} onClick={stop}>
-            {t('ai_stop')}
+        {/* One control bar: the model and thinking-level pickers sit on the
+            same line as the button that starts the turn (§12.5).
+
+            Sending and stopping are ONE button, because they are never both
+            wanted: while a turn streams there is nothing to send, and while it
+            is idle there is nothing to stop. Rendering both — one of them
+            always disabled — spends the row on a control that cannot be used,
+            which is exactly the room the two pickers now need. The `type` flips
+            with the role so the busy state can never submit the draft the
+            operator is still editing. */}
+        <div className="ai-composer-row">
+          {usable.length > 0 && (
+            <>
+              <label className="ai-select-field">
+                <span>{t('ai_model_label')}</span>
+                <select
+                  value={encodePair(providerId, modelId)}
+                  // The panel column is narrow enough to clip a long model id
+                  // (§12.5), and this is the one value the operator must be able
+                  // to read back before the turn runs.
+                  title={selected?.model.display_name || modelId}
+                  onChange={(event) => selectModel(event.target.value)}
+                >
+                  {groups.map((group) => (
+                    <optgroup key={group.provider.id} label={group.provider.name}>
+                      {group.models.map((model) => (
+                        <option key={model.id} value={encodePair(group.provider.id, model.id)}>
+                          {model.display_name || model.id}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </label>
+              <label className="ai-select-field ai-level-field">
+                <span>{t('ai_reasoning_label')}</span>
+                {levels.length === 0 ? (
+                  // Not an empty dropdown: the honest statement is that this
+                  // model exposes no adjustable level through this provider.
+                  <span className="hint ai-level-none">{t('ai_reasoning_none')}</span>
+                ) : (
+                  <select value={reasoning} onChange={(event) => setReasoning(event.target.value)}>
+                    <option value="">{t('ai_reasoning_default')}</option>
+                    {levels.map((level) => (
+                      <option key={level} value={level}>{level}</option>
+                    ))}
+                  </select>
+                )}
+              </label>
+            </>
+          )}
+          <button
+            type={busy ? 'button' : 'submit'}
+            className={busy ? 'btn danger' : 'btn primary'}
+            disabled={!busy && !message.trim()}
+            onClick={busy ? stop : undefined}
+          >
+            {busy ? t('ai_stop') : t('ai_send')}
           </button>
-          <button type="submit" className="btn primary" disabled={busy || !message.trim()}>
-            {t('ai_send')}
-          </button>
+          {usable.length > 0 && (
+            // Last in the row on purpose: it is the only item here that can
+            // wrap onto a line of its own on a narrow panel, and it is the one
+            // that matters least while writing a message.
+            <button
+              type="button"
+              className="btn small"
+              disabled={savingDefault || isServerDefault}
+              onClick={() => void saveDefault()}
+            >
+              {savingDefault ? t('loading') : isServerDefault ? t('ai_default_is_current') : t('ai_set_default')}
+            </button>
+          )}
         </div>
       </form>
     </section>

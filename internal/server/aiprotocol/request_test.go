@@ -85,6 +85,45 @@ func TestRequestShapeOpenAICompletions(t *testing.T) {
 	}
 }
 
+// TestOpenAICompletionsDropsATurnWithNothingToSay pins the transcript defect a
+// failed or immediately-stopped turn leaves behind: an assistant row whose text
+// is empty and which asked for no tools. This dialect ignores Message.Raw (see
+// the package comment), so such a row used to be encoded as a bare
+// {"role":"assistant"} — which a gateway rejects with 400 "Invalid assistant
+// message: content or tool_calls must be set", on EVERY later request of the
+// session. The operator therefore sees the failure far from its cause: a
+// message they never wrote, in a conversation that used to work.
+func TestOpenAICompletionsDropsATurnWithNothingToSay(t *testing.T) {
+	f := newSSEFixture(t, stopStream(ProtocolOpenAICompletions))
+	req := baseRequest(f, ProtocolOpenAICompletions)
+	req.Messages = []Message{
+		{Role: roleUser, Text: "hello"},
+		// Exactly what the loop stores when the upstream died before the first
+		// delta, or the operator pressed stop straight away.
+		{Role: roleAssistant},
+		// A thinking-only turn is the same thing on this dialect: there is no
+		// native block to replay, so there is nothing it could contribute.
+		{Role: roleAssistant, Raw: json.RawMessage(`[{"type":"thinking","thinking":"hmm"}]`)},
+		{Role: roleUser, Text: "are you there?"},
+	}
+	runStream(t, f, req)
+
+	messages := arrayField(t, decodeObject(t, f.last(t).Body), "messages")
+	roles := make([]any, 0, len(messages))
+	for i, raw := range messages {
+		m := object(t, raw, "message")
+		roles = append(roles, m["role"])
+		// Nothing that IS sent may be a bare assistant turn either: content and
+		// tool_calls are the only two things this dialect accepts there.
+		if m["role"] == roleAssistant && m["content"] == nil && !hasKey(m, "tool_calls") {
+			t.Fatalf("messages[%d] is a bare assistant turn: %v", i, m)
+		}
+	}
+	if want := []any{roleUser, roleUser}; !reflect.DeepEqual(roles, want) {
+		t.Fatalf("roles = %v, want %v", roles, want)
+	}
+}
+
 func TestRequestShapeOpenAIResponses(t *testing.T) {
 	f := newSSEFixture(t, stopStream(ProtocolOpenAIResponses))
 	req := baseRequest(f, ProtocolOpenAIResponses)

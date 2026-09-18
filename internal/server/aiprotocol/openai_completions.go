@@ -110,6 +110,18 @@ func completionsMessages(m Message) ([]json.RawMessage, error) {
 		return []json.RawMessage{msg}, nil
 
 	case roleAssistant:
+		// A turn with neither text nor tool calls has nothing to say in THIS
+		// dialect: Raw is ignored here (see the package comment), so the rebuilt
+		// message would be a bare {"role":"assistant"} — and a gateway rejects
+		// exactly that with "Invalid assistant message: content or tool_calls
+		// must be set", 400ing every later request of that session. Such rows
+		// exist (the loop wrote one for every turn that streamed nothing until it
+		// stopped doing so), so the encoder must drop them rather than emit an
+		// empty message — that is what makes an already-poisoned transcript
+		// usable again.
+		if strings.TrimSpace(m.Text) == "" && len(m.ToolCalls) == 0 {
+			return nil, nil
+		}
 		msg := completionsMessage{Role: roleAssistant}
 		if m.Text != "" {
 			text := m.Text

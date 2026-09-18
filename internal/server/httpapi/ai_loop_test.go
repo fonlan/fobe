@@ -274,6 +274,58 @@ func TestAILoopContinueAfterConfirmationPairsTheCallID(t *testing.T) {
 	}
 }
 
+// TestAILoopDoesNotStoreATurnWithNothingToSay pins that a turn which streamed
+// nothing — the upstream died before the first delta, the stream was truncated,
+// or the operator stopped straight away — leaves no assistant row behind, and
+// therefore that the NEXT message of that session is still a legal request.
+//
+// The two halves belong together: an empty assistant row is not merely a blank
+// bubble in the transcript, it re-encodes on the wire as a bare
+// {"role":"assistant"}, and a gateway answers that with 400 "Invalid assistant
+// message: content or tool_calls must be set" on every later request of the
+// session. That is how the defect was found: the operator sees a failure about
+// a message they never wrote, long after the turn that actually broke.
+func TestAILoopDoesNotStoreATurnWithNothingToSay(t *testing.T) {
+	server, api := newTestServer(t)
+	defer server.Close()
+	nodeID := createAINode(t, api, "ai-loop-empty-turn")
+	cookie := loginCookie(t, server.URL)
+
+	// Call 1: the stream dies right after the role frame — no content, no tool
+	// call, no finish_reason ⇒ the adapter calls it truncated.
+	truncated := openAIData(openAIChoice(t, map[string]any{"role": "assistant"}, ""))
+	upstream := newMockAIUpstream(t, truncated, openAIStreamText(t, "yes, I am here"))
+	configureAI(t, api, upstream.URL(), "k", "m")
+
+	first := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "hello"})
+	if first.TurnEnd == nil || first.TurnEnd.Reason != "upstream_error" {
+		t.Fatalf("turn end = %+v, want reason=upstream_error", first.TurnEnd)
+	}
+
+	stored, err := api.Store.ListAIMessages(first.SessionID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range stored {
+		if message.Role == "assistant" {
+			t.Fatalf("a turn that said nothing was stored as a message: %+v", message)
+		}
+	}
+
+	// The next message of the SAME session must not replay the empty turn.
+	second := postAIChat(t, server.URL, cookie, aiChatRequest{
+		SessionID: first.SessionID, NodeID: nodeID, Message: "are you there?",
+	})
+	if second.Text != "yes, I am here" {
+		t.Fatalf("text = %q", second.Text)
+	}
+	for _, message := range upstream.Request(t, 1).Messages {
+		if message.Role == "assistant" {
+			t.Fatalf("the replayed request carries an assistant turn that said nothing: %+v", message)
+		}
+	}
+}
+
 // TestAILoopStopPersistsTheHalfTurn is the stop button (§12.6): the client goes
 // away mid-turn, the loop ends, and the deltas the operator already saw stay in
 // the transcript instead of being rolled back.
