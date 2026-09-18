@@ -6,7 +6,8 @@ import { useI18n, type TFn } from '../i18n';
 import type { NodeView, RegTokenInfo } from '../types';
 import Modal from '../components/Modal';
 import Flag from '../components/Flag';
-import { PencilIcon, TrashIcon } from '../components/Icons';
+import { CopyIcon, PencilIcon, TrashIcon } from '../components/Icons';
+import { useToast } from '../components/Toast';
 import { fmtDueDuration, copyText } from '../format';
 
 type AddStep = 'closed' | 'form' | 'done';
@@ -28,6 +29,9 @@ function dueText(node: NodeView, t: TFn): string {
  */
 export default function Servers() {
   const { t } = useI18n();
+  // Page-level feedback for the per-row IP copy button (same pattern as the
+  // subscription URL): a copy is invisible, so a click owes an answer.
+  const { show: showToast, node: toastNode } = useToast();
   const [nodes, setNodes] = useState<NodeView[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<NodeView | null>(null);
@@ -47,6 +51,15 @@ export default function Servers() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const doCopyIP = async (ip: string) => {
+    if (await copyText(ip)) {
+      showToast(t('ip_copied'));
+    } else {
+      // Non-HTTPS origins have no clipboard: say so instead of failing silently.
+      showToast(t('copy_manual'), 'error');
+    }
+  };
 
   const doDelete = async (node: NodeView) => {
     if (busy) return;
@@ -116,7 +129,24 @@ export default function Servers() {
                     <span className={'dot ' + (n.online ? 'on' : 'off')} title={t(n.online ? 'online' : 'offline')} />
                     <span className="status-label">{t(n.online ? 'online' : 'offline')}</span>
                   </td>
-                  <td className="mono">{n.primary_ip || '-'}</td>
+                  <td className="mono nowrap">
+                    {n.primary_ip ? (
+                      <>
+                        {n.primary_ip}
+                        <button
+                          type="button"
+                          className="icon-btn ip-copy-btn"
+                          title={t('copy_ip')}
+                          aria-label={t('copy_ip')}
+                          onClick={() => void doCopyIP(n.primary_ip)}
+                        >
+                          <CopyIcon />
+                        </button>
+                      </>
+                    ) : (
+                      '-'
+                    )}
+                  </td>
                   <td>{dueText(n, t)}</td>
                   <td className="mono">
                     {n.agent_version || '-'}
@@ -151,6 +181,8 @@ export default function Servers() {
           </table>
         </div>
       )}
+
+      {toastNode}
 
       {deleting && (
         <Modal title={t('delete_server')} onClose={() => setDeleting(null)}>

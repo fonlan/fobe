@@ -75,6 +75,15 @@ export function RetryIcon(props: IconProps) {
   );
 }
 
+/** Copy a server's primary IP (settings → servers table). */
+export function CopyIcon(props: IconProps) {
+  return (
+    <Base {...props}>
+      <path d="M9 9h10v10H9zM15 9V5H5v10h4" />
+    </Base>
+  );
+}
+
 /** Edit a server's settings. */
 export function PencilIcon(props: IconProps) {
   return (

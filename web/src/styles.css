@@ -434,6 +434,12 @@ section.card { margin-bottom: 0; }
 /* Settings → servers table: flag + name on one line */
 .server-name-cell { display: inline-flex; align-items: center; gap: 8px; }
 
+/* Settings → servers table: the copy affordance rides along with the primary IP.
+   Kept small and dim (the icon-btn default) so a wall of rows stays readable,
+   and always visible rather than hover-only — touch devices have no hover. */
+.ip-copy-btn { vertical-align: middle; margin-left: 2px; padding: 2px 4px; }
+.ip-copy-btn .btn-icon { width: 13px; height: 13px; }
+
 /* Row actions: keep the two per-row icons together and right-aligned, so a
    version row reads "version … [publish][delete]" at a glance. */
 .col-actions { text-align: right; white-space: nowrap; }
