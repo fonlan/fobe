@@ -540,7 +540,7 @@ const zh = {
   // §10.2 entries: a subscription binds *entrances*, so one node can appear
   // twice — once directly and once through a relay's forward rule.
   sub_entries_col: '入口数',
-  sub_entries_hint: '一个入口 = 一个 anytls 出站。直连入口用节点自己的入站端口;中转入口走跳板节点的转发端口,证书仍是目标节点的。',
+  sub_entries_hint: '一个入口 = 一个 anytls 出站。直连入口用节点自己的入站端口(同一台服务器的多条入站各占一行);中转入口走跳板节点的转发端口,证书仍是目标节点的。',
   sub_entries_unavailable_hint: '置灰的入口当前渲染不出内容,但绑定关系仍在;取消勾选才会真正移除。',
   sub_entries_empty: '还没有可列出的入口:先在服务器上装好 sing-box,等节点上报证书与主 IP。',
   sub_entry_select_all: '全选',
@@ -558,6 +558,7 @@ const zh = {
   sub_entry_reason_not_ready: '暂不可渲染:节点尚未就绪(缺主 IP / 入站端口 / 证书)',
   sub_entry_reason_relay_not_ready: '暂不可渲染:跳板节点还没有主 IP',
   sub_entry_reason_relay_gone: '暂不可渲染:对应的转发规则已消失',
+  sub_entry_reason_inbound_gone: '暂不可渲染:探针的配置里已经没有这个入站端口了',
   sub_entry_reason_unknown: '暂不可渲染',
   sub_entry_warning_shadowed: '告警:该节点自己的入站端口被本机的转发规则占用,直连入口可能连不通',
   sub_relay_card: '中转入口',
@@ -1328,7 +1329,7 @@ const en: Record<DictKey, string> = {
   // §10.2 entries: a subscription binds *entrances*, so one node can appear
   // twice — once directly and once through a relay's forward rule.
   sub_entries_col: 'Entries',
-  sub_entries_hint: 'One entry = one anytls outbound. A direct entry uses the node\'s own inbound port; a relayed entry dials the relay\'s forward port and still pins the target node\'s certificate.',
+  sub_entries_hint: 'One entry = one anytls outbound. A direct entry uses one of the node\'s own inbound ports (several listeners on one server are several rows); a relayed entry dials the relay\'s forward port and still pins the target node\'s certificate.',
   sub_entries_unavailable_hint: 'Muted rows render nothing right now, but the binding is still there: unchecking is what actually removes it.',
   sub_entries_empty: 'Nothing to list yet — install sing-box on a server and wait for the node to report its certificate and primary IP.',
   sub_entry_select_all: 'Select all',
@@ -1346,6 +1347,7 @@ const en: Record<DictKey, string> = {
   sub_entry_reason_not_ready: 'Not renderable yet: the node is not ready (missing primary IP / inbound port / certificate)',
   sub_entry_reason_relay_not_ready: 'Not renderable yet: the relay node has no primary IP',
   sub_entry_reason_relay_gone: 'Not renderable yet: the forward rule behind it is gone',
+  sub_entry_reason_inbound_gone: 'Not renderable yet: the probe\'s config no longer declares this inbound port',
   sub_entry_reason_unknown: 'Not renderable right now',
   sub_entry_warning_shadowed: 'Warning: the node\'s own inbound port is taken by one of its own forward rules, so the direct entry may not connect',
   sub_relay_card: 'Relay entries',

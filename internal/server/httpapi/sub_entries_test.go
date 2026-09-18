@@ -692,3 +692,245 @@ func TestRelayWorksWithANonAnytlsIngress(t *testing.T) {
 		t.Errorf("outbound count = %d, want 2 (B direct + B via A)", got)
 	}
 }
+
+// --- §9.3/§10.2 实现修订 2026-09-18: a direct entry is one *inbound* ---
+
+// directEntryAt finds a direct row of one node by dial port (0 = the legacy
+// node-level row).
+func directEntryAt(t *testing.T, entries []subEntryView, nodeID string, port int) subEntryView {
+	t.Helper()
+	for _, e := range entries {
+		if e.NodeID == nodeID && e.RelayNodeID == "" && e.SrcPort == port {
+			return e
+		}
+	}
+	t.Fatalf("no direct entry for node %s port %d in %+v", nodeID, port, entries)
+	return subEntryView{}
+}
+
+// directEntriesOf lists a node's direct rows, in the order the server emits.
+func directEntriesOf(entries []subEntryView, nodeID string) []subEntryView {
+	out := []subEntryView{}
+	for _, e := range entries {
+		if e.NodeID == nodeID && e.RelayNodeID == "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// twoInboundConfig is one probe serving two anytls listeners, which is the
+// whole point of the split: they are two entries, not one node.
+const twoInboundConfig = `{"inbounds":[
+	{"type":"anytls","tag":"anytls-28711","listen_port":28711,"users":[{"password":"pw-a"}]},
+	{"type":"anytls","tag":"anytls-28712","listen_port":28712,"users":[{"password":"pw-b"}]}
+]}`
+
+// TestDirectEntriesAreOneRowPerInbound: a probe with two anytls listeners is
+// offered as two separately selectable rows, named apart by port, and each one
+// renders its own outbound. Before the split the picker had a single "B" row
+// whose two outbounds were only told apart by the renderer's -2 suffix.
+func TestDirectEntriesAreOneRowPerInbound(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{
+		28711: testCertPEM, 28712: testCertPEM,
+	})
+	subID, token := createSubscription(t, srv, cookie, "main")
+	// The operator binds the node through the legacy shape (no port): the
+	// reconciler has to split that row into the two inbounds.
+	bindEntries(t, srv, cookie, subID, []subEntryInput{{NodeID: bID, Selected: true}})
+
+	rows := directEntriesOf(listEntries(t, srv, cookie, subID), bID)
+	if len(rows) != 2 || rows[0].SrcPort != 28711 || rows[1].SrcPort != 28712 {
+		t.Fatalf("direct rows = %+v, want one per inbound port", rows)
+	}
+	for _, r := range rows {
+		if !r.Selected || !r.Available {
+			t.Errorf("row %d should be bound and available: %+v", r.SrcPort, r)
+		}
+	}
+	if rows[0].AutoName != "B:28711" || rows[1].AutoName != "B:28712" {
+		t.Errorf("auto names = %q/%q, want B:28711 and B:28712", rows[0].AutoName, rows[1].AutoName)
+	}
+
+	body := string(fetchSub(t, srv, token, "", "").Body)
+	if got := outboundCount(t, srv, token); got != 2 {
+		t.Fatalf("outbound count = %d, want 2\n%s", got, body)
+	}
+	for _, want := range []string{"fobe-B:28711", "fobe-B:28712", `"server_port": 28711`, `"server_port": 28712`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rendered subscription missing %q\n%s", want, body)
+		}
+	}
+	// No dedupe suffix: the names are already distinct, which is the whole
+	// reason the port comes back after 2026-09-17j removed it.
+	if strings.Contains(body, "fobe-B-2") || strings.Contains(body, "fobe-B \"") {
+		t.Errorf("the portless name is still rendering alongside:\n%s", body)
+	}
+
+	// Unchecking one inbound leaves the other alone: that is what "separately
+	// selectable" has to mean.
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28711, Selected: true},
+		{NodeID: bID, SrcPort: 28712, Selected: false},
+	})
+	if got := outboundCount(t, srv, token); got != 1 {
+		t.Fatalf("outbound count after unbinding one inbound = %d, want 1", got)
+	}
+	if body := string(fetchSub(t, srv, token, "", "").Body); !strings.Contains(body, `"server_port": 28711`) {
+		t.Errorf("the surviving inbound is not the one still checked:\n%s", body)
+	}
+}
+
+// TestSingleInboundKeepsThePlainName: the suffix is conditional, not a return of
+// the unconditional `协议:端口` that 2026-09-17j removed — a node with one
+// inbound still renders the operator's subscription name verbatim.
+func TestSingleInboundKeepsThePlainName(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"anytls","tag":"anytls-28711","listen_port":28711,"users":[{"password":"pw-a"}]}
+	]}`, map[int]string{28711: testCertPEM})
+	if err := api.Store.SetNodeSubName(bID, "东京"); err != nil {
+		t.Fatalf("set sub name: %v", err)
+	}
+	subID, token := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{{NodeID: bID, SrcPort: 28711, Selected: true}})
+
+	row := directEntryAt(t, listEntries(t, srv, cookie, subID), bID, 28711)
+	if row.AutoName != "东京" {
+		t.Errorf("auto name = %q, want the subscription name verbatim", row.AutoName)
+	}
+	body := string(fetchSub(t, srv, token, "", "").Body)
+	if !strings.Contains(body, `"tag": "fobe-东京"`) {
+		t.Errorf("single-inbound node lost its plain name:\n%s", body)
+	}
+	// An explicit alias still wins over the suffix, on a node with two inbounds.
+	if err := api.Store.SetNodeSubName(bID, ""); err != nil {
+		t.Fatal(err)
+	}
+	seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{
+		28711: testCertPEM, 28712: testCertPEM,
+	})
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28711, Alias: "东京-主", Selected: true},
+		{NodeID: bID, SrcPort: 28712, Selected: true},
+	})
+	body = string(fetchSub(t, srv, token, "", "").Body)
+	for _, want := range []string{"fobe-东京-主", "fobe-B:28712"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("alias is not verbatim / suffix missing: %q\n%s", want, body)
+		}
+	}
+}
+
+// TestBoundEntryWhoseInboundDisappeared: the probe's file is the truth, so a
+// bound row naming a listener that is no longer declared is listed, marked and
+// renders nothing — the operator keeps the binding visible and can drop it.
+func TestBoundEntryWhoseInboundDisappeared(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{
+		28711: testCertPEM, 28712: testCertPEM,
+	})
+	subID, token := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28711, Selected: true},
+		{NodeID: bID, SrcPort: 28712, Selected: true},
+	})
+	if got := outboundCount(t, srv, token); got != 2 {
+		t.Fatalf("precondition: outbound count = %d, want 2", got)
+	}
+
+	// The probe loses one listener (hand-edited file, a `jq` rewrite).
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"anytls","tag":"anytls-28711","listen_port":28711,"users":[{"password":"pw-a"}]}
+	]}`, map[int]string{28711: testCertPEM})
+
+	rows := directEntriesOf(listEntries(t, srv, cookie, subID), bID)
+	if len(rows) != 2 {
+		t.Fatalf("bound rows = %+v, want both kept on screen", rows)
+	}
+	gone := directEntryAt(t, listEntries(t, srv, cookie, subID), bID, 28712)
+	if gone.Available || gone.Reason != "inbound_gone" {
+		t.Errorf("stale row = %+v, want available=false reason=inbound_gone", gone)
+	}
+	if !gone.Selected {
+		t.Errorf("the binding was dropped instead of reported: %+v", gone)
+	}
+	// The surviving inbound is still served, and the gone one is not: one
+	// outbound, at the port the probe actually declares.
+	if got := outboundCount(t, srv, token); got != 1 {
+		t.Fatalf("outbound count = %d, want 1", got)
+	}
+	if body := string(fetchSub(t, srv, token, "", "").Body); !strings.Contains(body, `"server_port": 28711`) {
+		t.Errorf("the wrong inbound survived:\n%s", body)
+	}
+}
+
+// TestPortMoveCarriesSubscriptionEntries: moving a listener's port in the editor
+// must not silently drop the node from every subscription that bound it. The
+// rows follow the move (name included), and the transient window — the probe
+// still serving the old port until it applies the document — is reported as
+// inbound_gone rather than rendering a port that is about to disappear.
+func TestPortMoveCarriesSubscriptionEntries(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{
+		28711: testCertPEM, 28712: testCertPEM,
+	})
+	subID, token := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28711, Alias: "东京", Selected: true},
+		{NodeID: bID, SrcPort: 28712, Selected: false},
+	})
+
+	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+bID+"/singbox/config", cookie,
+		map[string]any{
+			"reported_hash": "hash-" + bID, // seedDiscoveredConfig's stored hash
+			"update": []map[string]any{
+				{"number": 0, "type": "anytls", "tag": "anytls-28711", "port": 28811},
+			},
+		})
+	if r.Status != http.StatusOK {
+		t.Fatalf("port move: %d %s", r.Status, r.Body)
+	}
+
+	moved := directEntryAt(t, listEntries(t, srv, cookie, subID), bID, 28811)
+	if !moved.Selected || moved.Alias != "东京" {
+		t.Errorf("the binding did not follow the move: %+v", moved)
+	}
+	// The probe has not applied the document yet: the new port is not served, so
+	// the row says so instead of pretending.
+	if moved.Available || moved.Reason != "inbound_gone" {
+		t.Errorf("row before the report = %+v, want available=false reason=inbound_gone", moved)
+	}
+
+	// The agent applies it and reports the new file (with the certificate for
+	// the new listener, which is what makes pinning possible).
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"anytls","tag":"anytls-28811","listen_port":28811,"users":[{"password":"pw-a"}]},
+		{"type":"anytls","tag":"anytls-28712","listen_port":28712,"users":[{"password":"pw-b"}]}
+	]}`, map[int]string{28811: testCertPEM, 28712: testCertPEM})
+
+	moved = directEntryAt(t, listEntries(t, srv, cookie, subID), bID, 28811)
+	if !moved.Selected || !moved.Available {
+		t.Fatalf("row after the report = %+v, want bound and available", moved)
+	}
+	if moved.AutoName != "B:28811" {
+		t.Errorf("auto name = %q, want B:28811", moved.AutoName)
+	}
+	body := string(fetchSub(t, srv, token, "", "").Body)
+	if !strings.Contains(body, "fobe-东京") || !strings.Contains(body, `"server_port": 28811`) {
+		t.Errorf("the moved inbound is not rendered at its new port:\n%s", body)
+	}
+}

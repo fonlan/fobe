@@ -305,7 +305,11 @@ export interface SubscriptionRow {
  * One §10.2 subscription entry (GET /api/subscriptions/{id}/entries): a target
  * node reached either directly or through a relay's nftables DNAT. The identity
  * is (node_id, relay_node_id, proto, src_port, iface); relay_node_id === ''
- * means the node's own inbound.
+ * means one of the node's own inbounds.
+ *
+ * Since §9.3/§10.2 实现修订 2026-09-18 a direct entry names a single *inbound*
+ * by its port, so a server running two anytls listeners is two rows — and two
+ * outbounds — each one nameable on its own.
  */
 export interface SubscriptionEntry {
   node_id: string;
@@ -313,9 +317,13 @@ export interface SubscriptionEntry {
   /** '' = direct ingress, otherwise the relay node's id. */
   relay_node_id: string;
   relay_name: string;
-  /** 'tcp' for relayed entries (the derived rule's protocol). */
+  /** 'tcp' for relayed entries (the derived rule's protocol); '' when direct. */
   proto: string;
-  /** The relay's forwarding source port; 0 for direct entries. */
+  /**
+   * The port the client dials: the node's own inbound port for a direct entry,
+   * the relay's forwarding source port for a relayed one. 0 = a legacy
+   * node-level row (the whole node, which the server splits by itself).
+   */
   src_port: number;
   iface: string;
   /** The name the renderer derives when `alias` is empty. */
@@ -326,7 +334,7 @@ export interface SubscriptionEntry {
   selected: boolean;
   /** false = listed right now, but it would render nothing. */
   available: boolean;
-  /** Why available is false: not_ready | relay_not_ready | relay_gone. */
+  /** Why available is false: not_ready | relay_not_ready | relay_gone | inbound_gone. */
   reason: string;
   /** Non-fatal code, currently only `shadowed` (§21.9). */
   warning: string;

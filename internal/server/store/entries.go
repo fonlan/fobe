@@ -13,9 +13,17 @@ import (
 )
 
 // SubscriptionEntry is one bound ingress of one subscription. The tuple
-// (NodeID, RelayNodeID, Proto, SrcPort, Iface) is the identity; Proto/SrcPort/
-// Iface mirror the §21 rule identity so "the same entry" survives a ruleset
-// reload (handles are renumbered, tuples are not).
+// (NodeID, RelayNodeID, Proto, SrcPort, Iface) is the identity; for a relayed
+// entry Proto/SrcPort/Iface mirror the §21 rule identity so "the same entry"
+// survives a ruleset reload (handles are renumbered, tuples are not).
+//
+// For a direct entry (RelayNodeID=="") SrcPort is the *dial port* of one of the
+// node's own inbounds (§9.3/§10.2 实现修订 2026-09-18): a node with two anytls
+// inbounds has two direct entries, and clients reach them on their own ports.
+// Proto/Iface stay empty there — a direct entry has no nftables rule to mirror.
+// src_port=0 is the legacy node-level row ("every inbound of this node"),
+// written by the old picker and by the legacy node_ids API; the reconciler
+// rewrites those into per-port rows as soon as the node's inbounds are known.
 type SubscriptionEntry struct {
 	SubscriptionID string
 	NodeID         string
@@ -214,6 +222,139 @@ func (s *Store) RestoreSubscriptionEntries(subID string, entries []SubscriptionE
 		return err
 	}
 	return tx.Commit()
+}
+
+// SplitSubscriptionDirectEntry rewrites one legacy node-level direct row
+// (src_port=0: "every inbound of this node") into one row per dial port
+// (§9.3/§10.2 实现修订 2026-09-18). Alias and Enabled are carried onto every new
+// row: a tombstone stays a tombstone, and an explicit name stays the
+// operator's name — an aliased node-level entry rendered `name`/`name-2`
+// duplicates before the split and still does, because the picker now offers the
+// per-inbound rows the operator can name apart.
+//
+// Returns true when a row was actually replaced. An empty `ports` is a no-op:
+// there is nothing to split into, and deleting the row would drop the binding
+// (the node has not reported its inbounds yet — the caller retries later).
+func (s *Store) SplitSubscriptionDirectEntry(subID, nodeID, alias string, enabled bool, ports []int) (bool, error) {
+	if len(ports) == 0 {
+		return false, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	// Only one row can match (it is the primary key with proto/port/iface empty),
+	// but the delete names every identity column so a row that a concurrent
+	// writer already split is not touched twice.
+	res, err := tx.Exec(`DELETE FROM subscription_entries
+		WHERE subscription_id = ? AND node_id = ? AND relay_node_id = '' AND proto = ''
+			AND src_port = 0 AND iface = ''`, subID, nodeID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n == 0 {
+		return false, nil // already split (or never bound): nothing to do
+	}
+	for _, port := range ports {
+		// DO NOTHING, not DO UPDATE: a per-port row that already exists carries
+		// the operator's own alias/enabled state for that inbound and must win.
+		if _, err := tx.Exec(`INSERT INTO subscription_entries
+				(subscription_id, node_id, relay_node_id, proto, src_port, iface, alias, enabled)
+			VALUES (?, ?, '', '', ?, '', ?, ?)
+			ON CONFLICT (subscription_id, node_id, relay_node_id, proto, src_port, iface) DO NOTHING`,
+			subID, nodeID, port, alias, enabled); err != nil {
+			return false, err
+		}
+	}
+	if err := mirrorDirectNodes(tx, subID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// MoveSubscriptionDirectEntryPorts follows one inbound's port change across
+// every subscription: bound direct rows of nodeID at `from` are rewritten to
+// `to`, alias and enabled state included. Returns how many rows moved.
+//
+// It exists because a direct entry names one inbound *by port* (§9.3/§10.2 实现
+// 修订 2026-09-18): without it, changing a listener's port in the editor would
+// leave every subscription pointing at a port the probe no longer serves, and
+// clients would silently lose the node until an operator re-checked the new
+// port. That is the one behaviour the node-level entry used to provide by
+// accident, and it has to survive the split — the port is the panel's business
+// while it is the one moving it.
+//
+// A row that already exists at `to` wins: the operator got there first (or an
+// earlier move did), and overwriting it would clobber a name he typed. The
+// stale row at `from` is dropped in that case instead of being left dangling.
+func (s *Store) MoveSubscriptionDirectEntryPorts(nodeID string, from, to int) (int, error) {
+	if from <= 0 || to <= 0 || from == to {
+		return 0, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	subs := []string{}
+	rows, err := tx.Query(`SELECT DISTINCT subscription_id FROM subscription_entries
+		WHERE node_id = ? AND relay_node_id = '' AND (src_port = ? OR src_port = ?)`, nodeID, from, to)
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		subs = append(subs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(subs) == 0 {
+		return 0, nil
+	}
+
+	res, err := tx.Exec(`UPDATE subscription_entries SET src_port = ?
+		WHERE node_id = ? AND relay_node_id = '' AND proto = '' AND iface = '' AND src_port = ?
+			AND NOT EXISTS (SELECT 1 FROM subscription_entries x
+				WHERE x.subscription_id = subscription_entries.subscription_id
+					AND x.node_id = subscription_entries.node_id
+					AND x.relay_node_id = '' AND x.src_port = ?)`, to, nodeID, from, to)
+	if err != nil {
+		return 0, err
+	}
+	moved, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM subscription_entries
+		WHERE node_id = ? AND relay_node_id = '' AND proto = '' AND iface = '' AND src_port = ?`,
+		nodeID, from); err != nil {
+		return 0, err
+	}
+	for _, subID := range subs {
+		if err := mirrorDirectNodes(tx, subID); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(moved), nil
 }
 
 // InsertSubscriptionEntryIfAbsent auto-enrols one §10.2 relay candidate. It

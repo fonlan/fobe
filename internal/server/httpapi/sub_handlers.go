@@ -793,9 +793,11 @@ func subRenderable(node *store.Node, sb *store.NodeSingbox) bool {
 
 // subscriptionNodes assembles the renderable proxies for a subscription
 // (design §10.2): every *enabled entry* becomes one anytls outbound. A direct
-// entry dials the node's own inbound; a relayed entry dials the relay's primary
-// IP and the src port of its DNAT rule — while the pinned certificate still
-// belongs to the *target*, because DNAT is layer 4 and TLS terminates on B
+// entry dials one of the node's own inbounds — identified by its port, so a
+// probe with two anytls listeners yields two outbounds and neither of them is
+// "the node" (§9.3/§10.2 实现修订 2026-09-18); a relayed entry dials the relay's
+// primary IP and the src port of its DNAT rule — while the pinned certificate
+// still belongs to the *target*, because DNAT is layer 4 and TLS terminates on B
 // exactly as it would if the client dialled B directly.
 func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode {
 	entries, err := s.Store.SubscriptionEntries(sub.ID)
@@ -804,55 +806,58 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 	}
 	format := s.relayNameFormat()
 	nodes := make([]singbox.ProxyNode, 0, len(entries))
+	// Read once per node, not once per entry: an entry now names a single
+	// inbound, so a node with several of them is several entries — and they all
+	// answer from the same reported file.
+	ctxs := map[string]*subNodeCtx{}
 	for _, e := range entries {
 		if !e.Enabled {
 			continue // tombstone (§10.2): unbound, kept so reconcile cannot re-add it
 		}
-		target, err := s.Store.GetNode(e.NodeID)
-		if err != nil {
-			continue
+		ctx := ctxs[e.NodeID]
+		if ctx == nil {
+			ctx = s.subNodeCtx(e.NodeID)
+			ctxs[e.NodeID] = ctx
 		}
-		sb, err := s.Store.GetNodeSingbox(e.NodeID)
-		if err != nil {
-			continue
+		if ctx.target == nil || ctx.sb == nil {
+			continue // node (or its sing-box row) is gone: nothing to render
 		}
-		name := entryBaseName(target)
-
-		// §9.3 实现修订 2026-09-17b (editor model): the probe's config.json is
-		// the source of truth, so the payload is rendered from the file the
-		// probe last reported. A `jq`-appended inbound therefore shows up here
-		// without any adoption step, and the panel's own inbound keeps its
-		// reported certificate for pinning.
-		live, _ := s.liveNodesFor(e.NodeID, name, target.PrimaryIP)
-		if len(live) == 0 {
-			// No report yet (an install in flight, an agent that predates the
-			// field, or a row written before the editor model): fall back to
-			// the managed pair so a fresh node still appears as soon as it has
-			// a port and a certificate. The credential still comes from the
-			// node's own config (§10.1 实现修订 2026-09-17e) — rendering is not a
-			// place that mints, and a node with no readable credential is
-			// skipped instead of served with an empty password (a client would
-			// import an outbound that can never authenticate).
-			password := s.nodeProxyPassword(e.NodeID, sb.Port)
-			if !subRenderable(target, sb) || password == "" {
-				continue
-			}
-			live = []singbox.ProxyNode{{
-				ID: e.NodeID, Name: name, Server: target.PrimaryIP, Port: sb.Port,
-				Password: password, CertPEM: sb.CertPEM,
-			}}
-		}
+		target := ctx.target
 
 		if e.RelayNodeID == "" {
-			if e.Alias != "" {
-				// One entry can carry several inbounds: every proxy takes the
-				// alias, and the renderers dedupe repeats with "#2"/"-2"
-				// (2026-09-17j removed the type:port suffix).
-				for i := range live {
-					live[i].Name = e.Alias
-				}
+			// A direct entry names one inbound. src_port=0 is the legacy
+			// node-level row, which still means "every inbound of this node"
+			// until the reconciler splits it (splitNodeLevelDirectEntries) —
+			// dropping it here would silently empty a subscription whose probe
+			// has not reported yet.
+			proxies := ctx.inbounds(s, e.NodeID)
+			if e.SrcPort > 0 {
+				proxies = proxiesAtPort(proxies, e.SrcPort)
 			}
-			nodes = append(nodes, live...)
+			if len(proxies) == 0 {
+				// Either the node has nothing dialable, or this entry names a
+				// listener the probe's file no longer declares. The second case
+				// renders nothing on purpose: once a file exists it is the truth
+				// (§9.3 实现修订 2026-09-17b), and rendering the managed pair
+				// anyway would hand clients a port the probe no longer serves.
+				// The picker marks exactly those rows `inbound_gone`.
+				continue
+			}
+			name := entryBaseName(target)
+			if e.Alias != "" {
+				// An explicit alias is verbatim (2026-09-17j): the operator's
+				// name wins over the port suffix, and a node whose inbounds all
+				// carry the same alias still renders "#2"/"-2" duplicates. The
+				// picker now lists those inbounds as separate rows, so naming
+				// them apart is one edit per row.
+				name = e.Alias
+			} else {
+				name = directEntryName(name, ctx.ports, e.SrcPort)
+			}
+			for i := range proxies {
+				proxies[i].Name = name
+			}
+			nodes = append(nodes, proxies...)
 			continue
 		}
 
@@ -867,11 +872,11 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 		if err != nil || relay.PrimaryIP == "" {
 			continue // the relay leg is gone (rule deleted / node removed)
 		}
-		relayed := s.relayedInbound(e, target, live)
+		relayed := s.relayedInbound(e, target, ctx.inbounds(s, e.NodeID))
 		if relayed == nil {
 			continue // no anytls inbound on the target: nothing to reach through A
 		}
-		name = relayAutoName(format, target, relay, e)
+		name := relayAutoName(format, target, relay, e)
 		if e.Alias != "" {
 			name = e.Alias
 		}
@@ -881,6 +886,64 @@ func (s *Server) subscriptionNodes(sub *store.Subscription) []singbox.ProxyNode 
 		})
 	}
 	return nodes
+}
+
+// subNodeCtx is one node's rendering inputs, resolved once per render.
+type subNodeCtx struct {
+	target *store.Node
+	sb     *store.NodeSingbox
+	// live is the rendered inbound list of the reported file, exactly what the
+	// picker's availability is computed from — one source for both, which is
+	// what stops "the panel offers it" and "the client gets it" from drifting.
+	live  []singbox.ProxyNode
+	ports []int
+}
+
+// subNodeCtx loads a node's rendering inputs. A nil target or sb means the row
+// cannot be rendered at all (the node was deleted, or it never had a sing-box
+// row), which the caller treats as "skip".
+func (s *Server) subNodeCtx(nodeID string) *subNodeCtx {
+	ctx := &subNodeCtx{}
+	if target, err := s.Store.GetNode(nodeID); err == nil {
+		ctx.target = target
+	}
+	if sb, err := s.Store.GetNodeSingbox(nodeID); err == nil {
+		ctx.sb = sb
+	}
+	if ctx.target != nil {
+		// The name is applied per entry below: with several inbounds on one
+		// node, each entry carries its own name.
+		ctx.live, _ = s.liveNodesFor(nodeID, "", ctx.target.PrimaryIP)
+		ctx.ports = nodeIngressPorts(ctx.live, ctx.sb)
+	}
+	return ctx
+}
+
+// inbounds is the node's dialable inbound list, standing in the managed
+// port/certificate pair while no report has arrived. Both halves of a
+// subscription render from it — a direct entry narrows it to one port, a relay
+// leg terminates on one of its anytls listeners — and the picker answers
+// availability from the same list, so "offered" and "rendered" cannot drift.
+//
+// The fallback credential still comes from the node's own config (§10.1 实现
+// 修订 2026-09-17e): rendering is not a place that mints, and a node with no
+// readable credential is skipped instead of served with an empty password (a
+// client would import an outbound that can never authenticate).
+func (ctx *subNodeCtx) inbounds(s *Server, nodeID string) []singbox.ProxyNode {
+	if len(ctx.live) > 0 {
+		return ctx.live
+	}
+	if ctx.target == nil || ctx.sb == nil || !subRenderable(ctx.target, ctx.sb) {
+		return nil
+	}
+	password := s.nodeProxyPassword(nodeID, ctx.sb.Port)
+	if password == "" {
+		return nil
+	}
+	return []singbox.ProxyNode{{
+		ID: nodeID, Server: ctx.target.PrimaryIP, Port: ctx.sb.Port,
+		Password: password, CertPEM: ctx.sb.CertPEM,
+	}}
 }
 
 // relayedInbound picks the anytls outbound a relay leg terminates on. The

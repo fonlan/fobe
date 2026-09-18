@@ -137,6 +137,142 @@ func TestSetSubscriptionDirectNodesKeepsRelayRowsAndAliases(t *testing.T) {
 	}
 }
 
+// TestSplitSubscriptionDirectEntry: the legacy node-level direct row (src_port
+// 0, "every inbound of this node") becomes one row per inbound, and the
+// operator's alias/enabled state travels with it — that is what keeps an
+// upgraded panel from rendering a node twice.
+func TestSplitSubscriptionDirectEntry(t *testing.T) {
+	st, _ := openTemp(t)
+	if err := st.CreateSubscription("sub1", "main", "hash1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateNode(&Node{ID: "b", Name: "B", MachineID: "mb"}, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSubscriptionEntries("sub1", []SubscriptionEntry{
+		{NodeID: "b", Alias: "东京", Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An empty port list is a no-op: there is nothing to split into, and
+	// deleting the row would drop the binding.
+	if ok, err := st.SplitSubscriptionDirectEntry("sub1", "b", "东京", true, nil); err != nil || ok {
+		t.Fatalf("split with no ports: ok=%v err=%v", ok, err)
+	}
+	if got, _ := st.SubscriptionEntries("sub1"); len(got) != 1 || got[0].SrcPort != 0 {
+		t.Fatalf("row disappeared on a no-op split: %+v", got)
+	}
+
+	ok, err := st.SplitSubscriptionDirectEntry("sub1", "b", "东京", true, []int{8443, 8444})
+	if err != nil || !ok {
+		t.Fatalf("split: ok=%v err=%v", ok, err)
+	}
+	got, _ := st.SubscriptionEntries("sub1")
+	if len(got) != 2 {
+		t.Fatalf("entries = %+v, want two per-port rows", got)
+	}
+	for i, want := range []int{8443, 8444} {
+		if got[i].NodeID != "b" || got[i].SrcPort != want || got[i].Alias != "东京" || !got[i].Enabled {
+			t.Errorf("row %d = %+v, want node b port %d alias 东京 enabled", i, got[i], want)
+		}
+	}
+	// Idempotent: the node-level row is gone, so a second pass has nothing to do
+	// (a concurrent trigger may have got there first).
+	if ok, err = st.SplitSubscriptionDirectEntry("sub1", "b", "东京", true, []int{8443, 8444}); err != nil || ok {
+		t.Fatalf("second split was not a no-op: ok=%v err=%v", ok, err)
+	}
+	// A per-port row that already exists keeps its own alias/enabled state: the
+	// operator's name for that inbound wins over the one carried by the
+	// node-level row (the legacy node_ids API can have written both).
+	if err := st.SetSubscriptionEntries("sub1", []SubscriptionEntry{
+		{NodeID: "b", Alias: "东京", Enabled: true},
+		{NodeID: "b", SrcPort: 8444, Alias: "备用", Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err = st.SplitSubscriptionDirectEntry("sub1", "b", "东京", true, []int{8443, 8444}); err != nil || !ok {
+		t.Fatalf("split beside an existing row: ok=%v err=%v", ok, err)
+	}
+	got, _ = st.SubscriptionEntries("sub1")
+	byPort := map[int]SubscriptionEntry{}
+	for _, e := range got {
+		byPort[e.SrcPort] = e
+	}
+	if len(got) != 2 || byPort[8443].Alias != "东京" || byPort[8444].Alias != "备用" {
+		t.Fatalf("split clobbered an existing per-port row: %+v", got)
+	}
+	// A tombstone splits too: the operator's "off" survives the upgrade instead
+	// of coming back as an unchecked candidate in the picker. Opting out has to
+	// start from a bound row — a never-bound entry stays absent by design.
+	if err := st.SetSubscriptionDirectNodes("sub1", []string{"b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSubscriptionEntries("sub1", []SubscriptionEntry{
+		{NodeID: "b", Enabled: false},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _ := st.SubscriptionEntries("sub1"); len(rows) != 1 || rows[0].SrcPort != 0 || rows[0].Enabled {
+		t.Fatalf("precondition: want a node-level tombstone, got %+v", rows)
+	}
+	if ok, err = st.SplitSubscriptionDirectEntry("sub1", "b", "", false, []int{8443, 8444}); err != nil || !ok {
+		t.Fatalf("split a tombstone: ok=%v err=%v", ok, err)
+	}
+	got, _ = st.SubscriptionEntries("sub1")
+	if len(got) != 2 || got[0].Enabled || got[1].Enabled {
+		t.Fatalf("the tombstone did not survive the split: %+v", got)
+	}
+}
+
+// TestMoveSubscriptionDirectEntryPorts: a port the panel itself moved carries
+// the subscription bindings with it, names included.
+func TestMoveSubscriptionDirectEntryPorts(t *testing.T) {
+	st, _ := openTemp(t)
+	if err := st.CreateSubscription("sub1", "main", "hash1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateNode(&Node{ID: "b", Name: "B", MachineID: "mb"}, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSubscriptionEntries("sub1", []SubscriptionEntry{
+		{NodeID: "b", SrcPort: 8443, Alias: "东京", Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.MoveSubscriptionDirectEntryPorts("b", 8443, 8443); err != nil || n != 0 {
+		t.Fatalf("a move to the same port is a no-op: n=%d err=%v", n, err)
+	}
+	n, err := st.MoveSubscriptionDirectEntryPorts("b", 8443, 9443)
+	if err != nil || n != 1 {
+		t.Fatalf("move: n=%d err=%v", n, err)
+	}
+	got, _ := st.SubscriptionEntries("sub1")
+	if len(got) != 1 || got[0].SrcPort != 9443 || got[0].Alias != "东京" {
+		t.Fatalf("entries = %+v, want the alias to travel to 9443", got)
+	}
+	// A row that already exists at the destination wins; the stale source row is
+	// dropped rather than left dangling.
+	if err := st.SetSubscriptionEntries("sub1", []SubscriptionEntry{
+		{NodeID: "b", SrcPort: 9443, Alias: "备用", Enabled: true},
+		{NodeID: "b", SrcPort: 9444, Alias: "旧", Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err = st.MoveSubscriptionDirectEntryPorts("b", 9444, 9443); err != nil || n != 0 {
+		t.Fatalf("move onto an existing row: n=%d err=%v", n, err)
+	}
+	got, _ = st.SubscriptionEntries("sub1")
+	if len(got) != 1 || got[0].Alias != "备用" {
+		t.Fatalf("the destination row was clobbered: %+v", got)
+	}
+	// The legacy projection follows too: it is rebuilt from the moved rows.
+	ids, _ := st.SubscriptionNodeIDs("sub1")
+	if len(ids) != 1 || ids[0] != "b" {
+		t.Fatalf("legacy projection = %v, want [b]", ids)
+	}
+}
+
 // TestEntriesMigrationFromPreEntriesDatabase: a v9 file has neither the table
 // nor nodes.sub_name, and opening it must add both without touching rows.
 func TestEntriesMigrationFromPreEntriesDatabase(t *testing.T) {

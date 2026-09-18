@@ -403,6 +403,7 @@ const ENTRY_REASON_KEYS: Record<string, string> = {
   not_ready: 'sub_entry_reason_not_ready',
   relay_not_ready: 'sub_entry_reason_relay_not_ready',
   relay_gone: 'sub_entry_reason_relay_gone',
+  inbound_gone: 'sub_entry_reason_inbound_gone',
 };
 
 /** Panel-written booleans use the on/off spelling; unset (empty) means on. */
@@ -527,7 +528,14 @@ function EntryPicker({
         <td className="nowrap">{e.node_name || e.node_id}</td>
         <td className="nowrap">
           {e.relay_node_id === '' ? (
-            <span className="chip">{t('sub_entry_direct')}</span>
+            <>
+              <span className="chip">{t('sub_entry_direct')}</span>
+              {/* Which of the node's inbounds this row is: the port is the
+                  identity since 2026-09-18, so it belongs in the ingress cell
+                  and not only in the derived name (a legacy node-level row has
+                  none yet, and then there is nothing to show). */}
+              {e.src_port > 0 && <span className="mono"> :{e.src_port}</span>}
+            </>
           ) : (
             t('sub_entry_via', { relay: e.relay_name || e.relay_node_id, port: e.src_port })
           )}

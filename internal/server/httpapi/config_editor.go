@@ -168,6 +168,48 @@ func (s *Server) liveAnytlsPorts(nodeID string, sb *store.NodeSingbox) []int {
 	return out
 }
 
+// nodeIngressPorts lists the ports a client dials to reach *this node's own*
+// inbounds — one per renderable inbound of the reported file, or the managed
+// port/certificate pair while no report has arrived yet. It is the port half of
+// a direct §10.2 entry (2026-09-18 实现修订): a node with two anytls inbounds
+// yields two ports, hence two separately selectable entries.
+//
+// Unlike liveAnytlsPorts this is not filtered by protocol: an adopted VLESS or
+// shadowsocks inbound is just as dialable, and §10's picker rule ("list what
+// would appear in the output") is applied to the renderer's own output rather
+// than guessed at here. Empty means the node has nothing dialable, which is
+// exactly when the picker falls back to the legacy node-level row.
+func nodeIngressPorts(live []singbox.ProxyNode, sb *store.NodeSingbox) []int {
+	seen := map[int]bool{}
+	out := make([]int, 0, len(live))
+	for _, n := range live {
+		if n.Port > 0 && !seen[n.Port] {
+			seen[n.Port] = true
+			out = append(out, n.Port)
+		}
+	}
+	// The same fallback the renderer uses before the first report: the managed
+	// pair stands in for a file the panel has not seen yet.
+	if len(out) == 0 && sb != nil && sb.Port > 0 && sb.CertPEM != "" {
+		out = append(out, sb.Port)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// proxiesAtPort narrows a node's renderable inbounds to the one a direct entry
+// names. A copy, never a reslice: the caller renames what it gets, and the
+// per-node list is shared by every entry of that node.
+func proxiesAtPort(live []singbox.ProxyNode, port int) []singbox.ProxyNode {
+	out := make([]singbox.ProxyNode, 0, 1)
+	for _, n := range live {
+		if n.Port == port {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // --- editing ---
 
 // inboundView is one editable inbound as the panel sees it. `credential` is
@@ -471,6 +513,9 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 		rowsByPort[row.Port] = row
 	}
 	var intents []configIntent
+	// Subscription rows that followed a port move: audited below, once the push
+	// has actually gone out (an undone intent is not an event).
+	movedEntries := 0
 	for _, add := range req.Add {
 		port := add.Port
 		intents = append(intents, configIntent{
@@ -537,6 +582,25 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 				return s.Store.DeleteNodeSingboxInbound(id, move.from)
 			},
 		})
+		// The subscription bindings move with the listener (§9.3/§10.2 实现修订
+		// 2026-09-18): a direct entry names one port, so leaving the rows behind
+		// would drop the node from every subscription that had bound it — the
+		// exact thing the old node-level entry got right by accident. Bound
+		// per-port rows are rewritten, tombstones included; a name the operator
+		// typed on the row travels with it.
+		intents = append(intents, configIntent{
+			apply: func() error {
+				n, err := s.Store.MoveSubscriptionDirectEntryPorts(id, move.from, move.to)
+				if err == nil {
+					movedEntries += n
+				}
+				return err
+			},
+			undo: func() error {
+				_, err := s.Store.MoveSubscriptionDirectEntryPorts(id, move.to, move.from)
+				return err
+			},
+		})
 	}
 	// An edit that keeps a port an earlier edit retired cancels that removal:
 	// the document the panel is about to push serves it again. The row must go
@@ -583,6 +647,21 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 		Command:  fmt.Sprintf("add:%d update:%d delete:%d", len(req.Add), len(req.Update), len(req.Delete)),
 		SourceIP: s.Trust.RealIP(r),
 	})
+	// Worth its own line: it changes the outbounds clients fetch without the
+	// operator touching the subscription page. One line for the whole edit —
+	// the moves themselves are already in the config_edit audit above.
+	if movedEntries > 0 {
+		parts := make([]string, 0, len(moves))
+		for _, move := range moves {
+			parts = append(parts, fmt.Sprintf("%d->%d", move.from, move.to))
+		}
+		s.Store.InsertAudit(&store.AuditEntry{
+			Actor: "panel", NodeID: id, Action: "subscription_entry_port_move",
+			Command:  fmt.Sprintf("%s (%d entries)", strings.Join(parts, ","), movedEntries),
+			SourceIP: s.Trust.RealIP(r),
+		})
+		s.publishEvent("subscriptions_changed", "")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "inbounds": len(inbounds)})
 }
 

@@ -212,11 +212,18 @@ CREATE TABLE IF NOT EXISTS subscription_nodes (
 );
 
 -- §10.2 entries: the unit a subscription binds is (target node, ingress) —
--- relay_node_id='' is the node's own inbound, otherwise the target is reachable
--- through that node's nftables DNAT rule. proto/src_port/iface mirror the §21
--- rule identity; '' (never NULL) keeps the composite key deduplicating, since
--- SQLite unique indexes treat NULLs as distinct. enabled=0 is a *tombstone*:
--- the operator unchecked it, and the reconciler must not add it back.
+-- relay_node_id='' is *one of the node's own inbounds*, otherwise the target is
+-- reachable through that node's nftables DNAT rule. proto/src_port/iface mirror
+-- the §21 rule identity for a relayed entry; for a direct entry src_port is the
+-- dial port of that inbound and proto/iface stay '' (§9.3/§10.2 实现修订
+-- 2026-09-18: a node with two inbounds has two direct rows, which is what makes
+-- them separately selectable and separately nameable). src_port=0 is the legacy
+-- node-level row ("every inbound of this node"), written before that revision
+-- and by the legacy node_ids API; the reconciler splits it into per-port rows
+-- once the node's inbounds are known. '' (never NULL) keeps the composite key
+-- deduplicating, since SQLite unique indexes treat NULLs as distinct. enabled=0
+-- is a *tombstone*: the operator unchecked it, and the reconciler must not add
+-- it back.
 CREATE TABLE IF NOT EXISTS subscription_entries (
     subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
     node_id         TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,

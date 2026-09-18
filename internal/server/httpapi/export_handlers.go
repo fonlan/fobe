@@ -292,6 +292,12 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// A restored snapshot may carry per-inbound entries (§10.2 实现修订
+	// 2026-09-18) next to rows this panel has not split yet (a node that never
+	// reported its inbounds); without a reconcile both would render and the node
+	// would appear twice. The same pass also enrols relay entries, which is what
+	// a restart would have done anyway.
+	s.ReconcileSubscriptionEntries()
 	detail, _ := json.Marshal(stats)
 	s.audit("data_imported", string(detail), s.Trust.RealIP(r))
 	s.publishEvent("data_imported", "")

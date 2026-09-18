@@ -49,6 +49,25 @@ func entryBaseName(n *store.Node) string {
 	return n.ID
 }
 
+// directEntryName names one inbound of a node (§9.3/§10.2 实现修订 2026-09-18).
+//
+// The port is appended only when the node serves more than one inbound, i.e.
+// only when it carries information: 2026-09-17j removed the unconditional
+// `协议:端口` suffix because it made `nodes.sub_name` look like it did not
+// apply, and a single-inbound node — most of them — must keep rendering the
+// plain name. With two inbounds the alternative is worse than a suffix: both
+// outbounds would carry the same name and only the renderer's `-2`/`#2` fallback
+// would tell them apart, which says nothing about which inbound is which.
+//
+// `port` <= 0 is the legacy node-level entry ("every inbound of this node"),
+// which keeps the plain name exactly as it did before the split.
+func directEntryName(base string, ports []int, port int) string {
+	if port <= 0 || len(ports) < 2 {
+		return base
+	}
+	return base + ":" + strconv.Itoa(port)
+}
+
 // relayAutoName expands the configured template. strings.NewReplacer does a
 // single pass, so a node literally named "{port}" cannot re-trigger expansion.
 func relayAutoName(format string, target, relay *store.Node, e store.SubscriptionEntry) string {
@@ -179,8 +198,13 @@ func (s *Server) relayCandidates(target *store.Node, sb *store.NodeSingbox) []re
 // directEntryShadowed reports whether the node's own inbound is unreachable
 // because one of its own DNAT rules steals the port in prerouting (§21.9).
 // Reported, never enforced: the port is the probe's fact, not the panel's call.
-func (s *Server) directEntryShadowed(node *store.Node, sb *store.NodeSingbox) bool {
-	ports := s.liveAnytlsPorts(node.ID, sb)
+// `port` is the entry's dial port; 0 (the legacy node-level row) asks about
+// every ingress the node has.
+func (s *Server) directEntryShadowed(node *store.Node, sb *store.NodeSingbox, port int) bool {
+	ports := []int{port}
+	if port <= 0 {
+		ports = s.liveAnytlsPorts(node.ID, sb)
+	}
 	if len(ports) == 0 {
 		return false
 	}
@@ -194,8 +218,8 @@ func (s *Server) directEntryShadowed(node *store.Node, sb *store.NodeSingbox) bo
 			stolen[r.SrcPort] = true
 		}
 	}
-	for _, port := range ports {
-		if stolen[port] {
+	for _, p := range ports {
+		if stolen[p] {
 			return true
 		}
 	}
@@ -210,8 +234,11 @@ type subEntryView struct {
 	RelayNodeID string `json:"relay_node_id,omitempty"`
 	RelayName   string `json:"relay_name,omitempty"`
 	Proto       string `json:"proto,omitempty"`
-	SrcPort     int    `json:"src_port,omitempty"`
-	Iface       string `json:"iface,omitempty"`
+	// SrcPort is the port the client dials: the node's own inbound port for a
+	// direct entry (§9.3/§10.2 实现修订 2026-09-18), the relay's forward source
+	// port for a relayed one. 0 = the legacy node-level direct row.
+	SrcPort int    `json:"src_port,omitempty"`
+	Iface   string `json:"iface,omitempty"`
 	// AutoName is what the renderer will use when Alias is empty.
 	AutoName string `json:"auto_name"`
 	Alias    string `json:"alias"`
@@ -283,6 +310,10 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 		key := entryKey(e)
 		seen[key] = true
 		direct := e.RelayNodeID == ""
+		// The ports this node's own inbounds are reachable on. Computed from the
+		// same list the renderer uses, so the name the picker promises (with or
+		// without the port) is the name the client will get.
+		ports := nodeIngressPorts(rd.live, sb)
 		v := subEntryView{
 			NodeID: target.ID, NodeName: target.Name,
 			RelayNodeID: e.RelayNodeID, Proto: e.Proto, SrcPort: e.SrcPort, Iface: e.Iface,
@@ -293,7 +324,7 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 		}
 		switch {
 		case direct:
-			v.AutoName = entryBaseName(target)
+			v.AutoName = directEntryName(entryBaseName(target), ports, e.SrcPort)
 		case relay != nil:
 			v.AutoName = relayAutoName(format, target, relay, e)
 		default:
@@ -312,7 +343,13 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 		case !rd.renderable:
 			v.Available, v.Reason = false, "not_ready"
 		case direct:
-			if s.directEntryShadowed(target, sb) {
+			// A direct entry names one inbound, so it is only renderable while
+			// that listener is still in the probe's file. A bound row whose
+			// inbound disappeared stays listed (unbindable, and visibly stale)
+			// instead of being dropped behind the operator's back.
+			if e.SrcPort > 0 && !containsPort(ports, e.SrcPort) {
+				v.Available, v.Reason = false, "inbound_gone"
+			} else if s.directEntryShadowed(target, sb, e.SrcPort) {
 				v.Warning = "shadowed"
 			}
 		case relay == nil, relay.PrimaryIP == "":
@@ -326,15 +363,20 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 	}
 
 	// Only nodes that would actually render are *offered* (§10: "节点多选只列
-	// 能出现在输出里的节点"). A node that is already bound stays listed even
-	// when it is unrenderable right now — the operator must be able to unbind
-	// it without the panel hiding the binding behind their back.
+	// 能出现在输出里的节点"), and per ingress since 2026-09-18: one row per
+	// inbound port, so two anytls listeners on one probe are two entries. A node
+	// already bound stays listed even when it is unrenderable right now — the
+	// operator must be able to unbind it without the panel hiding the binding
+	// behind their back.
 	for i := range nodes {
 		target := &nodes[i]
 		sb, _ := s.Store.GetNodeSingbox(target.ID)
 		rd := s.targetReadinessOf(target, sb)
-		if _, bound := boundByKey[entryKey(store.SubscriptionEntry{NodeID: target.ID})]; bound || rd.renderable {
-			views = append(views, view(target, nil, store.SubscriptionEntry{NodeID: target.ID}, sb, rd, false))
+		for _, port := range directCandidatePorts(rd.live, sb) {
+			e := store.SubscriptionEntry{NodeID: target.ID, SrcPort: port}
+			if _, bound := boundByKey[entryKey(e)]; bound || rd.renderable {
+				views = append(views, view(target, nil, e, sb, rd, false))
+			}
 		}
 		if !rd.renderable {
 			// The landing node of a relay entry is the node the client's TLS
@@ -369,6 +411,99 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 	return views, nil
 }
 
+// directCandidatePorts is what the picker offers for one node: one row per
+// dialable ingress. A node with nothing dialable yields the legacy node-level
+// row (port 0) so it stays bindable — that is also the identity of every direct
+// row written before 2026-09-18, and one the reconciler has not been able to
+// split yet (the probe has not reported its inbounds).
+func directCandidatePorts(live []singbox.ProxyNode, sb *store.NodeSingbox) []int {
+	if ports := nodeIngressPorts(live, sb); len(ports) > 0 {
+		return ports
+	}
+	return []int{0}
+}
+
+// containsPort is a linear scan: a node has a handful of inbounds, and the
+// alternative (a map per row) costs more than it saves.
+func containsPort(ports []int, port int) bool {
+	for _, p := range ports {
+		if p == port {
+			return true
+		}
+	}
+	return false
+}
+
+// splitNodeLevelDirectEntries rewrites this subscription's legacy node-level
+// direct rows (src_port=0, "every inbound of this node") into one row per
+// inbound port (§9.3/§10.2 实现修订 2026-09-18). Without it an upgraded panel
+// would list the old node-level row *and* the new per-inbound candidates, and
+// checking one of the latter would render the node twice.
+//
+// It runs from the same triggers as the relay half and for the same reason
+// (startup, a probe's report, the moment the operator opens the picker): the
+// split needs the node's inbounds, and those only exist once the probe has
+// reported a file or the panel has a managed port/certificate pair. A node in
+// neither state keeps its row — that row renders exactly what it did before,
+// and the next trigger tries again.
+func (s *Server) splitNodeLevelDirectEntries(sub *store.Subscription) int {
+	entries, err := s.Store.SubscriptionEntries(sub.ID)
+	if err != nil {
+		return 0
+	}
+	legacy := map[string]store.SubscriptionEntry{}
+	for _, e := range entries {
+		// Only one row per node can match (proto/port/iface empty is the whole
+		// identity), so a map is not losing anything.
+		if e.RelayNodeID == "" && e.SrcPort == 0 {
+			legacy[e.NodeID] = e
+		}
+	}
+	split := 0
+	for nodeID, row := range legacy {
+		target, err := s.Store.GetNode(nodeID)
+		if err != nil {
+			continue // node deleted: the row went with it (FK cascade)
+		}
+		sb, err := s.Store.GetNodeSingbox(nodeID)
+		if err != nil {
+			sb = nil // never managed: the reported file decides on its own
+		}
+		live, _ := s.liveNodesFor(nodeID, "", target.PrimaryIP)
+		ports := nodeIngressPorts(live, sb)
+		if len(ports) == 0 {
+			continue // nothing dialable yet: the row is still the best answer
+		}
+		ok, err := s.Store.SplitSubscriptionDirectEntry(sub.ID, nodeID, row.Alias, row.Enabled, ports)
+		if err != nil {
+			s.Log.Warn("split node-level subscription entry",
+				"subscription", sub.ID, "node", nodeID, "err", err)
+			continue
+		}
+		if !ok {
+			continue // a concurrent trigger got there first
+		}
+		split++
+		// Audited because it is client-visible: the node's outbounds are now
+		// named per inbound (and a multi-inbound node gains the port suffix).
+		s.Store.InsertAudit(&store.AuditEntry{
+			Actor: "server", NodeID: nodeID, Action: "subscription_entry_split",
+			Command: fmt.Sprintf("direct -> %s", portsList(ports)),
+		})
+		s.publishEvent("subscriptions_changed", sub.ID)
+	}
+	return split
+}
+
+// portsList renders ports for an audit line ("8443,8444").
+func portsList(ports []int) string {
+	out := make([]string, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, strconv.Itoa(p))
+	}
+	return strings.Join(out, ",")
+}
+
 // ReconcileSubscriptionEntries auto-enrols §10.2 relay entries across every
 // subscription. Idempotent and cheap (a handful of indexed reads); called at
 // startup, whenever a probe reports new forwards, and before the panel reads
@@ -391,6 +526,11 @@ func (s *Server) ReconcileSubscriptionEntries() int {
 // argument: a new subscription or a node nobody picked never gains entries by
 // itself, so auto-enrolment can only extend a decision the operator made.
 func (s *Server) reconcileSubscriptionEntries(sub *store.Subscription) int {
+	// Not behind sub.relay_auto_include, and not part of the returned count:
+	// that switch is about relays, while this is a migration of rows the
+	// operator already bound — leaving half of them node-level would make the
+	// picker offer the same node twice.
+	s.splitNodeLevelDirectEntries(sub)
 	// The switch is checked here rather than in the callers: every path that
 	// could enrol an entry (startup, a forwards report, opening the picker) goes
 	// through this function, and one of them forgetting the guard is exactly the
