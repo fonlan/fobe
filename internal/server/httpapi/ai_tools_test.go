@@ -314,3 +314,71 @@ func answerBrowserQueries(t *testing.T, api *Server, sessionID, screen string) {
 	})
 	t.Cleanup(cleanup)
 }
+
+// TestAIToolSchemasAreStrictValidatorSafe pins the wire shape of every tool
+// schema (§12.7 实现修订 2026-09-18e).
+//
+// A tool with no required argument used to serialize as `"required": null`: the
+// variadic `required ...string` stayed a nil slice, and a nil slice inside
+// map[string]any marshals to null rather than being dropped. A strict validator
+// rejects the WHOLE request over it — the operator's gateway answered
+//
+//	400 {"error":{"code":"invalid_request_error","message":
+//	     "Invalid schema for function 'read_terminal': null is not of type \"array\""}}
+//
+// so every turn ended as turn_end=upstream_error and the terminal tool chain
+// never ran a single command. Nothing here could catch that before now: the mock
+// upstream accepts whatever body it is handed, so only an assertion about the
+// schema's own shape can see it.
+func TestAIToolSchemasAreStrictValidatorSafe(t *testing.T) {
+	wantRequired := map[string][]string{
+		aiToolRunShell:     {"command", "reason", "risky"},
+		aiToolSendKeys:     {"data"},
+		aiToolReadTerminal: nil, // the one that broke: no required argument at all
+	}
+	specs := aiToolsSpec()
+	if len(specs) != len(wantRequired) {
+		t.Fatalf("tool count = %d, want %d", len(specs), len(wantRequired))
+	}
+	for _, spec := range specs {
+		name := spec.Function.Name
+		raw, err := json.Marshal(spec.Function.Parameters)
+		if err != nil {
+			t.Fatalf("%s: marshal parameters: %v", name, err)
+		}
+		var params struct {
+			Type       string                    `json:"type"`
+			Properties map[string]map[string]any `json:"properties"`
+			Required   json.RawMessage           `json:"required"`
+		}
+		if err := json.Unmarshal(raw, &params); err != nil {
+			t.Fatalf("%s: unmarshal parameters: %v (%s)", name, err, raw)
+		}
+		if params.Type != "object" {
+			t.Errorf("%s: parameters.type = %q, want object", name, params.Type)
+		}
+		if len(params.Properties) == 0 {
+			t.Errorf("%s: parameters.properties is empty (%s)", name, raw)
+		}
+		want := wantRequired[name]
+		// JSON null is the bug: present as a key, useless as a value.
+		if string(params.Required) == "null" {
+			t.Errorf("%s: parameters.required is null, which a strict upstream 400s the request over (%s)", name, raw)
+			continue
+		}
+		if params.Required == nil { // key omitted — valid, and what we want
+			if want != nil {
+				t.Errorf("%s: required is missing, want %v", name, want)
+			}
+			continue
+		}
+		var got []string
+		if err := json.Unmarshal(params.Required, &got); err != nil {
+			t.Errorf("%s: required must be an array of strings, got %s", name, params.Required)
+			continue
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s: required = %v, want %v", name, got, want)
+		}
+	}
+}

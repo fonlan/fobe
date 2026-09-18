@@ -843,6 +843,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 > - **绑定**：§12.7.5（请求里的活 id → 回写行 + 一次性合成提示）。
 > - **提示词与前端**：§12.7.7 的回显拆除（真实 PTY 自己回显）；系统提示词已按本节重写——旧版那句"没有 queued command id 就不算跑过"在新模型下是**错的**，留着比没有更糟（模型会理直气壮地按它推理）。
 > - **代价上的一条实现注记**：`aiCommandExitCode` / `aiCommandOutput` / `waitAICommand` / `enqueueAICommand` 这一整套"AI 动作经命令队列"的代码已全部删除——AI 侧不再有任何动作排进 `commands` 表，所以留着的失败计数轴（`consecutive_failures`）对这三个工具**不再有输入**，与 §12.3 第 3 条的补注一致。
+> - **实现修订（2026-09-18e：工具 schema 的 `required` 不能是 `null`）**：`aiToolsSpec` 的 `tool(...)` 收 `required ...string`，不传时是 nil 切片，而 `map[string]any{"required": nil}` 会序列化成 **`"required": null`**（不是省略该键）。严格校验的上游因此把**整个请求** 400 掉，真机原话：`Invalid schema for function 'read_terminal': null is not of type "array"`（`hub.fonlan.top`）。**症状极具误导性**：面板上助手"一言不发"、`ai_messages` 里只有 `turn_end=upstream_error`、`audit_logs` 里一条 `ai_terminal_*` 都没有——看起来像"AI 没有权限 / 没有本地执行能力"，其实是请求根本没到模型那里，三个终端工具一次都没被调用过（于是终端上当然什么都没有）。现在 `required` 只在非空时写入。**回归**：`TestAIToolSchemasAreStrictValidatorSafe`——mock upstream 照单全收，任何 schema 形状错误它都看不见，只有对 schema 自身形状的断言能挡住这一类。
 
 **这是能力模型的替换，不是新增几个工具。** 旧 `run_shell` 是 agent 上的一次性 `exec`（`runShell(cmd, cmdTimeout=30s)`）：屏幕上什么都看不见，输出走 tool result 回给模型。新的 `run_shell` 是**往操作员那个可见 PTY 里真的敲键**，`read_terminal` 读的是**同一块屏幕**。前端过去往 xterm 里写的那行 `[AI] $ <命令>` 是**本地伪造**（`onEcho`，纯 `term.write`，不经 PTY）——也就是说"AI 的命令在我的终端里跑"这个假象**此前就已经存在**；这次是把假象变成真的。
 

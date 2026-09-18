@@ -554,16 +554,26 @@ func aiContentArgs(obj map[string]json.RawMessage) map[string]json.RawMessage {
 // prompt repeats the essentials (§12.7).
 func aiToolsSpec() []aiOpenAIToolSpec {
 	tool := func(name, description string, properties map[string]any, required ...string) aiOpenAIToolSpec {
+		parameters := map[string]any{
+			"type":       "object",
+			"properties": properties,
+		}
+		// `required` is OPTIONAL in the schema and must be an ARRAY when present.
+		// Writing it unconditionally put `"required": null` on the wire for every
+		// tool without a required argument (a nil slice marshals to null, it is
+		// not dropped) — and a strict validator rejects the whole request over
+		// it: "Invalid schema for function 'read_terminal': null is not of type
+		// \"array\"". That 400 hit *every* turn, so the assistant looked mute and
+		// the terminal tools never ran at all (§12.7 实现修订 2026-09-18e).
+		if len(required) > 0 {
+			parameters["required"] = required
+		}
 		return aiOpenAIToolSpec{
 			Type: "function",
 			Function: aiOpenAIFunctionSpec{
 				Name:        name,
 				Description: description,
-				Parameters: map[string]any{
-					"type":       "object",
-					"properties": properties,
-					"required":   required,
-				},
+				Parameters:  parameters,
 			},
 		}
 	}
