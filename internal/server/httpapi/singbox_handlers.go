@@ -221,7 +221,6 @@ func (s *Server) handleSingboxInstall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	port := req.Port
 	sb, err := s.Store.GetNodeSingbox(id)
 	if errors.Is(err, store.ErrNotFound) {
 		sb = &store.NodeSingbox{NodeID: id, Status: "absent"}
@@ -229,10 +228,12 @@ func (s *Server) handleSingboxInstall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// §9.2 实现修订 2026-09-18c: the port is the one the probe reports it is
+	// already serving; only a node that has never reported a config draws a
+	// random one. Resolving node_singbox.port first is what used to drag a
+	// listener the operator had moved back onto the old port.
+	port := s.inboundPortFor(id, sb, req.Port)
 	if port == 0 {
-		port = sb.Port
-	}
-	if !singbox.ValidPort(port) {
 		p, err := singbox.RandomPort()
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal")
@@ -285,6 +286,43 @@ func (s *Server) handleSingboxAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": cmdID})
 }
 
+// inboundPortFor decides which port the panel's own anytls inbound is (re)built
+// on — the port the template writes, and the port the node's credential is read
+// back from.
+//
+// The order answers "what is this probe serving right now" (§9.2 实现修订
+// 2026-09-18c):
+//
+//  1. an explicitly requested port — the HTTP API may name one;
+//  2. the single anytls listener the probe's own config.json declares. The file
+//     is the truth (§9.3 实现修订 2026-09-17b): after a port move in the editor
+//     the management column still names the port the operator moved *away*
+//     from, and preferring it here is what dragged the listener back — and,
+//     because the credential no longer sat at that old port either, minted a
+//     fresh password over a working client;
+//  3. node_singbox.port, for a probe that never reported a file (an old agent)
+//     or whose file carries several anytls listeners (nothing to pick between);
+//  4. 0 — nothing to build on, so the caller draws a random port. That is the
+//     genuinely-fresh-install case.
+//
+// The report is read through the process Cryptor; a snapshot that exists but
+// cannot be decrypted is the wrong-master-key incident, not "no report", and the
+// caller's credential lookup fails closed over it (§10.1).
+func (s *Server) inboundPortFor(nodeID string, sb *store.NodeSingbox, requested int) int {
+	if singbox.ValidPort(requested) {
+		return requested
+	}
+	if local, err := s.Store.GetNodeSingboxLocal(nodeID, s.Crypt); err == nil {
+		if p := store.SoleAnytlsPortInDoc(local.ConfigJSON); singbox.ValidPort(p) {
+			return p
+		}
+	}
+	if sb != nil && singbox.ValidPort(sb.Port) {
+		return sb.Port
+	}
+	return 0
+}
+
 // applySingboxDesired is the single write path for node sing-box desired
 // state: build the config, persist it under `singbox_config:<node_id>` (the
 // same key hub.buildDesiredState reads), keep agent-reported fields, and push
@@ -297,11 +335,12 @@ func (s *Server) handleSingboxAction(w http.ResponseWriter, r *http.Request) {
 // cut off — and only a node with no inbound at all gets a fresh 16-char alnum
 // one. Changing a port runs through here too, and must not rotate.
 func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, version string, port int, status string) error {
-	// The lookup hint is the port the node already owns, not the one being
-	// installed: on a port change the credential sits in the document under the
-	// *old* port, and asking for the new one would mint a second password for
-	// the same listener.
-	password, err := s.ensureNodeProxyPassword(nodeID, sb.Port)
+	// The credential is looked up at the port the listener is being built on,
+	// falling back to the port the node was managed on before: a port change
+	// names a port that has no credential yet, and the one to keep sits in the
+	// document under the old port — asking only for the new one would mint a
+	// second password for the same listener (§10.1 实现修订 2026-09-17e).
+	password, err := s.ensureNodeProxyPassword(nodeID, port, sb.Port)
 	if err != nil {
 		return err
 	}
@@ -386,16 +425,24 @@ func (s *Server) SyncSingboxConfigs() int {
 		// given a fresh password — this pass exists to pick up a template change,
 		// and minting here would rewrite a working config with a credential no
 		// client has.
-		password := s.nodeProxyPassword(t.NodeID, sb.Port)
+		// §9.2 实现修订 2026-09-18c: the same port resolution an install uses, so
+		// a template fix never drags a listener back onto the port the panel
+		// remembers instead of the one the probe reports it serves.
+		port := s.inboundPortFor(t.NodeID, sb, 0)
+		if !singbox.ValidPort(port) {
+			s.Log.Warn("singbox config sync: no usable port", "node", t.NodeID, "port", sb.Port)
+			continue
+		}
+		password := s.nodeProxyPassword(t.NodeID, port, sb.Port)
 		if password == "" {
 			s.Log.Warn("singbox config sync: no credential to re-derive, skipped", "node", t.NodeID)
 			continue
 		}
-		config, err := singbox.BuildNodeConfigWithInbounds(sb.Port, password, s.loadExtraInbounds(t.NodeID))
+		config, err := singbox.BuildNodeConfigWithInbounds(port, password, s.loadExtraInbounds(t.NodeID))
 		if err != nil {
-			// A port the template refuses (never assigned, or out of range) is
-			// not this pass's business; the next operator change fixes it.
-			s.Log.Warn("singbox config sync: build", "node", t.NodeID, "port", sb.Port, "err", err)
+			// A port the template refuses is not this pass's business; the next
+			// operator change fixes it.
+			s.Log.Warn("singbox config sync: build", "node", t.NodeID, "port", port, "err", err)
 			continue
 		}
 		if stored, err := s.Store.GetSetting("singbox_config:" + t.NodeID); err == nil && stored == string(config) {
@@ -407,6 +454,11 @@ func (s *Server) SyncSingboxConfigs() int {
 		}
 		old := sb.ConfigHash
 		sb.ConfigHash = singbox.ConfigHash(config)
+		// The document now serves `port`, so the management column follows it:
+		// leaving the old value behind would make every later reader (the
+		// firewall hint, an install on a probe that has not reported yet) name a
+		// port this document no longer declares.
+		sb.Port = port
 		if err := s.Store.UpsertNodeSingbox(sb); err != nil {
 			s.Log.Warn("singbox config sync: upsert", "node", t.NodeID, "err", err)
 			continue

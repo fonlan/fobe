@@ -1242,22 +1242,6 @@ func PruneBackups(dir string, keep int) error {
 // "which listener is this document's anytls" the same way the store does.
 func SoleAnytlsPortInDoc(doc string) int { return soleAnytlsPortInDoc(doc) }
 
-// SolePanelPort returns the one anytls port when a panel-edited config has
-// exactly one, 0 otherwise.
-//
-// It exists so the panel's "接管" write does not depend on reading the config
-// back (the report arrives at the agent's cadence, so the document it just
-// pushed is ahead of what anyone can read): the operator ticked a listener,
-// and if that listener is the file's only anytls inbound it is now the node's
-// own (§9.3 实现修订 2026-09-17b).
-func (s *Store) SolePanelPort(nodeID string) int {
-	local, err := s.GetNodeSingboxLocal(nodeID, nil)
-	if err != nil || local.ConfigJSON == "" {
-		return 0
-	}
-	return soleAnytlsPortInDoc(local.ConfigJSON)
-}
-
 // Same answers "is this snapshot identical to that one" without using ==, which
 // a map field makes illegal.
 func (l NodeSingboxLocal) Same(other NodeSingboxLocal) bool {

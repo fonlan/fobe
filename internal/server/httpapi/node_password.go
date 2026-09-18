@@ -35,17 +35,36 @@ import (
 //  3. §19.9's per-node override column: nothing writes it since the editor
 //     model, but a value set by hand must still win over minting a new one.
 //
-// `port` identifies the listener. Empty means there is no credential at that
-// port; callers creating an entry may then mint one.
-func (s *Server) nodeProxyPassword(nodeID string, port int) string {
-	if doc, err := s.Store.GetSetting("singbox_config:" + nodeID); err == nil && strings.TrimSpace(doc) != "" {
-		if pw := singbox.InboundPasswordAtPort(doc, port); pw != "" {
-			return pw
+// Several ports may be given, tried in order: the port the listener is being
+// (re)built on first, then the port the node was managed on before it. A port
+// change names a port that has no credential yet, while the one to keep sits in
+// the document under the old port (§9.2 实现修订 2026-09-18c); asking only for
+// the new one would mint a second password for the same listener. Empty means
+// there is no credential at any of them; callers creating an entry may then mint
+// one.
+func (s *Server) nodeProxyPassword(nodeID string, ports ...int) string {
+	doc, docErr := s.Store.GetSetting("singbox_config:" + nodeID)
+	var local store.NodeSingboxLocal
+	localRead := false
+	for _, port := range ports {
+		if port <= 0 {
+			continue
 		}
-	}
-	if local, err := s.Store.GetNodeSingboxLocal(nodeID, s.Crypt); err == nil {
-		if pw := singbox.InboundPasswordAtPort(local.ConfigJSON, port); pw != "" {
-			return pw
+		if docErr == nil && strings.TrimSpace(doc) != "" {
+			if pw := singbox.InboundPasswordAtPort(doc, port); pw != "" {
+				return pw
+			}
+		}
+		// Read the probe's report once, and only when a lookup has actually
+		// missed — it is an encrypted blob, and the common case is a hit above.
+		if !localRead {
+			localRead = true
+			local, _ = s.Store.GetNodeSingboxLocal(nodeID, s.Crypt)
+		}
+		if strings.TrimSpace(local.ConfigJSON) != "" {
+			if pw := singbox.InboundPasswordAtPort(local.ConfigJSON, port); pw != "" {
+				return pw
+			}
 		}
 	}
 	if pw, err := s.Store.GetNodeSingboxPasswordOverride(nodeID); err == nil && pw != "" {
@@ -61,12 +80,16 @@ func (s *Server) nodeProxyPassword(nodeID string, port int) string {
 // as a Clash YAML scalar, and only letters and digits need no escaping in all
 // three, §10.1).
 //
+// The ports are tried in the order given, exactly as nodeProxyPassword does; a
+// regeneration that also moves the port therefore reuses the credential sitting
+// under the old one instead of minting over it.
+//
 // Only this path mints. Every other caller (the startup sync, subscription
 // rendering) must reuse what it finds: minting during a regeneration would
 // silently rotate a working credential and cut off every client holding the
 // old URI.
-func (s *Server) ensureNodeProxyPassword(nodeID string, port int) (string, error) {
-	if pw := s.nodeProxyPassword(nodeID, port); pw != "" {
+func (s *Server) ensureNodeProxyPassword(nodeID string, ports ...int) (string, error) {
+	if pw := s.nodeProxyPassword(nodeID, ports...); pw != "" {
 		return pw, nil
 	}
 	// Both sources are checked for *readability* before minting: a value that
@@ -89,6 +112,10 @@ func (s *Server) ensureNodeProxyPassword(nodeID string, port int) (string, error
 	s.Store.InsertAudit(&store.AuditEntry{
 		Actor: "system", NodeID: nodeID, Action: "anytls_password_generated", Command: "[redacted]",
 	})
-	s.Log.Info("generated the node's inbound credential", "node", nodeID, "port", port)
+	first := 0
+	if len(ports) > 0 {
+		first = ports[0]
+	}
+	s.Log.Info("generated the node's inbound credential", "node", nodeID, "port", first)
 	return pw, nil
 }
