@@ -147,6 +147,10 @@ a:hover { text-decoration: underline; }
   margin: 0 auto;
 }
 
+/* Terminal workspace route: the two side-by-side panes want the full viewport,
+   so only the padding remains as the margins. */
+.content-wide { max-width: none; }
+
 @media (max-width: 880px) {
   .content { padding: 16px; }
   .topbar { padding: 8px 16px; }
@@ -868,8 +872,17 @@ section.card { margin-bottom: 0; }
 .terminal-page { min-width: 0; }
 .terminal-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(300px, 2fr);
-  gap: 16px;
+  /* --tw-col / --tw-rest are the two track sizes as literal `Nfr` tokens,
+     driven (and persisted) by the drag handle in TerminalPage. Deliberately
+     NOT calc(<number> * 1fr): fr inside calc is unsupported in some browsers,
+     and an unsupported value drops the WHOLE declaration — the grid then
+     collapses to one implicit column and the assistant lands BELOW the
+     terminal (seen in the wild). Plain var() substitution keeps every track a
+     token the parser already knows. */
+  grid-template-columns:
+    minmax(0, var(--tw-col, 0.6fr)) auto
+    minmax(0, var(--tw-rest, 0.4fr));
+  gap: 10px;
   align-items: stretch;
   min-height: min(720px, calc(100vh - 180px));
 }
@@ -877,6 +890,32 @@ section.card { margin-bottom: 0; }
 /* No AI upstream configured → the assistant column does not exist and the
    terminal takes the whole width (§12.1). */
 .terminal-workspace.solo { grid-template-columns: minmax(0, 1fr); }
+
+/* The drag handle between the two panes: a 10px hit area whose visible line is
+   the 2px ::before in the middle. touch-action:none lets a touch drag move the
+   handle instead of scrolling the page. */
+.terminal-divider {
+  width: 10px;
+  cursor: col-resize;
+  position: relative;
+  touch-action: none;
+}
+.terminal-divider::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--border);
+  transition: background 0.15s;
+}
+.terminal-divider:hover::before,
+.terminal-workspace.dragging .terminal-divider::before { background: var(--accent); }
+/* While dragging: keep the col-resize cursor everywhere and stop the text
+   under the moving edge from being selected. */
+.terminal-workspace.dragging { cursor: col-resize; user-select: none; }
 
 .terminal-card, .ai-panel { min-width: 0; display: flex; flex-direction: column; }
 /* The card is a normal panel: the screen inside it is the only dark surface,
@@ -931,11 +970,6 @@ section.card { margin-bottom: 0; }
   height: min(720px, calc(100vh - 180px));
   min-height: 420px;
 }
-.ai-context { display: grid; gap: 8px; padding: 12px; background: var(--panel-2); border-radius: 8px; border: 1px solid var(--border); }
-.ai-context > div { display: flex; justify-content: space-between; gap: 12px; }
-.ai-placeholder { padding: 18px; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-dim); }
-.ai-placeholder p { margin: 0; }
-.ai-placeholder p + p { margin-top: 6px; }
 .ai-composer { margin-top: auto; }
 .ai-composer textarea {
   width: 100%;
@@ -950,7 +984,10 @@ section.card { margin-bottom: 0; }
 .ai-composer textarea:focus { outline: 2px solid var(--accent-weak); border-color: var(--accent); }
 
 @media (max-width: 900px) {
+  /* Same specificity as the rule above and later in the file, so the stacked
+     single-column layout beats the variable-driven three tracks. */
   .terminal-workspace { grid-template-columns: 1fr; min-height: 0; }
+  .terminal-divider { display: none; }
   .terminal-shell { min-height: 360px; }
   .ai-panel { min-height: 360px; }
 }

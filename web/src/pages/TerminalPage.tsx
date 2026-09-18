@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent,
+  type PointerEvent,
+} from 'react';
 import { Link, useParams } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
@@ -131,7 +140,13 @@ function historyToEntries(history: AISessionHistory): ChatEntry[] {
       if (message.content === '' && thinking === '') continue;
       out.push({ kind: 'assistant', text: message.content, thinking });
     } else if (message.role === 'turn_end') {
-      out.push({ kind: 'turn_end', reason: message.turn_reason ?? '', changes: message.changes ?? 0 });
+      const reason = message.turn_reason ?? '';
+      // A natural completion needs no banner — the answer itself is the
+      // completion, and replaying "turn completed" under it is pure noise.
+      // Abnormal endings (budget / timeout / upstream error…) still replay so
+      // a reloaded conversation explains why the answer looks cut short.
+      if (reason === 'completed') continue;
+      out.push({ kind: 'turn_end', reason, changes: message.changes ?? 0 });
     } else if (message.role === 'tool') {
       // The stored shape keeps only the model-facing text (the envelope's
       // tool_results carry call ids, not names/commands), so this renders as a
@@ -477,8 +492,7 @@ function AssistantPanel({
     }
   };
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
+  const send = async (): Promise<void> => {
     const text = message.trim();
     if (!text || busy) return;
     setBusy(true);
@@ -539,6 +553,21 @@ function AssistantPanel({
         setMessage((current) => (current === '' ? text : current));
       },
     );
+  };
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    void send();
+  };
+
+  // Enter sends, Shift+Enter is a newline. `isComposing` guards the IME path:
+  // confirming a candidate in a Chinese/Japanese input method fires a keydown
+  // Enter that must commit the composition, not submit the draft — without the
+  // guard every IME confirmation would fire the message off half-typed.
+  const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    void send();
   };
 
   const answerConfirmation = async (entry: Extract<ChatEntry, { kind: 'confirm' }>, approved: boolean) => {
@@ -660,10 +689,6 @@ function AssistantPanel({
         >
           +
         </button>
-      </div>
-      <div className="ai-context">
-        <div><span className="hint">{t('terminal_node_label')}</span><span className="mono">{nodeId}</span></div>
-        <div><span className="hint">{t('terminal_session_label')}</span><span className="mono">{sessionId || t('terminal_session_pending')}</span></div>
       </div>
 
       {/* Above the picker on purpose: the notice explains why the transcript is
@@ -788,10 +813,12 @@ function AssistantPanel({
         {busy && <p className="hint">{t('ai_working')}</p>}
       </div>
 
-      {turnEnd && (
+      {/* Only abnormal endings get a banner (§12.6): a turn cut off by the
+          change budget or the 10-minute deadline must not read as a finished
+          answer. A `completed` turn already ends with the answer itself, so a
+          "turn completed" chip under it is noise. */}
+      {turnEnd && turnEnd.reason !== 'completed' && (
         <div className="ai-turn-end">
-          {/* The reason is always shown: a turn cut off by the change budget or
-              the 10-minute deadline must not read as a finished answer. */}
           <span className={turnReasonClass(turnEnd.reason)}>{turnReasonText(turnEnd.reason)}</span>
           {typeof turnEnd.changes === 'number' && turnEnd.changes > 0 && (
             <span className="hint">{t('ai_turn_changes', { n: turnEnd.changes })}</span>
@@ -805,6 +832,7 @@ function AssistantPanel({
           rows={3}
           placeholder={t('ai_input_placeholder')}
           onChange={(event) => setMessage(event.target.value)}
+          onKeyDown={onComposerKeyDown}
         />
         {/* One control bar: the model and thinking-level pickers sit on the
             same line as the button that starts the turn (§12.5).
@@ -871,11 +899,94 @@ function AssistantPanel({
   );
 }
 
+// --- workspace split -----------------------------------------------------------
+
+// The terminal/AI split is a per-operator preference, not per-node state: it
+// lives in localStorage and survives reloads and node switches. The bounds keep
+// both columns usable — below 25% the assistant cannot fit its composer row,
+// above 75% the terminal is a narrow sliver.
+const RATIO_KEY = 'fobe.terminal.ratio';
+const RATIO_MIN = 0.25;
+const RATIO_MAX = 0.75;
+const RATIO_DEFAULT = 0.6;
+
+function loadRatio(): number {
+  try {
+    const v = Number(localStorage.getItem(RATIO_KEY));
+    if (Number.isFinite(v) && v >= RATIO_MIN && v <= RATIO_MAX) return v;
+  } catch {
+    // storage unavailable: the default split still works, it just won't stick
+  }
+  return RATIO_DEFAULT;
+}
+
+function clampRatio(v: number): number {
+  return Math.min(RATIO_MAX, Math.max(RATIO_MIN, v));
+}
+
 export default function TerminalPage() {
   const { id = '' } = useParams();
   const { t } = useI18n();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [aiReady, setAiReady] = useState(false);
+  const [ratio, setRatio] = useState<number>(loadRatio);
+  const [dragging, setDragging] = useState(false);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  // Mirror of `ratio` for the drag-end handlers: pointerup fires from a render
+  // whose state may lag the last pointermove, and localStorage must record the
+  // split the operator actually left on screen.
+  const ratioRef = useRef<number>(ratio);
+
+  const applyRatio = (value: number) => {
+    const next = clampRatio(value);
+    ratioRef.current = next;
+    setRatio(next);
+  };
+
+  const onDividerDown = (event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    // Pointer capture keeps the drag alive when the cursor leaves the 10px
+    // handle — without it a fast drag "drops" the handle mid-move.
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging(true);
+  };
+
+  const onDividerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (!dragging) return;
+    const el = workspaceRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    applyRatio((event.clientX - rect.left) / rect.width);
+  };
+
+  // Shared by pointerup AND pointercancel: a touch drag can be interrupted by
+  // the OS at any moment, and the split must settle + persist either way.
+  // releasePointerCapture throws when capture was already lost — that is fine,
+  // the drag just ends.
+  const endDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (!dragging) return;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // capture already gone
+    }
+    setDragging(false);
+    try {
+      localStorage.setItem(RATIO_KEY, String(ratioRef.current));
+    } catch {
+      // storage unavailable: non-fatal, the split just resets on reload
+    }
+  };
+
+  const resetRatio = () => {
+    applyRatio(RATIO_DEFAULT);
+    try {
+      localStorage.removeItem(RATIO_KEY);
+    } catch {
+      // storage unavailable
+    }
+  };
 
   // The assistant only has something to talk to once base_url / api_key /
   // model are all set (§12.1); otherwise every submit would come back 503
@@ -906,22 +1017,47 @@ export default function TerminalPage() {
     );
   }
 
+  // Rounding keeps 1-0.7 from leaking float noise (0.30000000000000004fr is
+  // valid CSS, just embarrassing).
+  const restRatio = Math.round((1 - ratio) * 1000) / 1000;
+
   return (
     <div className="terminal-page stack-lg">
       {/* No page-level title: the terminal card's own head row carries
           "Agent Web 终端" plus the session and connection state, so a page
           heading would just repeat it one line above. */}
       <Link to={`/nodes/${encodeURIComponent(id)}`} className="back-link back-link-row">← {t('back_to_node')}</Link>
-      <div className={`terminal-workspace${aiReady ? '' : ' solo'}`}>
+      {/* The split travels as two literal `Nfr` tokens rather than an inline
+          grid-template-columns (the ≤900px single-column media query must be
+          able to win) and rather than calc(<number> * 1fr), which some browsers
+          drop wholesale — a dead declaration stacks the two panes vertically. */}
+      <div
+        ref={workspaceRef}
+        className={`terminal-workspace${aiReady ? '' : ' solo'}${dragging ? ' dragging' : ''}`}
+        style={{ '--tw-col': `${ratio}fr`, '--tw-rest': `${restRatio}fr` } as CSSProperties}
+      >
         <Terminal nodeId={id} onSessionChange={setSessionId} />
         {/* keyed by node: switching targets mounts a fresh panel, so the old
             node's transcript and session id never leak into the new one. */}
         {aiReady && (
-          <AssistantPanel
-            key={id}
-            nodeId={id}
-            sessionId={sessionId}
-          />
+          <>
+            <div
+              className="terminal-divider"
+              role="separator"
+              aria-orientation="vertical"
+              title={t('terminal_drag_hint')}
+              onPointerDown={onDividerDown}
+              onPointerMove={onDividerMove}
+              onPointerUp={endDrag}
+              onPointerCancel={endDrag}
+              onDoubleClick={resetRatio}
+            />
+            <AssistantPanel
+              key={id}
+              nodeId={id}
+              sessionId={sessionId}
+            />
+          </>
         )}
       </div>
     </div>

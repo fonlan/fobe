@@ -200,6 +200,9 @@ func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 		writeAIResolveErr(w, err)
 		return
 	}
+	// An unset picker level falls back to the stored ai.default_reasoning (the
+	// settings card configures it next to the default pair).
+	req.ReasoningLevel = s.effectiveAIReasoning(resolved, req.ReasoningLevel)
 	if err := validateAIReasoningLevel(resolved, req.ReasoningLevel); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_reasoning_level")
 		return

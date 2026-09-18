@@ -1088,6 +1088,8 @@ export interface AICatalog {
   models: AIModel[];
   default_provider_id: string;
   default_model_id: string;
+  /** Applied when the assistant's thinking picker is left at "default (unset)". */
+  default_reasoning: string;
 }
 
 /**

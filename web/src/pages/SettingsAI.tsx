@@ -1356,9 +1356,12 @@ function ModelEditor({
 /**
  * The default is a (provider, model) PAIR (§12.1): the same model can be served
  * through different gateways, so a bare model id cannot say which one to call.
- * A stored default that no longer resolves (provider deleted, model unlinked or
- * disabled) is REPORTED — the panel never silently clears it, because "your
- * default quietly vanished" is indistinguishable from "it was never set".
+ * Alongside it sits the default thinking level, which applies to any turn whose
+ * picker is left at "unset" — independent of the pair by design, since a
+ * hand-picked pair benefits from it just as well. A stored default that no
+ * longer resolves (provider deleted, model unlinked or disabled) is REPORTED —
+ * the panel never silently clears it, because "your default quietly vanished"
+ * is indistinguishable from "it was never set".
  */
 function DefaultCard({
   catalog,
@@ -1372,15 +1375,17 @@ function DefaultCard({
   const { t } = useI18n();
   const [providerID, setProviderID] = useState(catalog.default_provider_id || '');
   const [modelID, setModelID] = useState(catalog.default_model_id || '');
+  const [reasoning, setReasoning] = useState(catalog.default_reasoning || '');
   const [busy, setBusy] = useState(false);
 
-  // Follow the server's stored pair whenever it changes (save, import, a
+  // Follow the server's stored values whenever they change (save, import, a
   // deleted provider). Deps are the ids themselves, so a local selection that
   // has not been saved yet is not clobbered by an unrelated reload.
   useEffect(() => {
     setProviderID(catalog.default_provider_id || '');
     setModelID(catalog.default_model_id || '');
-  }, [catalog.default_provider_id, catalog.default_model_id]);
+    setReasoning(catalog.default_reasoning || '');
+  }, [catalog.default_provider_id, catalog.default_model_id, catalog.default_reasoning]);
 
   const provider = catalog.providers.find((p) => p.id === providerID) ?? null;
   const storedProvider = catalog.providers.find((p) => p.id === catalog.default_provider_id) ?? null;
@@ -1404,7 +1409,7 @@ function DefaultCard({
     }
     setBusy(true);
     try {
-      await api.setAIDefaults(providerID, modelID);
+      await api.setAIDefaults(providerID, modelID, reasoning);
       await onChanged(t('ai_default_saved'));
     } catch (e) {
       onError(apiErrorMessage(e, t));
@@ -1418,8 +1423,10 @@ function DefaultCard({
     if (!window.confirm(t('ai_default_clear_confirm'))) return;
     setBusy(true);
     try {
-      // The pair must travel together; "" for both is how the server clears it.
-      await api.setAIDefaults('', '');
+      // Everything the card configures travels together: "clear the default"
+      // resets the pair AND the thinking level, not a half state the operator
+      // has to hunt down field by field.
+      await api.setAIDefaults('', '', '');
       await onChanged(t('ai_default_cleared'));
     } catch (e) {
       onError(apiErrorMessage(e, t));
@@ -1486,8 +1493,20 @@ function DefaultCard({
             ))}
           </select>
         </label>
+        <label className="field">
+          <span>{t('ai_default_reasoning')}</span>
+          <select value={reasoning} onChange={(e) => setReasoning(e.target.value)}>
+            <option value="">{t('ai_reasoning_default')}</option>
+            {REASONING_LEVELS.map((l) => (
+              <option key={l} value={l}>
+                {l}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
       {provider && provider.models.length === 0 && <p className="hint">{t('ai_default_no_models')}</p>}
+      {reasoning !== '' && <p className="hint">{t('ai_default_reasoning_hint')}</p>}
       {selected && (
         <p className="hint">
           {selected.effective_levels.length === 0

@@ -270,6 +270,78 @@ func TestAIDefaultsRequireUsablePair(t *testing.T) {
 	}
 }
 
+// TestAIDefaultReasoningLevel covers the third member of the default trio: the
+// thinking level a turn gets when its picker is left at "unset". Pins three
+// rules: the level is only writable through /api/ai/defaults (one write path),
+// the catalog echoes it back, and the chat path IGNORES a stored level the
+// resolved model does not expose rather than 400-ing the turn.
+func TestAIDefaultReasoningLevel(t *testing.T) {
+	server, api := newTestServer(t)
+	defer server.Close()
+	cookie := loginCookie(t, server.URL)
+
+	seedProviderModel(t, api, "aip-a", "https://a.example/v1", "key-a", "model-a", store.ProtocolOpenAICompletions)
+	// The seed creates the model with no levels; give it an explicit set so the
+	// stored default has something to validate against.
+	model, err := api.Store.GetAIModel("model-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.ReasoningLevels = []string{"low", "medium", "high"}
+	if err := api.Store.UpsertAIModel(model); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unknown vocabulary is refused, same as on the model row itself.
+	resp, raw := doAuthed(t, "PUT", server.URL+"/api/ai/defaults", cookie,
+		[]byte(`{"provider_id":"aip-a","model_id":"model-a","reasoning_level":"turbo"}`))
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "bad_reasoning_level") {
+		t.Fatalf("unknown default level accepted: %d %s", resp.StatusCode, raw)
+	}
+
+	// A known level is stored and echoed by the catalog.
+	resp, raw = doAuthed(t, "PUT", server.URL+"/api/ai/defaults", cookie,
+		[]byte(`{"provider_id":"aip-a","model_id":"model-a","reasoning_level":"high"}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("default + level rejected: %d %s", resp.StatusCode, raw)
+	}
+	_, raw = doAuthed(t, "GET", server.URL+"/api/ai/catalog", cookie, nil)
+	if !strings.Contains(string(raw), `"default_reasoning":"high"`) {
+		t.Fatalf("catalog does not echo default_reasoning: %s", raw)
+	}
+
+	// The settings endpoint is NOT a second write path for the level.
+	resp, raw = doAuthed(t, "PUT", server.URL+"/api/settings", cookie,
+		[]byte(`{"settings":{"ai.default_reasoning":"low"}}`))
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "unknown_key") {
+		t.Fatalf("default level writable via /api/settings: %d %s", resp.StatusCode, raw)
+	}
+
+	provider, err := api.Store.GetAIProvider("aip-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := &aiResolved{Provider: *provider, Model: *model}
+
+	// Unset picker level → the stored default.
+	if got := api.effectiveAIReasoning(resolved, ""); got != "high" {
+		t.Fatalf("effectiveAIReasoning() = %q, want the stored default high", got)
+	}
+	// An explicit request level always wins.
+	if got := api.effectiveAIReasoning(resolved, "low"); got != "low" {
+		t.Fatalf("effectiveAIReasoning(low) = %q, want low to win", got)
+	}
+	// A stored level the model does not expose degrades to unset instead of
+	// failing the turn: the panel may hand-pick a pair the default was never
+	// configured against.
+	if err := api.Store.SetSetting("ai.default_reasoning", "off", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := api.effectiveAIReasoning(resolved, ""); got != "" {
+		t.Fatalf("effectiveAIReasoning() = %q, want unset for an unexposed level", got)
+	}
+}
+
 // TestAIUnreadableKeyIsNotUnconfigured is the §10.1 invariant applied to
 // provider secrets: an undecryptable ciphertext (wrong master key, restored db)
 // must surface as a NAMED error, never as "nothing is configured" — the latter

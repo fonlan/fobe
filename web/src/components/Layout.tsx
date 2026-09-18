@@ -1,4 +1,4 @@
-import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useI18n } from '../i18n';
 import { useTheme, type ThemeMode } from '../theme';
 import { useAuth } from '../auth';
@@ -51,6 +51,12 @@ export default function Layout() {
   // a small badge next to the brand. Empty in the API-only placeholder.
   const { me, setMe } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  // The terminal page is the one workspace that wants every pixel: two side-
+  // by-side panes squeeze each other inside the reading column's 1440px cap,
+  // so this route opts out (the .content padding stays as breathing room).
+  const wide =
+    location.pathname.startsWith('/nodes/') && location.pathname.endsWith('/terminal');
 
   const toggleLang = () => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN');
 
@@ -113,7 +119,7 @@ export default function Layout() {
             </button>
           </div>
         </header>
-        <main className="content">
+        <main className={`content${wide ? ' content-wide' : ''}`}>
           <Outlet />
         </main>
       </div>

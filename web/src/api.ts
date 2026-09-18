@@ -1106,6 +1106,7 @@ export async function getAICatalog(): Promise<AICatalog> {
     })),
     default_provider_id: raw.default_provider_id ?? '',
     default_model_id: raw.default_model_id ?? '',
+    default_reasoning: raw.default_reasoning ?? '',
   };
 }
 
@@ -1174,10 +1175,12 @@ export function matchAIModels(providerID: string, modelIDs: string[]): Promise<A
 /**
  * The default is a (provider, model) PAIR: the same model can hang off several
  * gateways, so a bare model id could not say which one to call. Both ids must
- * be given together; an empty pair clears the default.
+ * be given together; an empty pair clears the default. `reasoningLevel` is the
+ * thinking level a turn gets when its picker is left at "unset" — independent
+ * of the pair, so it travels (and clears) on its own.
  */
-export function setAIDefaults(providerID: string, modelID: string): Promise<{ ok: boolean }> {
-  return request('/api/ai/defaults', { method: 'PUT', body: { provider_id: providerID, model_id: modelID } });
+export function setAIDefaults(providerID: string, modelID: string, reasoningLevel = ''): Promise<{ ok: boolean }> {
+  return request('/api/ai/defaults', { method: 'PUT', body: { provider_id: providerID, model_id: modelID, reasoning_level: reasoningLevel } });
 }
 
 /** models.dev cache state + the provider slugs the form offers. */

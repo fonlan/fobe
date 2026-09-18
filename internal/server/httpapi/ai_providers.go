@@ -127,6 +127,10 @@ type aiCatalogResponse struct {
 	Models          []aiModelView    `json:"models"`
 	DefaultProvider string           `json:"default_provider_id"`
 	DefaultModel    string           `json:"default_model_id"`
+	// DefaultReasoning is what a turn gets when the panel's thinking picker is
+	// left at "默认(不指定)". Reported here so the settings card edits the same
+	// value the chat endpoint applies, with no third read path.
+	DefaultReasoning string `json:"default_reasoning"`
 }
 
 // Unified reasoning level vocabulary (§12.5). The set a given model exposes is
@@ -408,6 +412,7 @@ func (s *Server) aiCatalog() (*aiCatalogResponse, error) {
 	}
 	out.DefaultProvider, _ = s.Store.GetSetting("ai.default_provider_id")
 	out.DefaultModel, _ = s.Store.GetSetting("ai.default_model_id")
+	out.DefaultReasoning, _ = s.Store.GetSetting("ai.default_reasoning")
 	return out, nil
 }
 
@@ -742,11 +747,17 @@ func (s *Server) handleUnlinkAIProviderModel(w http.ResponseWriter, r *http.Requ
 type aiDefaultsRequest struct {
 	ProviderID string `json:"provider_id"`
 	ModelID    string `json:"model_id"`
+	// ReasoningLevel is optional and independent of the pair: it applies to any
+	// turn whose picker is left at "unset", including one that hand-picked a
+	// different provider/model.
+	ReasoningLevel string `json:"reasoning_level"`
 }
 
-// handleSetAIDefaults pins the default (provider, model) pair. An empty pair is
-// allowed (it just means "no default yet"); a HALF pair is not — the two ids
-// only mean something together (§12.1).
+// handleSetAIDefaults pins the default (provider, model) pair plus the default
+// thinking level. An empty pair is allowed (it just means "no default yet"); a
+// HALF pair is not — the two ids only mean something together (§12.1). The
+// level travels and is stored even when it clears the pair: it is a preference,
+// not a property of the pair.
 func (s *Server) handleSetAIDefaults(w http.ResponseWriter, r *http.Request) {
 	var req aiDefaultsRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -754,8 +765,13 @@ func (s *Server) handleSetAIDefaults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.ProviderID, req.ModelID = strings.TrimSpace(req.ProviderID), strings.TrimSpace(req.ModelID)
+	req.ReasoningLevel = strings.TrimSpace(req.ReasoningLevel)
 	if (req.ProviderID == "") != (req.ModelID == "") {
 		writeErr(w, http.StatusBadRequest, "bad_default_pair")
+		return
+	}
+	if req.ReasoningLevel != "" && !aiReasoningLevels[req.ReasoningLevel] {
+		writeErr(w, http.StatusBadRequest, "bad_reasoning_level")
 		return
 	}
 	if req.ProviderID != "" {
@@ -778,6 +794,10 @@ func (s *Server) handleSetAIDefaults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Store.SetSetting("ai.default_model_id", req.ModelID, false); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if err := s.Store.SetSetting("ai.default_reasoning", req.ReasoningLevel, false); err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}

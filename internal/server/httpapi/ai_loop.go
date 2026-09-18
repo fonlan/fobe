@@ -124,12 +124,31 @@ const (
 // built-in constants (low 2k / medium 8k / high 16k): the operator asked for
 // experience values rather than a settings surface, so there is no setting to
 // read and no way for a hand-edited value to put the mapping out of range.
+// (The LEVEL itself comes from the request or, when the picker is unset, from
+// ai.default_reasoning — see effectiveAIReasoning.)
 func (s *Server) aiReasoning(resolved *aiResolved, level string) aiprotocol.Reasoning {
 	reasoning := aiprotocol.Reasoning{Level: level, Budgets: modelsdev.DefaultReasoningBudgets}
 	// Only the model row knows how "off" is spelled on the wire (§12.5); the
 	// adapter cannot tell from the level alone.
 	reasoning.OffStyle = resolved.Model.ReasoningOffStyle
 	return reasoning
+}
+
+// effectiveAIReasoning fills the panel's "默认(不指定)" with the stored
+// ai.default_reasoning. A stored level the resolved model does not expose is
+// IGNORED rather than rejected: the default is configured against the default
+// pair, but the panel can send any pair, and a hand-picked model that lacks
+// the level must not 400 the whole turn — "unset" is the honest fallback.
+func (s *Server) effectiveAIReasoning(resolved *aiResolved, requested string) string {
+	if requested != "" {
+		return requested
+	}
+	stored, _ := s.Store.GetSetting("ai.default_reasoning")
+	stored = strings.TrimSpace(stored)
+	if stored == "" || validateAIReasoningLevel(resolved, stored) != nil {
+		return ""
+	}
+	return stored
 }
 
 // aiEventSession tells the frontend which conversation it is talking to before
@@ -604,6 +623,9 @@ func (s *Server) handleAIChatContinue(w http.ResponseWriter, r *http.Request) {
 		writeAIResolveErr(w, err)
 		return
 	}
+	// Same fallback rule as a fresh turn: an unset picker level takes the
+	// stored default, validated against the session's own model.
+	req.ReasoningLevel = s.effectiveAIReasoning(resolved, req.ReasoningLevel)
 	if err := validateAIReasoningLevel(resolved, req.ReasoningLevel); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_reasoning_level")
 		return
