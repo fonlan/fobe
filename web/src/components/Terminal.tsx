@@ -114,10 +114,12 @@ export default function Terminal({
       fontFamily: '"SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
       fontSize: 13,
       theme: {
-        background: '#101722',
-        foreground: '#e7ebf3',
-        cursor: '#5b8cff',
-        selectionBackground: 'rgba(91, 140, 255, 0.35)',
+        // Mirror of .terminal-shell's hardcoded frame colors in styles.css
+        // (canvas cannot read CSS variables) + the indigo accent for the cursor.
+        background: '#111927',
+        foreground: '#e8ebf4',
+        cursor: '#8598f8',
+        selectionBackground: 'rgba(133, 152, 248, 0.35)',
       },
     });
     const fitAddon = new FitAddon();

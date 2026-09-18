@@ -5,6 +5,10 @@
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
+    <!-- Browser chrome tint follows the system; the in-app toggle overrides
+         data-theme independently and this meta simply stays on the OS value. -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f3f4f9" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f1421" />
     <title>Fobe</title>
   </head>
   <body>

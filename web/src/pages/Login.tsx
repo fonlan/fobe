@@ -35,11 +35,29 @@ export default function Login() {
 
   return (
     <div className="login-wrap">
+      {/* The brand's pulse line, enlarged and breathing behind the card
+          (styles.css: .login-pulse-*). Decorative only. The path echoes
+          logo.svg's heartbeat — flat, spike, settle, flat — stretched across
+          the viewport; its length (~1600) must stay under the dash period
+          (1800) in the CSS so exactly one bright segment sweeps at a time. */}
+      <div className="login-pulse" aria-hidden="true">
+        <svg viewBox="0 0 1200 160" preserveAspectRatio="none">
+          <path
+            className="login-pulse-base"
+            d="M0 84 H300 l22 -30 26 52 22 -36 30 14 18 -46 24 76 20 -46 H640 l16 -22 20 40 16 -26 h60 l14 -30 18 58 16 -32 H1200"
+          />
+          <path
+            className="login-pulse-sweep"
+            d="M0 84 H300 l22 -30 26 52 22 -36 30 14 18 -46 24 76 20 -46 H640 l16 -22 20 40 16 -26 h60 l14 -30 18 58 16 -32 H1200"
+          />
+        </svg>
+      </div>
       <form className="card login-card" onSubmit={submit}>
         <div className="login-logo">
           <img src="/logo.svg" alt="fobe" className="logo-img big" />
         </div>
         <h1>{t('login_title')}</h1>
+        <p className="login-tagline">Server Pulse</p>
         <label className="field">
           <span>{t('login_password')}</span>
           <input

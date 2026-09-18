@@ -1,46 +1,75 @@
-/* fobe panel — CSS-variable theme (light/dark), system-ui only, no external assets. */
+/* fobe panel — CSS-variable theme (light/dark), system-ui only, no external assets.
+
+   Palette is anchored to the brand mark (web/public/logo.svg, "Server Pulse"):
+   indigo #465DDD is the operator's voice (actions, links, selection), the mint
+   pulse is the machine's voice (alive / online). Everything else stays a quiet
+   cool neutral so status colours are the only loud thing on screen. */
 
 :root {
   color-scheme: light;
-  --bg: #f3f5f9;
+  --bg: #f3f4f9;
   --panel: #ffffff;
-  --panel-2: #f7f9fc;
-  --text: #18202f;
-  --text-dim: #5d6a80;
-  --border: #e2e7f0;
-  --accent: #3b6ef6;
+  --panel-2: #f6f7fb;
+  --text: #1b2130;
+  --text-dim: #5d6679;
+  --border: #e3e6ee;
+  --accent: #465ddd;
+  --accent-hover: #3a51d2;
   --accent-contrast: #ffffff;
-  --accent-weak: rgba(59, 110, 246, 0.1);
-  --green: #16a34a;
-  --amber: #d97706;
+  --accent-weak: rgba(70, 93, 221, 0.1);
+  --green: #0e9f76;
+  --green-weak: rgba(14, 159, 118, 0.28);
+  --amber: #b45309;
   --red: #dc2626;
   --red-weak: rgba(220, 38, 38, 0.08);
-  --shadow: 0 1px 3px rgba(16, 24, 40, 0.07), 0 1px 2px rgba(16, 24, 40, 0.05);
-  --radius: 12px;
+  --shadow: 0 1px 2px rgba(27, 33, 48, 0.05), 0 4px 16px rgba(27, 33, 48, 0.06);
+  --shadow-lift: 0 2px 4px rgba(27, 33, 48, 0.06), 0 12px 28px rgba(27, 33, 48, 0.12);
+  --glass: rgba(255, 255, 255, 0.78);
+  --login-tint: rgba(70, 93, 221, 0.14);
+  --radius: 14px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --bg: #0e131e;
-  --panel: #161d2b;
-  --panel-2: #1c2436;
-  --text: #e7ebf3;
-  --text-dim: #8e9ab1;
-  --border: #293349;
-  --accent: #5b8cff;
-  --accent-contrast: #0b1020;
-  --accent-weak: rgba(91, 140, 255, 0.16);
-  --green: #34d399;
-  --amber: #fbbf24;
+  --bg: #0f1421;
+  --panel: #171e2d;
+  --panel-2: #1d2537;
+  --text: #e8ebf4;
+  --text-dim: #8d97ad;
+  --border: #2a3348;
+  --accent: #8598f8;
+  --accent-hover: #97a7fa;
+  --accent-contrast: #10152b;
+  --accent-weak: rgba(133, 152, 248, 0.16);
+  --green: #5cebb2;
+  --green-weak: rgba(92, 235, 178, 0.3);
+  --amber: #f5bb45;
   --red: #f87171;
   --red-weak: rgba(248, 113, 113, 0.1);
-  --shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.32);
+  --shadow-lift: 0 2px 6px rgba(0, 0, 0, 0.45), 0 16px 36px rgba(0, 0, 0, 0.45);
+  --glass: rgba(23, 30, 45, 0.78);
+  --login-tint: rgba(133, 152, 248, 0.2);
 }
 
 * {
   box-sizing: border-box;
+  /* Thin themed scrollbars: an ops panel is mostly scrolling lists/logs, the
+     platform default thick bars were the loudest non-data element on screen. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner { background: transparent; }
 
 html,
 body {
@@ -57,6 +86,19 @@ body {
   line-height: 1.5;
 }
 
+/* Keyboard focus ring: mouse clicks keep their quiet look, Tab navigation gets
+   a solid indigo ring. Inputs opt out below with their own ring style. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The operator's selection takes the operator's colour. */
+::selection {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
 h1, h2, h3, h4 {
   margin: 0;
   font-weight: 600;
@@ -68,7 +110,13 @@ h4 { font-size: 13px; color: var(--text-dim); margin: 16px 0 6px; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-.mono { font-family: var(--mono); font-size: 0.95em; }
+.mono {
+  font-family: var(--mono);
+  font-size: 0.95em;
+  /* Metrics tick every few seconds; tabular figures keep the digits from
+     jittering width-wise between refreshes. */
+  font-variant-numeric: tabular-nums;
+}
 .nowrap { white-space: nowrap; }
 /* Long unbreakable values (IPv6, paths) in table cells must wrap in place
    instead of pushing the whole auto-layout table past the card edge. Use
@@ -96,12 +144,21 @@ a:hover { text-decoration: underline; }
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 10px 24px;
+  padding: 12px 24px;
   border-bottom: 1px solid var(--border);
-  background: var(--panel);
+  /* Frosted glass: content scrolls under the sticky bar instead of hard-cutting
+     at its edge. --glass is near-opaque, so browsers without backdrop-filter
+     only lose the blur. */
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(14px) saturate(1.5);
+  backdrop-filter: blur(14px) saturate(1.5);
   position: sticky;
   top: 0;
   z-index: 20;
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .topbar { background: var(--panel); }
 }
 
 .topbar-brand {
@@ -111,7 +168,7 @@ a:hover { text-decoration: underline; }
   color: var(--text);
   font-size: 18px;
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
 }
 
 .topbar-brand:hover { text-decoration: none; }
@@ -172,7 +229,7 @@ a:hover { text-decoration: underline; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 18px;
+  padding: 20px;
 }
 
 section.card { margin-bottom: 0; }
@@ -325,7 +382,7 @@ section.card { margin-bottom: 0; }
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
 }
 
 .btn:hover { background: var(--panel-2); text-decoration: none; }
@@ -336,7 +393,11 @@ section.card { margin-bottom: 0; }
   border-color: var(--accent);
   color: var(--accent-contrast);
 }
-.btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+/* A concrete hover tone: filter:brightness shifts the hue greyward on indigo. */
+.btn.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
 
 .btn.danger {
   background: transparent;
@@ -473,22 +534,90 @@ section.card { margin-bottom: 0; }
 
 /* --- login ----------------------------------------------------------------- */
 
+/* The one orchestrated moment in the panel: a quiet indigo field and the
+   brand's pulse line breathing across the viewport behind a plain card.
+   Everything else on this screen is deliberately boring. */
 .login-wrap {
+  position: relative;
   min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 20px;
+  overflow: hidden;
+  background: var(--bg);
 }
 
-.login-card { width: 100%; max-width: 380px; padding: 28px; }
-.login-card h1 { font-size: 20px; text-align: center; margin-bottom: 20px; }
+.login-wrap::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(680px 400px at 20% 6%, var(--login-tint), transparent 70%);
+  pointer-events: none;
+}
+
+/* The pulse: full-width ECG polyline, a dim base line plus one bright segment
+   sweeping across it. Path/period live in Login.tsx's SVG; the dash period
+   (100 + 1700) must exceed the path length so exactly one segment shows. */
+.login-pulse {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 160px;
+  margin-top: -80px;
+  pointer-events: none;
+}
+.login-pulse svg { width: 100%; height: 100%; display: block; }
+.login-pulse-base {
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 2;
+  opacity: 0.22;
+}
+.login-pulse-sweep {
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 2;
+  stroke-linecap: round;
+  opacity: 0.85;
+  stroke-dasharray: 100 1700;
+  animation: pulse-sweep 4.6s linear infinite;
+}
+@keyframes pulse-sweep {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -1800; }
+}
+
+.login-card {
+  width: 100%;
+  max-width: 400px;
+  padding: 32px;
+  border-radius: 16px;
+  box-shadow: var(--shadow-lift);
+  position: relative;
+}
+.login-card h1 { font-size: 20px; text-align: center; margin-bottom: 4px; }
+.login-tagline {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 0 0 22px;
+}
 .login-logo { display: flex; justify-content: center; margin-bottom: 14px; }
 
 /* --- node cards ------------------------------------------------------------ */
 
-.node-card { display: flex; flex-direction: column; gap: 8px; color: var(--text); }
-.node-card:hover { text-decoration: none; border-color: var(--accent); }
+.node-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text);
+  transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s;
+}
+/* Interactive cards only: a small lift + shadow bloom says "this opens", the
+   static cards (info, charts) stay perfectly still. */
+.node-card:hover { text-decoration: none; border-color: var(--accent); box-shadow: var(--shadow-lift); transform: translateY(-2px); }
 /* Offline cards carry the status themselves (the head's right slot is the
    distro badge now): red border + faint red hazard stripes over the panel. */
 .node-card.offline {
@@ -497,7 +626,7 @@ section.card { margin-bottom: 0; }
     repeating-linear-gradient(-45deg, var(--red-weak) 0 8px, transparent 8px 16px),
     var(--panel);
 }
-.node-card.offline:hover { border-color: var(--red); }
+.node-card.offline:hover { border-color: var(--red); box-shadow: var(--shadow-lift); }
 
 .node-card-head { display: flex; align-items: center; gap: 8px; }
 .node-card-name { font-weight: 600; font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -549,8 +678,19 @@ section.card { margin-bottom: 0; }
 }
 
 .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-.dot.on { background: var(--green); box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.18); }
+/* The one recurring motif (logo = "Server Pulse"): an online probe has a
+   heartbeat, an offline one is still. The mint halo expands and fades on a
+   2.8s loop — slow enough to read as a status, not as an alarm. */
+.dot.on {
+  background: var(--green);
+  animation: dot-heartbeat 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
 .dot.off { background: var(--text-dim); opacity: 0.5; }
+@keyframes dot-heartbeat {
+  0% { box-shadow: 0 0 0 0 var(--green-weak); }
+  60% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
 .status-label { margin-left: 8px; vertical-align: middle; }
 
 /* --- progress bars ----------------------------------------------------------- */
@@ -558,9 +698,9 @@ section.card { margin-bottom: 0; }
 .pbar { display: flex; flex-direction: column; gap: 3px; }
 .pbar-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12.5px; }
 .pbar-label { color: var(--text-dim); }
-.pbar-text { color: var(--text); }
-.pbar-track { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
-.pbar-fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.4s; }
+.pbar-text { color: var(--text); font-variant-numeric: tabular-nums; }
+.pbar-track { height: 5px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.pbar-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width 0.4s; }
 .pbar-fill.warn { background: var(--amber); }
 .pbar-fill.crit { background: var(--red); }
 
@@ -576,14 +716,14 @@ section.card { margin-bottom: 0; }
   text-align: left;
   color: var(--text-dim);
   font-weight: 500;
-  font-size: 12.5px;
+  font-size: 12px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
 
 .table td {
-  padding: 8px 10px;
+  padding: 9px 10px;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
@@ -783,6 +923,8 @@ section.card { margin-bottom: 0; }
   position: fixed;
   inset: 0;
   background: rgba(10, 14, 24, 0.55);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -801,10 +943,10 @@ section.card { margin-bottom: 0; }
   max-width: min(90vw, 420px);
   padding: 10px 16px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--panel);
   color: var(--text);
-  box-shadow: 0 6px 24px rgba(16, 24, 40, 0.18);
+  box-shadow: var(--shadow-lift);
   font-size: 13.5px;
   line-height: 1.5;
   animation: toast-in 0.16s ease-out;
@@ -817,15 +959,21 @@ section.card { margin-bottom: 0; }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 
+/* Motion budget: the heartbeat, the login sweep and the toast are the only
+   animations in the panel — all three stop for people who opted out. */
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; }
+  .dot.on { animation: none; box-shadow: 0 0 0 3px var(--green-weak); }
+  .login-pulse-sweep { animation: none; opacity: 0; }
+  .node-card,
+  .node-card:hover { transition: none; transform: none; }
 }
 
 .modal {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  border-radius: 16px;
+  box-shadow: var(--shadow-lift);
   width: 100%;
   max-width: 460px;
   max-height: 84vh;
@@ -865,7 +1013,7 @@ section.card { margin-bottom: 0; }
 }
 
 .settings-subnav-link:hover { color: var(--text); text-decoration: none; }
-.settings-subnav-link.active { background: var(--accent-weak); color: var(--accent); }
+.settings-subnav-link.active { background: var(--accent-weak); color: var(--accent); font-weight: 600; }
 
 /* --- terminal -------------------------------------------------------------- */
 
@@ -945,10 +1093,13 @@ section.card { margin-bottom: 0; }
   min-height: 440px;
   margin-top: 12px;
   padding: 8px;
-  border: 1px solid #253149;
+  /* The screen is always dark (a screen, not a surface); the cast follows the
+     panel's indigo-dark family. Terminal.tsx's xterm theme mirrors these two
+     hex values — canvas cannot read CSS variables, keep them in sync. */
+  border: 1px solid #2a3348;
   border-radius: 8px;
   overflow: hidden;
-  background: #101722;
+  background: #111927;
 }
 .terminal-host {
   position: relative;
@@ -1044,9 +1195,8 @@ section.card { margin-bottom: 0; }
 .ai-turn { display: flex; flex-direction: column; gap: 6px; }
 .ai-role {
   display: block;
-  font-size: 11px;
-  letter-spacing: 0.4px;
-  text-transform: uppercase;
+  font-size: 11.5px;
+  font-weight: 500;
   color: var(--text-dim);
   margin-bottom: 4px;
 }
