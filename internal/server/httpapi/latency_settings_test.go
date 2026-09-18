@@ -217,6 +217,213 @@ func TestDeleteLatencyTargetPushesUpdatedListToOnlineAgent(t *testing.T) {
 	}
 }
 
+// §13 (实现修订 2026-09-18): a global target used to be create-or-delete only —
+// fixing a typo'd host meant deleting the target and adding it back, which lost
+// the nodes' selection and renumbered the id. Editing keeps the id, tells the
+// probes that select it immediately (the endpoint travels in the pushed list),
+// and is honest about history: a rename keeps the samples, an endpoint change
+// drops them because they were measured against another host.
+func TestUpdateLatencyTargetPushesEndpointAndPurgesOnlyOnEndpointChange(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+	nodeID, secret := seedNode(t, api, "latency-upd", "m-latency-upd", "198.51.100.11")
+	targetID, err := api.Store.CreateLatencyTarget("edge", "tcp", "203.0.113.20", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Store.SetNodeLatencyTargets(nodeID, []int64{targetID}); err != nil {
+		t.Fatal(err)
+	}
+	// History measured against the endpoint that is about to move.
+	if err := api.Store.InsertLatencySamples(nodeID, []store.LatencySampleRow{
+		{TargetID: targetID, TS: time.Now().Unix() - 10, TCPMs: 12.5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	wsURL := "ws" + srv.URL[len("http"):] + "/ws/agent"
+	headers := http.Header{
+		"X-Fobe-Node-ID":     {nodeID},
+		"X-Fobe-Node-Secret": {secret},
+	}
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("agent dial: %v", err)
+	}
+	defer ws.Close()
+	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var initial protocol.Envelope
+	if err := ws.ReadJSON(&initial); err != nil {
+		t.Fatalf("read hello_ack: %v", err)
+	}
+
+	patch := func(body string) map[string]any {
+		t.Helper()
+		resp, raw := doAuthed(t, http.MethodPatch,
+			fmt.Sprintf("%s/api/latency-targets/%d", srv.URL, targetID), cookie, []byte(body))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("patch target: %d %s", resp.StatusCode, raw)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("decode patch reply: %v", err)
+		}
+		return out
+	}
+	readPushed := func(what string) protocol.LatencyConfig {
+		t.Helper()
+		ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var pushed protocol.Envelope
+		if err := ws.ReadJSON(&pushed); err != nil {
+			t.Fatalf("read %s push: %v", what, err)
+		}
+		if pushed.Type != protocol.TypeLatencyCfg {
+			t.Fatalf("%s push type = %q, want latency_config", what, pushed.Type)
+		}
+		var cfg protocol.LatencyConfig
+		if err := json.Unmarshal(pushed.Payload, &cfg); err != nil {
+			t.Fatalf("decode %s push: %v", what, err)
+		}
+		return cfg
+	}
+
+	// 1) Rename only: same endpoint, history survives, probe still notified
+	// (the name is part of the spec it caches).
+	out := patch(`{"name":"edge-renamed","kind":"tcp","host":"203.0.113.20","port":443}`)
+	if out["endpoint_changed"] != false || out["samples_purged"] != false {
+		t.Fatalf("rename reported an endpoint change: %#v", out)
+	}
+	if samples, err := api.Store.ListLatency(nodeID, targetID, 0); err != nil {
+		t.Fatal(err)
+	} else if len(samples) != 1 {
+		t.Fatalf("rename dropped history: %d samples", len(samples))
+	}
+	if cfg := readPushed("rename"); len(cfg.Targets) != 1 ||
+		cfg.Targets[0].Name != "edge-renamed" || cfg.Targets[0].Host != "203.0.113.20" {
+		t.Fatalf("rename push = %+v", cfg.Targets)
+	}
+
+	// 2) Endpoint change: probe gets the new host/port now, samples go away.
+	out = patch(`{"name":"edge-renamed","kind":"tcp","host":"203.0.113.99","port":8443}`)
+	if out["endpoint_changed"] != true || out["samples_purged"] != true {
+		t.Fatalf("endpoint change not reported: %#v", out)
+	}
+	if cfg := readPushed("endpoint change"); len(cfg.Targets) != 1 ||
+		cfg.Targets[0].Host != "203.0.113.99" || cfg.Targets[0].Port != 8443 {
+		t.Fatalf("endpoint push = %+v", cfg.Targets)
+	}
+	if samples, err := api.Store.ListLatency(nodeID, targetID, 0); err != nil {
+		t.Fatal(err)
+	} else if len(samples) != 0 {
+		t.Fatalf("endpoint change kept %d stale samples", len(samples))
+	}
+	targets, err := api.Store.ListLatencyTargets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].ID != targetID || targets[0].Host != "203.0.113.99" || targets[0].Port != 8443 {
+		t.Fatalf("stored target = %+v", targets)
+	}
+
+	// 3) Switching to icmp normalizes the dormant port away, and a rename that
+	// also flips the kind counts as an endpoint change (kind is what is probed).
+	out = patch(`{"name":"edge-renamed","kind":"icmp","host":"203.0.113.99","port":443}`)
+	if out["endpoint_changed"] != true {
+		t.Fatalf("kind flip not reported: %#v", out)
+	}
+	if targets, err = api.Store.ListLatencyTargets(); err != nil {
+		t.Fatal(err)
+	} else if targets[0].Kind != "icmp" || targets[0].Port != 0 {
+		t.Fatalf("icmp target kept a port: %+v", targets[0])
+	}
+}
+
+// Every ICMP target created through the old panel form stored the form's port
+// (443): the server used to keep it instead of normalizing it away. Renaming
+// such a row must not look like an endpoint move — the probe never dialed that
+// port, so there is nothing to invalidate. The stored port does get normalized.
+func TestUpdateLatencyTargetKeepsHistoryForLegacyICMPPort(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+	nodeID, _ := seedNode(t, api, "latency-icmp-legacy", "m-latency-icmp-legacy", "198.51.100.12")
+	targetID, err := api.Store.CreateLatencyTarget("legacy", "icmp", "203.0.113.30", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Store.InsertLatencySamples(nodeID, []store.LatencySampleRow{
+		{TargetID: targetID, TS: time.Now().Unix() - 10, ICMPMs: 8.25},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, raw := doAuthed(t, http.MethodPatch,
+		fmt.Sprintf("%s/api/latency-targets/%d", srv.URL, targetID), cookie,
+		[]byte(`{"name":"legacy-renamed","kind":"icmp","host":"203.0.113.30","port":443}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("patch legacy icmp: %d %s", resp.StatusCode, raw)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["endpoint_changed"] != false || out["samples_purged"] != false {
+		t.Fatalf("icmp port read as an endpoint change: %#v", out)
+	}
+	if samples, err := api.Store.ListLatency(nodeID, targetID, 0); err != nil {
+		t.Fatal(err)
+	} else if len(samples) != 1 {
+		t.Fatalf("rename dropped legacy icmp history: %d samples", len(samples))
+	}
+	targets, err := api.Store.ListLatencyTargets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].Port != 0 || targets[0].Name != "legacy-renamed" {
+		t.Fatalf("legacy icmp row not normalized: %+v", targets)
+	}
+}
+
+func TestUpdateLatencyTargetRejectsBadInput(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+	targetID, err := api.Store.CreateLatencyTarget("edge", "tcp", "203.0.113.20", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name   string
+		body   string
+		status int
+		code   string
+	}{
+		{"unknown id", `{"name":"x","kind":"tcp","host":"203.0.113.21","port":443}`, http.StatusNotFound, "not_found"},
+		{"empty host", `{"name":"x","kind":"tcp","host":"  ","port":443}`, http.StatusBadRequest, "bad_request"},
+		{"bad kind", `{"name":"x","kind":"udp","host":"203.0.113.21","port":443}`, http.StatusBadRequest, "bad_kind"},
+		{"bad port", `{"name":"x","kind":"tcp","host":"203.0.113.21","port":0}`, http.StatusBadRequest, "bad_port"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := targetID
+			if tc.name == "unknown id" {
+				id = targetID + 4242
+			}
+			resp, raw := doAuthed(t, http.MethodPatch,
+				fmt.Sprintf("%s/api/latency-targets/%d", srv.URL, id), cookie, []byte(tc.body))
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d (%s), want %d", resp.StatusCode, raw, tc.status)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if code := errorCode(body); code != tc.code {
+				t.Fatalf("error code = %q, want %q", code, tc.code)
+			}
+		})
+	}
+}
+
 func TestLatencyIntervalRejectsOutOfRangeValues(t *testing.T) {
 	srv, _ := newTestServer(t)
 	cookie := panelCookie(t, srv)

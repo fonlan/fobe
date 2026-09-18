@@ -19,6 +19,7 @@ export default function Targets() {
   const [targets, setTargets] = useState<LatencyTarget[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<LatencyTarget | null>(null);
+  const [editing, setEditing] = useState<LatencyTarget | null>(null);
 
   const [name, setName] = useState('');
   const [kind, setKind] = useState<'icmp' | 'tcp'>('icmp');
@@ -43,9 +44,9 @@ export default function Targets() {
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
-    const p = parseInt(port, 10);
-    if (!name.trim() || !host.trim() || !isFinite(p) || p <= 0 || p > 65535) {
-      setFormErr(t('err_bad_request'));
+    const p = resolveTargetPort(kind, port);
+    if (!name.trim() || !host.trim() || p === null) {
+      setFormErr(t('target_invalid'));
       return;
     }
     setBusy(true);
@@ -157,6 +158,9 @@ export default function Targets() {
                   <td className="mono">{tg.host}</td>
                   <td className="mono">{tg.kind === 'tcp' ? tg.port : '-'}</td>
                   <td className="nowrap">
+                    <button type="button" className="btn small" onClick={() => setEditing(tg)}>
+                      {t('edit')}
+                    </button>{' '}
                     <button type="button" className="btn danger small" onClick={() => setDeleting(tg)}>
                       {t('delete')}
                     </button>
@@ -166,6 +170,17 @@ export default function Targets() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {editing && (
+        <EditTargetModal
+          target={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            void load();
+          }}
+        />
       )}
 
       {deleting && (
@@ -252,5 +267,116 @@ function LatencyFrequencyCard() {
       </div>
       <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void save()} label={t('save')} />
     </section>
+  );
+}
+
+/**
+ * The port a target will actually store: icmp carries none (the server
+ * normalizes it away), tcp must be 1–65535. Returns null on invalid input so
+ * both the create form and the edit dialog share one rule.
+ */
+function resolveTargetPort(kind: 'icmp' | 'tcp', port: string): number | null {
+  if (kind === 'icmp') return 0;
+  const p = parseInt(port, 10);
+  if (!isFinite(p) || p <= 0 || p > 65535) return null;
+  return p;
+}
+
+/**
+ * §13 (实现修订 2026-09-18): targets were create-or-delete only — fixing a typo
+ * in a host meant deleting the target and re-adding it, which also orphaned the
+ * registered samples and renumbered the id. Editing keeps the id (and the nodes
+ * that select it) but is honest about the endpoint: changing kind/host/port
+ * clears that target's history, because the old samples were measured against
+ * another endpoint and would otherwise be drawn as one line.
+ */
+function EditTargetModal({
+  target,
+  onClose,
+  onSaved,
+}: {
+  target: LatencyTarget;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { t } = useI18n();
+  const [name, setName] = useState(target.name);
+  const [kind, setKind] = useState<'icmp' | 'tcp'>(target.kind === 'tcp' ? 'tcp' : 'icmp');
+  const [host, setHost] = useState(target.host);
+  const [port, setPort] = useState(target.kind === 'tcp' ? String(target.port) : '443');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const resolved = resolveTargetPort(kind, port);
+  // Mirror of the server's rule: an icmp row never dials a port, so the 443 that
+  // older icmp targets stored must not read as an endpoint change (it would warn
+  // about purging history on a plain rename).
+  const storedPort = target.kind === 'icmp' ? 0 : target.port;
+  const endpointChanged =
+    kind !== target.kind ||
+    host.trim() !== target.host ||
+    (resolved !== null && resolved !== storedPort);
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!name.trim() || !host.trim() || resolved === null) {
+      setErr(t('target_invalid'));
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.updateLatencyTarget(target.id, name.trim(), kind, host.trim(), resolved);
+      onSaved();
+    } catch (ex) {
+      setErr(apiErrorMessage(ex, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={t('target_edit')} onClose={onClose}>
+      <form onSubmit={save}>
+        <div className="form-grid">
+          <label className="field">
+            <span>{t('name')}</span>
+            <input value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>{t('target_kind')}</span>
+            <select value={kind} onChange={(e) => setKind(e.target.value === 'tcp' ? 'tcp' : 'icmp')}>
+              <option value="icmp">ICMP</option>
+              <option value="tcp">TCP</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>{t('target_host')}</span>
+            <input value={host} onChange={(e) => setHost(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>{t('target_port')}</span>
+            <input
+              type="number"
+              min="1"
+              max="65535"
+              value={port}
+              disabled={kind === 'icmp'}
+              onChange={(e) => setPort(e.target.value)}
+            />
+          </label>
+        </div>
+        {endpointChanged && <p className="hint">{t('target_edit_purge_hint')}</p>}
+        {err && <div className="form-error">{err}</div>}
+        <div className="row-end">
+          <button type="button" className="btn" onClick={onClose}>
+            {t('cancel')}
+          </button>
+          <button type="submit" className="btn primary" disabled={busy}>
+            {busy ? t('loading') : t('save')}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }

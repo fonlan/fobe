@@ -332,6 +332,30 @@ type latencyTargetReq struct {
 	Port int    `json:"port"`
 }
 
+// normalizeLatencyTarget trims and validates a target definition in place,
+// returning the error code to answer with ("" = valid). Create and update share
+// it so the two cannot drift; icmp targets drop their port because the field is
+// meaningless for them (import already normalized it, create used to store
+// whatever the form sent — the list then showed a port that was never dialed).
+func normalizeLatencyTarget(req *latencyTargetReq) string {
+	req.Name = strings.TrimSpace(req.Name)
+	req.Host = strings.TrimSpace(req.Host)
+	if req.Host == "" {
+		return "bad_request"
+	}
+	if req.Kind != "icmp" && req.Kind != "tcp" {
+		return "bad_kind"
+	}
+	if req.Kind == "tcp" {
+		if req.Port <= 0 || req.Port > 65535 {
+			return "bad_port"
+		}
+	} else {
+		req.Port = 0
+	}
+	return ""
+}
+
 func (s *Server) handleListLatencyTargets(w http.ResponseWriter, r *http.Request) {
 	targets, err := s.Store.ListLatencyTargets()
 	if err != nil {
@@ -343,16 +367,12 @@ func (s *Server) handleListLatencyTargets(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleCreateLatencyTarget(w http.ResponseWriter, r *http.Request) {
 	var req latencyTargetReq
-	if err := decodeJSON(r, &req); err != nil || req.Host == "" {
+	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request")
 		return
 	}
-	if req.Kind != "icmp" && req.Kind != "tcp" {
-		writeErr(w, http.StatusBadRequest, "bad_kind")
-		return
-	}
-	if req.Kind == "tcp" && (req.Port <= 0 || req.Port > 65535) {
-		writeErr(w, http.StatusBadRequest, "bad_port")
+	if code := normalizeLatencyTarget(&req); code != "" {
+		writeErr(w, http.StatusBadRequest, code)
 		return
 	}
 	id, err := s.Store.CreateLatencyTarget(req.Name, req.Kind, req.Host, req.Port)
@@ -361,6 +381,50 @@ func (s *Server) handleCreateLatencyTarget(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id})
+}
+
+// handleUpdateLatencyTarget rewrites a global target (§13). Two consequences
+// beyond the row itself:
+//   - the definition (kind/host/port) is what a probe dials, so every node that
+//     selects this target gets the new list right away — waiting for the next
+//     hello_ack means a long-lived connection keeps probing the old endpoint
+//     (same rule as the delete path, 实现修订 2026-09-17k);
+//   - samples recorded against the old endpoint are dropped, else the detail
+//     chart would draw two different hosts on one line (store does it in the
+//     same transaction).
+func (s *Server) handleUpdateLatencyTarget(w http.ResponseWriter, r *http.Request) {
+	tid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	var req latencyTargetReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if code := normalizeLatencyTarget(&req); code != "" {
+		writeErr(w, http.StatusBadRequest, code)
+		return
+	}
+	affected, _ := s.Store.NodeIDsForLatencyTarget(tid)
+	endpointChanged, err := s.Store.UpdateLatencyTarget(tid, req.Name, req.Kind, req.Host, req.Port)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	for _, nodeID := range affected {
+		s.Hub.PushLatencyTargets(nodeID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":               true,
+		"endpoint_changed": endpointChanged,
+		"samples_purged":   endpointChanged,
+	})
 }
 
 func (s *Server) handleDeleteLatencyTarget(w http.ResponseWriter, r *http.Request) {

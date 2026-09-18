@@ -330,6 +330,49 @@ func (s *Store) DeleteLatencyTarget(id int64) error {
 	return err
 }
 
+// UpdateLatencyTarget rewrites a target's definition and reports whether the
+// measured endpoint (kind/host/port) moved. When it did, the target's samples
+// are deleted in the same transaction: latency_samples is keyed by target_id,
+// so keeping them would splice two different endpoints into one chart line —
+// after a rename they are still the same endpoint and must survive (§13).
+func (s *Store) UpdateLatencyTarget(id int64, name, kind, host string, port int) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var curKind, curHost string
+	var curPort int
+	err = tx.QueryRow(`SELECT kind, host, port FROM latency_targets WHERE id = ?`, id).
+		Scan(&curKind, &curHost, &curPort)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("read latency target: %w", err)
+	}
+	// icmp targets created before the port normalization existed carry the
+	// form's default port (443). An icmp row never dials a port, so a port-only
+	// difference between two icmp rows is not an endpoint move — counting it
+	// would purge the history of an existing ICMP target on a mere rename.
+	portMoved := curPort != port && !(curKind == "icmp" && kind == "icmp")
+	endpointChanged := curKind != kind || curHost != host || portMoved
+
+	if _, err := tx.Exec(
+		`UPDATE latency_targets SET name = ?, kind = ?, host = ?, port = ? WHERE id = ?`,
+		name, kind, host, port, id,
+	); err != nil {
+		return false, fmt.Errorf("update latency target: %w", err)
+	}
+	if endpointChanged {
+		if _, err := tx.Exec(`DELETE FROM latency_samples WHERE target_id = ?`, id); err != nil {
+			return false, fmt.Errorf("purge latency samples: %w", err)
+		}
+	}
+	return endpointChanged, tx.Commit()
+}
+
 func (s *Store) ListLatencyTargets() ([]LatencyTarget, error) {
 	rows, err := s.db.Query(`SELECT id, name, kind, host, port FROM latency_targets ORDER BY id`)
 	if err != nil {

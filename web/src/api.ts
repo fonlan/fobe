@@ -340,6 +340,21 @@ export function createLatencyTarget(name: string, kind: string, host: string, po
   return request('/api/latency-targets', { method: 'POST', body: { name, kind, host, port } });
 }
 
+/**
+ * §13: rewriting a target's endpoint (kind/host/port) also purges the samples
+ * recorded against the old one, so the detail chart never splices two hosts
+ * into a single line. Renaming alone keeps the history.
+ */
+export function updateLatencyTarget(
+  id: number,
+  name: string,
+  kind: string,
+  host: string,
+  port: number,
+): Promise<{ ok: boolean; endpoint_changed: boolean; samples_purged: boolean }> {
+  return request(`/api/latency-targets/${id}`, { method: 'PATCH', body: { name, kind, host, port } });
+}
+
 export function deleteLatencyTarget(id: number): Promise<{ ok: boolean }> {
   return request(`/api/latency-targets/${id}`, { method: 'DELETE' });
 }

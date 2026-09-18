@@ -155,6 +155,7 @@ func (s *Server) Handler() http.Handler {
 	// latency targets (§13)
 	mux.HandleFunc("GET /api/latency-targets", s.requireSession(s.handleListLatencyTargets))
 	mux.HandleFunc("POST /api/latency-targets", s.requireSession(s.handleCreateLatencyTarget))
+	mux.HandleFunc("PATCH /api/latency-targets/{id}", s.requireSession(s.handleUpdateLatencyTarget))
 	mux.HandleFunc("DELETE /api/latency-targets/{id}", s.requireSession(s.handleDeleteLatencyTarget))
 
 	// ops surfaces

@@ -753,6 +753,10 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - 前端：折线图 + 丢包率；每探针一张"多目标对比"图。
 - **设置入口（实现修订 2026-09-16）**：全局频率 `latency.interval_seconds` 的输入面板从「基础设置」页移到设置子页 **延迟测量**（`/settings/targets`，原页名「延迟目标」改为「延迟测量」）——"多久测一次"与"测哪些目标"是同一件事的两半，现在同页；该卡片自带 settings 草稿状态（页面是 Settings 的 route 子节点，借不到父级的 draft map），保存与默认值兜底（空值落回 5s）语义不变。
 - **目标变更即时下发（实现修订 2026-09-17k）**：测量目标此前只随 `hello_ack` 下发，面板改完 `latency_target_ids` 后对在线探针**什么都不推**——稳定长连接的探针要等下一次 WS 重连（可能永远不会发生）才换目标列表，表现为"给已有节点加了延迟测量，详情页永远不出新折线"（前端对没有样本的目标不画线）。现在编辑保存后立即对该节点下发携带目标列表的 `latency_config`（`hub.PushLatencyTargets`，与 `hello_ack` 同源读 `TargetsForNode`，两个载体不会不一致）；删除全局目标同样即时推送所有仍选中它的节点（先查 `NodeIDsForLatencyTarget` 再删，FK 级联会抹掉线索）；离线探针由下次 `hello_ack` 兜底。字段语义：`latency_config.targets` 为 `null`（全局频率广播的形态）＝目标不变；非 null 空数组＝清空、真的停测——所以该字段**不能加 `omitempty`**，否则清空永远到不了 agent。旧 agent 忽略未知字段不受影响，自更新后自然跟上。**同日补齐显示侧（17k 的另一半）**：下发修好后真机仍"看不到新折线"——目标是防火墙拦 ICMP 的地址，每个样本都 `icmp_ms=-1, loss=1`，前端对没有有效 RTT 点的目标不画线，于是「在测但全丢」与「没在测」在面板上无法区分。现在详情页对画不出线的目标显式标注：有样本标「全部丢包 · 目标无回应」（提示换 tcp 类型），无样本标「暂无样本 · 探针离线或尚未开始」。
+- **目标可编辑（实现修订 2026-09-18）**：目标此前只能新建/删除——改一个写错的 host 只能删掉重加，连带丢掉「哪些探针在测它」的勾选（`node_latency_targets` 被 FK 级联清空），id 还会变（AUTOINCREMENT 不复用），而图表、样本、详情页认的全是 `target_id`，操作者视角等于"换了个目标"。现在 `PATCH /api/latency-targets/{id}` 原地改 `name/kind/host/port`，三条语义：
+  - **改了端点（kind/host/port）就清掉该目标的历史样本**，与 UPDATE 同一事务 `DELETE FROM latency_samples WHERE target_id = ?`。`latency_samples` 只按 `target_id` 键、不存端点，留着就会把两个不同主机的测量画成同一条折线，事后无法分辨"这条线测的是谁"。**只改名字不清**：同一端点的历史仍然有效。**icmp 行之间的端口差异不算端点变化**——旧创建路径把表单默认的 443 原样存进了 icmp 行（存量目标几乎都是这样），只要把它当端点变更，改个名字就会静默清掉历史；现在 icmp↔icmp 只比 host（端口仍会在写入时归一化成 0，属于字段清理而非失效判定）。响应回 `endpoint_changed` / `samples_purged`，面板在端点真的变了时于弹窗内提示"保存后该目标的历史样本会被清除"。
+  - **改完立刻向所有仍选中它的探针下发新定义**（`NodeIDsForLatencyTarget` + `PushLatencyTargets`，与删除同一套路）：host/kind/port 是探针真正去拨的东西，等下一次 `hello_ack` 就等于让长连接探针继续测旧端点——与上面 17k 那条是同一个坑。
+  - **校验抽成 `normalizeLatencyTarget`，创建与编辑共用**：host 去空白后不可为空、kind ∈ {icmp,tcp}、tcp 端口 1–65535；**icmp 的端口一律归零**——此前创建路径会把表单里的 443 原样存下，列表于是显示一个永远不会被拨的端口（导入路径本来就归零，两条路口径不一）。id 不存在回 `404 not_found`，非法输入回 `bad_request`/`bad_kind`/`bad_port`。
 
 ---
 
