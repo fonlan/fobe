@@ -82,6 +82,10 @@ func newIndex() *Index {
 
 // Lookup resolves "<provider slug>/<model id>" by exact match. Both sides are
 // whitespace-trimmed (form input hygiene — still an exact match, not a search).
+//
+// This is the path when the operator DID pick a slug: the choice is explicit,
+// so it is honoured even when another provider also publishes the id. A
+// provider without a slug goes through LookupByID instead.
 func (ix *Index) Lookup(providerSlug, modelID string) (ModelMeta, bool) {
 	if ix == nil {
 		return ModelMeta{}, false
@@ -92,6 +96,90 @@ func (ix *Index) Lookup(providerSlug, modelID string) (ModelMeta, bool) {
 	}
 	meta, ok := byID[strings.TrimSpace(modelID)]
 	return meta, ok
+}
+
+// ModelMatch is the outcome of an id-ONLY lookup (LookupByID): the metadata
+// plus where it came from, because a bare id is not unique across the document.
+type ModelMatch struct {
+	// Meta is the winning candidate's metadata.
+	Meta ModelMeta
+	// Provider is the models.dev slug that candidate belongs to. The panel
+	// names it: metadata attached by consensus is a guess, and the operator has
+	// to be able to see which vendor's copy it guessed from.
+	Provider string
+	// Candidates is how many providers publish this exact id. 1 = unambiguous.
+	Candidates int
+}
+
+// LookupByID resolves a BARE model id against every provider in the snapshot
+// (§12.5 修订 2026-09-18). It exists for the common case in practice: a relay
+// (中转站) serves models from many vendors at once, so "one provider = one
+// models.dev slug" does not hold and the operator has nothing meaningful to
+// pick in the slug field.
+//
+// The id is still matched EXACTLY — this is not a fuzzy search. What it does
+// accept is ambiguity: 1091 of the 3725 distinct ids in today's api.json are
+// published by more than one provider (实测), and their copies disagree on
+// `limit` (a gateway may clip the context, another may inflate it). The winner
+// is therefore picked by consensus, deterministically:
+//
+//  1. the (context, output) pair the most providers agree on — a single
+//     gateway's outlier cannot decide the row;
+//  2. on a tie, the larger context, then the larger output (the model's
+//     ceiling is the more useful reading, and the operator can freeze/edit);
+//  3. still tied, the smallest slug — never map iteration order.
+func (ix *Index) LookupByID(modelID string) (ModelMatch, bool) {
+	if ix == nil {
+		return ModelMatch{}, false
+	}
+	id := strings.TrimSpace(modelID)
+	if id == "" {
+		return ModelMatch{}, false
+	}
+
+	type candidate struct {
+		slug string
+		meta ModelMeta
+	}
+	var candidates []candidate
+	for slug, byID := range ix.models {
+		if meta, ok := byID[id]; ok {
+			candidates = append(candidates, candidate{slug: slug, meta: meta})
+		}
+	}
+	if len(candidates) == 0 {
+		return ModelMatch{}, false
+	}
+
+	// Vote on the limit pair first: the rest of the metadata (levels,
+	// modalities, name) travels with whichever entry wins.
+	counts := make(map[[2]int]int, len(candidates))
+	for _, c := range candidates {
+		counts[limitKey(c.meta)]++
+	}
+	// One total order, so a missing clause cannot silently fall through to map
+	// order: consensus, then the larger limit, then the slug.
+	slices.SortFunc(candidates, func(a, b candidate) int {
+		if d := counts[limitKey(b.meta)] - counts[limitKey(a.meta)]; d != 0 {
+			return d
+		}
+		if d := b.meta.ContextWindow - a.meta.ContextWindow; d != 0 {
+			return d
+		}
+		if d := b.meta.MaxOutputTokens - a.meta.MaxOutputTokens; d != 0 {
+			return d
+		}
+		return strings.Compare(a.slug, b.slug)
+	})
+	best := candidates[0]
+	return ModelMatch{Meta: best.meta, Provider: best.slug, Candidates: len(candidates)}, true
+}
+
+// limitKey is the pair the consensus vote runs on. Context/window are the
+// fields gateways actually disagree about; everything else travels with the
+// winning entry.
+func limitKey(m ModelMeta) [2]int {
+	return [2]int{m.ContextWindow, m.MaxOutputTokens}
 }
 
 // Provider resolves a provider slug.

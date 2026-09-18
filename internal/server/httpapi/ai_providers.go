@@ -814,8 +814,9 @@ const aiFetchModelsTimeout = 20 * time.Second
 type aiFetchedModelView struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"display_name"`
-	// Matched: models.dev has metadata for this provider's slug + this id, so
-	// adding it fills the limits automatically.
+	// Matched: models.dev has metadata for this id (this provider's slug when it
+	// has one, the bare id otherwise — see lookupModelMeta), so adding it fills
+	// the limits automatically.
 	Matched bool `json:"matched"`
 	// Linked: already attached to this provider.
 	Linked bool `json:"linked"`
@@ -873,10 +874,10 @@ func (s *Server) handleFetchAIModels(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]aiFetchedModelView, 0, len(fetched))
 	for _, m := range fetched {
-		matched := false
-		if s.ModelsDev != nil && provider.ModelsDevSlug != "" {
-			_, matched = s.ModelsDev.Lookup(provider.ModelsDevSlug, m.ID)
-		}
+		// Same resolution the import will use (§12.5): a slugless provider
+		// (relay) matches by model id, so the "has metadata" mark must not be
+		// stricter than the import itself.
+		_, _, matched := s.lookupModelMeta(provider, m.ID)
 		out = append(out, aiFetchedModelView{
 			ID: m.ID, DisplayName: m.DisplayName, Matched: matched, Linked: linked[m.ID],
 		})

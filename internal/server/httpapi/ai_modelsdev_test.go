@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -154,23 +155,112 @@ func TestMatchAIModelsFillsMetadataAndFreezesEditedFields(t *testing.T) {
 	}
 }
 
-func TestMatchAIModelsWithoutSlugIsRefused(t *testing.T) {
+// TestMatchAIModelsWithoutSlugMatchesByModelID is the §12.5 修订 2026-09-18
+// behaviour: a relay (中转站) has no meaningful slug, so an id-only match is the
+// normal path rather than a 400.
+func TestMatchAIModelsWithoutSlugMatchesByModelID(t *testing.T) {
 	server, api := newTestServer(t)
 	defer server.Close()
 	api.ModelsDev = newModelsDevTestManager(t)
 	cookie := loginCookie(t, server.URL)
 
 	if err := api.Store.UpsertAIProvider(&store.AIProvider{
-		ID: "aip-noslug", Name: "self-hosted", Protocol: store.ProtocolOpenAICompletions,
-		BaseURL: "https://self.example/v1", Enabled: true,
+		ID: "aip-noslug", Name: "relay", Protocol: store.ProtocolOpenAICompletions,
+		BaseURL: "https://relay.example/v1", Enabled: true,
 		CreatedAt: nowUnix(), UpdatedAt: nowUnix(),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	resp, raw := doAuthed(t, "POST", server.URL+"/api/ai/models/match", cookie,
-		[]byte(`{"provider_id":"aip-noslug","model_ids":["gpt-5"]}`))
-	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "provider_has_no_slug") {
-		t.Fatalf("got %d %s, want 400 provider_has_no_slug", resp.StatusCode, raw)
+		[]byte(`{"provider_id":"aip-noslug","model_ids":["gpt-5","definitely-not-a-model"]}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("match: %d %s", resp.StatusCode, raw)
+	}
+	var result aiMatchResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Applied) != 1 || result.Applied[0] != "gpt-5" {
+		t.Fatalf("applied = %+v", result.Applied)
+	}
+	if len(result.Unmatched) != 1 || result.Unmatched[0] != "definitely-not-a-model" {
+		t.Fatalf("unmatched = %+v (an id nobody publishes is still unmatched)", result.Unmatched)
+	}
+	// Provenance travels with the match: the panel must be able to say which
+	// provider's copy of "gpt-5" it took, because three publish it.
+	src, ok := result.Sources["gpt-5"]
+	if !ok || src.Slug != "azure" || src.Candidates != 3 {
+		t.Fatalf("sources = %+v, want gpt-5→{azure,3}", result.Sources)
+	}
+	model, err := api.Store.GetAIModel("gpt-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The consensus pair (openai + azure both say 400000/128000) beats the
+	// gateway's own outlier copy, and the name proves which entry won.
+	if model.ContextWindow != 400000 || model.MaxOutputTokens != 128000 {
+		t.Fatalf("metadata = %+v, want the majority 400000/128000", model)
+	}
+	if model.DisplayName != "GPT-5 (Azure)" || model.Source != "models_dev" {
+		t.Fatalf("display name/source not applied: %+v", model)
+	}
+}
+
+func TestImportAIModelsWithoutSlugUsesModelID(t *testing.T) {
+	server, api := newTestServer(t)
+	defer server.Close()
+	api.ModelsDev = newModelsDevTestManager(t)
+	cookie := loginCookie(t, server.URL)
+
+	if err := api.Store.UpsertAIProvider(&store.AIProvider{
+		ID: "aip-noslug", Name: "relay", Protocol: store.ProtocolOpenAICompletions,
+		BaseURL: "https://relay.example/v1", Enabled: true,
+		CreatedAt: nowUnix(), UpdatedAt: nowUnix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw := doAuthed(t, "POST", server.URL+"/api/ai/providers/aip-noslug/import-models", cookie,
+		[]byte(`{"model_ids":["claude-sonnet-4-6","totally-unknown-id"]}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("import: %d %s", resp.StatusCode, raw)
+	}
+	var result aiImportResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Added) != 2 {
+		t.Fatalf("added = %+v, want both ids linked", result.Added)
+	}
+	if len(result.Unmatched) != 1 || result.Unmatched[0] != "totally-unknown-id" {
+		t.Fatalf("unmatched = %+v, want only the id nobody publishes", result.Unmatched)
+	}
+	if src := result.Sources["claude-sonnet-4-6"]; src.Slug != "anthropic" || src.Candidates != 1 {
+		t.Fatalf("sources = %+v, want the unambiguous anthropic entry", result.Sources)
+	}
+	matchedRow, err := api.Store.GetAIModel("claude-sonnet-4-6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matchedRow.Source != "models_dev" || matchedRow.ContextWindow != 1000000 {
+		t.Fatalf("metadata row = %+v, want it filled from models.dev", matchedRow)
+	}
+	// The unmatched id is still a row (the operator may want it) and says so.
+	manualRow, err := api.Store.GetAIModel("totally-unknown-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manualRow.Source != "manual" || manualRow.DisplayName != "totally-unknown-id" {
+		t.Fatalf("manual row = %+v, want a hand-fill placeholder", manualRow)
+	}
+	// Both are linked to the relay, which is the point of the call.
+	links, err := api.Store.AIProviderModelIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"claude-sonnet-4-6", "totally-unknown-id"} {
+		if !slices.Contains(links["aip-noslug"], id) {
+			t.Fatalf("%s not linked to the provider: %+v", id, links["aip-noslug"])
+		}
 	}
 }
 

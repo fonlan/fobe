@@ -1119,11 +1119,23 @@ export interface AIModelInput {
   enabled?: boolean;
 }
 
+/**
+ * Where one model's metadata came from. Without a models.dev slug the server
+ * matches the model id across every provider, so `candidates > 1` means the
+ * values are a majority reading of several gateways' copies, not a fact.
+ */
+export interface AIMatchSource {
+  slug: string;
+  candidates: number;
+}
+
 export interface AIModelMatchResult {
   applied: string[];
   unmatched: string[];
   /** "model_id:field" entries a refresh deliberately left alone (frozen). */
   frozen: string[];
+  /** model id → provenance; missing on older server builds. */
+  sources?: Record<string, AIMatchSource>;
 }
 
 /** POST /api/ai/providers/{id}/import-models: match + create + link in one call. */
@@ -1131,6 +1143,7 @@ export interface AIModelImportResult {
   added: string[];
   unmatched: string[];
   frozen: string[];
+  sources?: Record<string, AIMatchSource>;
 }
 
 export interface ModelsDevSlug {
@@ -1157,6 +1170,14 @@ export interface ModelsDevStatus {
 export interface AIFetchedModel {
   id: string;
   display_name: string;
+  /**
+   * models.dev has metadata for this id — under the provider's slug when it has
+   * one, by model id otherwise (§12.5 修订 2026-09-18). false means the row will
+   * be created with hand-fill defaults. Absent on older server builds.
+   */
+  matched?: boolean;
+  /** Already attached to this provider. */
+  linked?: boolean;
 }
 
 export interface AIFetchedModels {

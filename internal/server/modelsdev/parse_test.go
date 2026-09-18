@@ -168,8 +168,9 @@ func TestLookupDrivesReasoningLevels(t *testing.T) {
 func TestLookupIsExactPerProvider(t *testing.T) {
 	ix := parseFixture(t)
 
-	// The same id exists in three providers with different limits: matching must
-	// follow the slug, never a global id search.
+	// The same id exists in three providers with different limits: when a slug
+	// IS given the match follows it and never wanders to another provider (the
+	// slugless path is LookupByID, tested separately).
 	openai, ok := ix.Lookup("openai", "gpt-5")
 	if !ok {
 		t.Fatal("Lookup(openai/gpt-5) = miss, want hit")
@@ -226,10 +227,125 @@ func TestLookupTrimsFormInput(t *testing.T) {
 	}
 }
 
+// TestLookupByIDResolvesBareIDs is the §12.5 修订 2026-09-18 path: a relay
+// serves many vendors' models at once, so with no slug the id itself is the key.
+func TestLookupByIDResolvesBareIDs(t *testing.T) {
+	ix := parseFixture(t)
+
+	// Unambiguous: only anthropic publishes it.
+	only, ok := ix.LookupByID("claude-sonnet-4-6")
+	if !ok {
+		t.Fatal("LookupByID(claude-sonnet-4-6) = miss, want hit")
+	}
+	if only.Provider != "anthropic" || only.Candidates != 1 {
+		t.Errorf("match = %+v, want provider=anthropic candidates=1", only)
+	}
+	if only.Meta.ContextWindow != 1000000 {
+		t.Errorf("context = %d, want anthropic's 1000000", only.Meta.ContextWindow)
+	}
+
+	// Ambiguous (three providers) and the copies disagree: openai/azure say
+	// 400000/128000, tokengo says 128000/16384. Consensus picks the pair two of
+	// them agree on; that group is then tied on the limit, so the smallest slug
+	// decides — deterministically, never by map order. The name proves the rest
+	// of the metadata travelled with the winning entry.
+	ambiguous, ok := ix.LookupByID("gpt-5")
+	if !ok {
+		t.Fatal("LookupByID(gpt-5) = miss, want hit")
+	}
+	if ambiguous.Candidates != 3 {
+		t.Errorf("candidates = %d, want 3", ambiguous.Candidates)
+	}
+	if ambiguous.Provider != "azure" {
+		t.Errorf("provider = %q, want azure (consensus pair, then slug order)", ambiguous.Provider)
+	}
+	if ambiguous.Meta.ContextWindow != 400000 || ambiguous.Meta.MaxOutputTokens != 128000 {
+		t.Errorf("limit = %d/%d, want 400000/128000 (the gateway's 128000/16384 is the outlier)",
+			ambiguous.Meta.ContextWindow, ambiguous.Meta.MaxOutputTokens)
+	}
+	if ambiguous.Meta.Name != "GPT-5 (Azure)" {
+		t.Errorf("name = %q, want the winning entry's own name", ambiguous.Meta.Name)
+	}
+
+	// Ids containing a slash are ordinary ids and must match exactly.
+	if m, ok := ix.LookupByID("qwen/qwen3.5-397b-a17b"); !ok || m.Provider != "tokengo" {
+		t.Errorf("LookupByID(slashed id) = %+v, %v; want tokengo", m, ok)
+	}
+
+	if _, ok := ix.LookupByID("qwen3.5-397b-a17b"); ok {
+		t.Error("LookupByID with a shortened id = hit, want miss (still exact, not fuzzy)")
+	}
+	if _, ok := ix.LookupByID("definitely-not-a-model"); ok {
+		t.Error("unknown id = hit, want miss")
+	}
+	if _, ok := ix.LookupByID(""); ok {
+		t.Error(`LookupByID("") = hit, want miss`)
+	}
+	if _, ok := ix.LookupByID("  "); ok {
+		t.Error("blank id = hit, want miss")
+	}
+}
+
+// TestLookupByIDPrefersConsensusOverOutliers pins the rule that keeps one
+// gateway's inflated limit from deciding the row, plus the tie-break ladder
+// underneath it.
+func TestLookupByIDPrefersConsensusOverOutliers(t *testing.T) {
+	// Two providers agree on 200000/8192; one advertises 1000000/128000. The
+	// inflating gateway must lose despite carrying the larger numbers.
+	const consensus = `{
+	  "a":{"id":"a","models":{"m":{"id":"m","name":"A","limit":{"context":200000,"output":8192}}}},
+	  "b":{"id":"b","models":{"m":{"id":"m","name":"B","limit":{"context":200000,"output":8192}}}},
+	  "c":{"id":"c","models":{"m":{"id":"m","name":"C","limit":{"context":1000000,"output":128000}}}}
+	}`
+	ix, err := Parse(strings.NewReader(consensus))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	m, ok := ix.LookupByID("m")
+	if !ok {
+		t.Fatal("LookupByID(m) = miss, want hit")
+	}
+	if m.Meta.ContextWindow != 200000 || m.Candidates != 3 {
+		t.Errorf("match = %+v, want the majority's 200000 out of 3 candidates", m)
+	}
+
+	// Tied on count (1 vs 1): the larger context wins.
+	const tie = `{
+	  "a":{"id":"a","models":{"m":{"id":"m","limit":{"context":100000,"output":8192}}}},
+	  "b":{"id":"b","models":{"m":{"id":"m","limit":{"context":200000,"output":8192}}}}
+	}`
+	ix, err = Parse(strings.NewReader(tie))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if m, _ := ix.LookupByID("m"); m.Meta.ContextWindow != 200000 || m.Provider != "b" {
+		t.Errorf("tie-break = %+v, want the larger context (b/200000)", m)
+	}
+
+	// Tied on the whole limit pair: slug order, so the answer cannot depend on
+	// Go's map iteration order.
+	const slugTie = `{
+	  "zeta":{"id":"zeta","models":{"m":{"id":"m","name":"Z","limit":{"context":200000,"output":8192}}}},
+	  "alpha":{"id":"alpha","models":{"m":{"id":"m","name":"A","limit":{"context":200000,"output":8192}}}}
+	}`
+	ix, err = Parse(strings.NewReader(slugTie))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for i := 0; i < 8; i++ {
+		if m, _ := ix.LookupByID("m"); m.Provider != "alpha" || m.Meta.Name != "A" {
+			t.Fatalf("iteration %d: match = %+v, want alpha every time", i, m)
+		}
+	}
+}
+
 func TestIndexMethodsAreNilSafe(t *testing.T) {
 	var ix *Index
 	if _, ok := ix.Lookup("anthropic", "claude-sonnet-4-6"); ok {
 		t.Error("nil Index Lookup = hit, want miss")
+	}
+	if _, ok := ix.LookupByID("gpt-5"); ok {
+		t.Error("nil Index LookupByID = hit, want miss")
 	}
 	if _, ok := ix.Provider("anthropic"); ok {
 		t.Error("nil Index Provider = hit, want miss")

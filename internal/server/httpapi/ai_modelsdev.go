@@ -106,13 +106,60 @@ type aiMatchRequest struct {
 type aiMatchResult struct {
 	// Applied lists models that were created or updated from metadata.
 	Applied []string `json:"applied"`
-	// Unmatched lists ids the chosen models.dev provider does not serve. This
-	// is a normal outcome for a self-hosted gateway, not an error.
+	// Unmatched lists ids neither the chosen slug nor (with no slug) the whole
+	// document serves. This is a normal outcome for a self-hosted gateway, not
+	// an error.
 	Unmatched []string `json:"unmatched"`
 	// Frozen lists fields that were left alone because the operator edited them
 	// (§12.5 "首次匹配即冻结") — naming them is what makes a "why didn't it
 	// update my context window" question answerable from the UI.
 	Frozen []string `json:"frozen"`
+	// Sources maps each applied id to the models.dev provider its metadata came
+	// from. With no slug the id is matched document-wide and may exist under
+	// dozens of providers, so the panel must be able to say WHICH copy it took
+	// — otherwise a consensus pick looks like a fact about this model.
+	Sources map[string]aiMatchSource `json:"sources"`
+}
+
+// aiMatchSource is where one model's metadata came from.
+type aiMatchSource struct {
+	// Slug is the models.dev provider that supplied the metadata.
+	Slug string `json:"slug"`
+	// Candidates is how many providers publish this id (1 when the provider has
+	// a slug, since then only that slug is consulted). >1 means the values are
+	// the majority reading, and a hand-edit is the way to correct them.
+	Candidates int `json:"candidates"`
+}
+
+// lookupModelMeta resolves one model id to models.dev metadata (§12.5).
+//
+// Two paths, in this order:
+//
+//   - the provider HAS a slug: that slug is the operator's explicit choice, so
+//     only `<slug>/<id>` is consulted;
+//   - the provider has NO slug: the id is matched across the whole document.
+//     This is the common case in practice — a relay (中转站) fronts several
+//     vendors at once, so there is no single slug to pick, and the previous
+//     behaviour (refuse with provider_has_no_slug) left the operator filling
+//     every row by hand. The id is still matched EXACTLY; what the slugless
+//     path accepts is ambiguity, resolved by modelsdev.LookupByID's consensus
+//     rule, and the winning slug is reported so the panel can name it.
+func (s *Server) lookupModelMeta(provider *store.AIProvider, modelID string) (modelsdev.ModelMeta, aiMatchSource, bool) {
+	if s.ModelsDev == nil {
+		return modelsdev.ModelMeta{}, aiMatchSource{}, false
+	}
+	if provider.ModelsDevSlug != "" {
+		meta, ok := s.ModelsDev.Lookup(provider.ModelsDevSlug, modelID)
+		if !ok {
+			return modelsdev.ModelMeta{}, aiMatchSource{}, false
+		}
+		return meta, aiMatchSource{Slug: provider.ModelsDevSlug, Candidates: 1}, true
+	}
+	match, ok := s.ModelsDev.LookupByID(modelID)
+	if !ok {
+		return modelsdev.ModelMeta{}, aiMatchSource{}, false
+	}
+	return match.Meta, aiMatchSource{Slug: match.Provider, Candidates: match.Candidates}, true
 }
 
 // handleMatchAIModels fills model rows from models.dev.
@@ -139,20 +186,17 @@ func (s *Server) handleMatchAIModels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	if provider.ModelsDevSlug == "" {
-		// No slug = no matching. Saying so beats silently creating empty rows
-		// the operator then has to fill by hand without knowing why.
-		writeErr(w, http.StatusBadRequest, "provider_has_no_slug")
-		return
-	}
 
-	result := aiMatchResult{Applied: []string{}, Unmatched: []string{}, Frozen: []string{}}
+	result := aiMatchResult{
+		Applied: []string{}, Unmatched: []string{}, Frozen: []string{},
+		Sources: map[string]aiMatchSource{},
+	}
 	for _, modelID := range req.ModelIDs {
 		modelID = strings.TrimSpace(modelID)
 		if modelID == "" {
 			continue
 		}
-		meta, ok := s.ModelsDev.Lookup(provider.ModelsDevSlug, modelID)
+		meta, source, ok := s.lookupModelMeta(provider, modelID)
 		if !ok {
 			result.Unmatched = append(result.Unmatched, modelID)
 			continue
@@ -165,6 +209,7 @@ func (s *Server) handleMatchAIModels(w http.ResponseWriter, r *http.Request) {
 		for _, field := range frozen {
 			result.Frozen = append(result.Frozen, modelID+":"+field)
 		}
+		result.Sources[modelID] = source
 		result.Applied = append(result.Applied, modelID)
 	}
 	sort.Strings(result.Frozen)
@@ -261,6 +306,9 @@ type aiImportResult struct {
 	Added     []string `json:"added"`
 	Unmatched []string `json:"unmatched"`
 	Frozen    []string `json:"frozen"`
+	// Sources is the same provenance map as aiMatchResult.Sources: the fetched
+	// picker has no other way to say "these got metadata, those need hand-fill".
+	Sources map[string]aiMatchSource `json:"sources"`
 }
 
 // handleImportAIModels creates and links the selected models in ONE call.
@@ -286,7 +334,10 @@ func (s *Server) handleImportAIModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := aiImportResult{Added: []string{}, Unmatched: []string{}, Frozen: []string{}}
+	result := aiImportResult{
+		Added: []string{}, Unmatched: []string{}, Frozen: []string{},
+		Sources: map[string]aiMatchSource{},
+	}
 	for _, modelID := range req.ModelIDs {
 		modelID = strings.TrimSpace(modelID)
 		if modelID == "" {
@@ -295,22 +346,20 @@ func (s *Server) handleImportAIModels(w http.ResponseWriter, r *http.Request) {
 		// Metadata when we can get it, a hand-entered row otherwise. Note this
 		// is the ONLY place a model id becomes a row without the operator
 		// typing limits, so the "unmatched" list is what tells them which
-		// entries still need attention.
-		matched := false
-		if s.ModelsDev != nil && provider.ModelsDevSlug != "" {
-			if meta, ok := s.ModelsDev.Lookup(provider.ModelsDevSlug, modelID); ok {
-				frozen, err := s.applyModelMeta(meta, modelID)
-				if err != nil {
-					writeErr(w, http.StatusInternalServerError, "internal")
-					return
-				}
-				matched = true
-				for _, field := range frozen {
-					result.Frozen = append(result.Frozen, modelID+":"+field)
-				}
+		// entries still need attention. A provider with no slug is the common
+		// relay case and still gets metadata, by model id (§12.5 修订).
+		meta, source, matched := s.lookupModelMeta(provider, modelID)
+		if matched {
+			frozen, err := s.applyModelMeta(meta, modelID)
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "internal")
+				return
 			}
-		}
-		if !matched {
+			result.Sources[modelID] = source
+			for _, field := range frozen {
+				result.Frozen = append(result.Frozen, modelID+":"+field)
+			}
+		} else {
 			if _, err := s.Store.GetAIModel(modelID); errors.Is(err, store.ErrNotFound) {
 				row := &store.AIModel{
 					ID: modelID, DisplayName: modelID, Source: "manual", Enabled: true,

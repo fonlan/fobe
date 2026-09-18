@@ -786,10 +786,10 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - **上下文裁剪按整轮**：落库保留全量，发给上游时**从最早的整轮开始丢**，绝不把一轮拆开（`tool_use`/`tool_result` 必须成对、thinking 与同轮绑定）。阈值取该模型的「最大上下文」（models.dev 匹配、可手改），留出最大输出的余量。
 - **元数据源是 `api.json`，不是 `models.json`（2026-09-18 实测）**：`models.dev/models.json` 的 406 个模型**没有一个**带 `reasoning_options`（只有布尔 `reasoning`），拿不到「支持的思考级别」；`api.json`（4.7 MB / 221 providers / 7843 models）才有 `reasoning_options`（`effort` / `toggle` / `budget_tokens`）、`limit.context`、`limit.output`、`modalities`、`npm`（协议提示）与 `cost`。
 - **缓存与刷新**（照 §14.1 GeoIP 的先例）：启动补缺 + 每天一轮；落 `/data` 卷文件（**不进 SQLite**——单写者，别塞 4.7 MB blob）；`FOBE_MODELS_URL` 换镜像、`FOBE_MODELS_AUTO_UPDATE=0` 关闭；拉取失败保留上次，首次离线则元数据为空、全部手填。**解析必须用类型化结构**：同一份文档用通用 `map[string]any` 解析要 ~22–27 MB 常驻，类型化后只有 ~3 MB（实测）。
-- **匹配规则**：provider 上显式选的 models.dev slug × 模型 id **精确匹配**（`<slug>/<id>`）。不做全局模糊匹配——同一个 id 会在几十个网关里重复出现，猜出来的元数据比没有更糟。
+- **匹配规则（2026-09-18b 修订）**：provider 上显式选的 models.dev slug × 模型 id **精确匹配**（`<slug>/<id>`）；**provider 没有 slug 时按模型 id 在全量 provider 里精确匹配**（`LookupByID`）。两条都**不做模糊匹配**——长度 / 前缀 / 大小写都不算命中（`gpt-5` 不会命中 `gpt-5-turbo`）。无 slug 这条接受的只是**歧义**：实测 3725 个 id 里 1091 个被多家收录，各家 `limit` 会不一致（网关既会截断上下文、也会灌水——MiniMax-M2 有一家报 1M、其余四家报 204800）。歧义时按这条确定性规则取一条，绝不依赖 map 迭代顺序：① **（上下文, 最大输出）这一对出现次数最多的一组**——单家网关灌水的数字不能决定这一行；② 仍平票取上下文更大者，再取最大输出更大者；③ 仍平票取 slug 字典序。命中的 slug 与候选家数随结果返回（`sources`），面板在候选 > 1 时明说「取的是多数派、来源是哪家」：按 id 匹配出来的是**多数派的读法**，不是这个模型的事实。
 - **首次匹配即冻结、逐字段标记**：自动写入的字段记进 `overridden_fields`；刷新只补**从未填过**的字段，手改过的永不被覆盖。未命中的模型全部手填。
-- **slug 预填协议与 base_url**：`@ai-sdk/anthropic` → `anthropic-messages`、`@ai-sdk/openai` → `openai-responses`、`@ai-sdk/openai-compatible` → `openai-completions`（可手改）；超出这三种的（azure / google / vertex / groq 等）**只预填 base_url，协议强制手选**——能不能用取决于该上游是否恰好兼容三者之一（Vertex/Google 就不兼容），表单不许替你猜。
-- **模型列表自动获取**：调 provider 的 `GET {base}/models`（Anthropic 同名端点、需 `x-api-key` + `anthropic-version`，且响应是 `has_more` / `last_id` 分页，要跟页）。结果进一个可搜索列表，并标注每条与 models.dev 的匹配状态（命中 / 未命中 / 多候选），勾选后批量添加。部分网关没有该端点（404 或返回 HTML）——此时降级为手填模型 id，不是错误。
+- **slug 预填协议与 base_url**：`@ai-sdk/anthropic` → `anthropic-messages`、`@ai-sdk/openai` → `openai-responses`、`@ai-sdk/openai-compatible` → `openai-completions`（可手改）；超出这三种的（azure / google / vertex / groq 等）**只预填 base_url，协议强制手选**——能不能用取决于该上游是否恰好兼容三者之一（Vertex/Google 就不兼容），表单不许替你猜。**slug 可以留空**，留空只影响"用哪条匹配规则"（按 id）与"预填什么"，不影响能否添加模型。
+- **模型列表自动获取**：调 provider 的 `GET {base}/models`（Anthropic 同名端点、需 `x-api-key` + `anthropic-version`，且响应是 `has_more` / `last_id` 分页，要跟页）。结果进一个可搜索列表，并标注每条与 models.dev 的匹配状态（能否命中走 `lookupModelMeta`，与导入同源——2026-09-18b：面板只给**未命中**的行打标，命中是常态、逐行打标是噪音），勾选后批量添加。部分网关没有该端点（404 或返回 HTML）——此时降级为手填模型 id，不是错误。
 - **思考档位**：统一为 `off / minimal / low / medium / high`，按协议翻译；**档位集合 = 协议能力 ∩ 该模型 `reasoning_options`**：
   - `effort` → 直传档位名；
   - `toggle` → 只有开 / 关两档；
@@ -802,6 +802,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 > 2. **940 个模型 `reasoning=true` 但没有任何 `reasoning_options`** ⇒ 档位集合为空。面板必须显式显示「该模型未提供可调档位」，渲染一个空下拉会被当成表单坏了。
 > 3. **`api` 字段大面积缺失**：221 个 provider 里 26 个没有 `api`（含 anthropic / openai / google / azure / xai / groq），`npm` 则 221/221 都有。所以 slug 只用于**预填**，`base_url` 为空是常态、协议提示为空时要**强制手选**（azure/google/vertex 超出三协议，表单不许替用户猜）。Anthropic 的模型列表分页游标是 `after_id`（不是 `after`），`limit=1000` 且必须处理 `has_more` 但游标不前进的退化情形。
 > 4. **缓存常驻内存 3.1 MiB**（类型化流式解析、221 providers / 7843 models、~50 ms；通用 `map[string]any` 解析同一份文档要 22–27 MB）。
+
+> **实现修订 2026-09-18b（没有 slug 的中转站按 model id 匹配）**：原规格用「不做全局模糊匹配」这一句把自己锁死——provider 没有 slug 时匹配直接 400 `provider_has_no_slug`。真机上的常态恰恰相反：**加模型时加的大多是中转站**，一个 provider 里就是多家厂商的模型，没有哪个 slug 代表得了它（把 provider 名当 slug 没有意义），于是这条规则等于「中转站的模型全部手填」，而表单里那个 slug 字段对这类 provider 是空摆设。现在：**留空 = 按模型 id 精确匹配**（`modelsdev.Index.LookupByID`，歧义按上面的共识规则消解），**填了 slug = 只认 `<slug>/<id>`**（操作员的显式选择仍然权威，不会被别的 provider 的副本顶掉）。匹配结果新增 `sources`（`模型 id → {slug, candidates}`），面板在 `candidates > 1` 时标出来源与「取多数派」；导入（`import-models`）与「拉取模型列表」的 `matched` 标记走同一个 `lookupModelMeta`，三处口径必须一致——否则列表显示「没有元数据」而导入却填上了。`provider_has_no_slug` 错误码与前端 `err_provider_has_no_slug` 文案一并删除。**这是本项目唯一一条「允许猜」的元数据路径**，猜的边界要守住：猜的是**多家收录的多数值**，不是「名字像就算」（仍然精确匹配 id）；猜出来的每个字段依旧可手改、手改即冻结。
 
 ### 12.6 自主循环、流式与熔断（2026-09-18 新增）
 

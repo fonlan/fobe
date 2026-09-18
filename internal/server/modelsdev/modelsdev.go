@@ -335,9 +335,15 @@ func (m *Manager) LoadCache() error {
 
 // Lookup resolves one model by exact "<provider slug>/<model id>". A miss (or an
 // index that is not loaded yet) returns false and the caller falls back to
-// manual entry — never to a guess (§12.5).
+// manual entry — never to another provider's copy (§12.5).
 func (m *Manager) Lookup(providerSlug, modelID string) (ModelMeta, bool) {
 	return m.Index().Lookup(providerSlug, modelID)
+}
+
+// LookupByID resolves a bare model id across every provider (Index.LookupByID):
+// the §12.5 修订 2026-09-18 path for providers that have no slug to match with.
+func (m *Manager) LookupByID(modelID string) (ModelMatch, bool) {
+	return m.Index().LookupByID(modelID)
 }
 
 // Provider returns the provider-level metadata (name, api, npm) for a slug.

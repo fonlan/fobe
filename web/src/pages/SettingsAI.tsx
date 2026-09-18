@@ -838,6 +838,11 @@ function FetchModelsModal({
 
   const selected = Object.keys(picked).filter((k) => picked[k]);
 
+  // Provenance of the last import: how many ids got metadata at all, and how
+  // many of those were resolved among several providers' copies (id matching).
+  const sources = result ? Object.values(result.sources ?? {}) : [];
+  const ambiguous = sources.filter((s) => s.candidates > 1).length;
+
   const doImport = async () => {
     if (selected.length === 0 || busy) return;
     setBusy(true);
@@ -913,6 +918,10 @@ function FetchModelsModal({
                     {m.display_name && m.display_name !== m.id && <span className="hint">{m.display_name}</span>}
                     {linked.has(m.id) && <span className="chip status-ok">{t('ai_fetch_linked_here')}</span>}
                     {known.has(m.id) && <span className="chip">{t('ai_fetch_in_library')}</span>}
+                    {/* Only the rows that will NOT be auto-filled are marked:
+                        that is the actionable half (they need hand-typed
+                        limits), and a chip on every matched row would be noise. */}
+                    {m.matched === false && <span className="chip">{t('ai_fetch_no_metadata')}</span>}
                   </label>
                 ))}
               </div>
@@ -931,6 +940,8 @@ function FetchModelsModal({
               {result.frozen.length > 0 && (
                 <div className="hint">{t('ai_import_frozen', { n: result.frozen.length, fields: result.frozen.join(', ') })}</div>
               )}
+              {sources.length > 0 && <div className="hint">{t('ai_import_matched', { n: sources.length })}</div>}
+              {ambiguous > 0 && <div className="hint">{t('ai_import_ambiguous', { n: ambiguous })}</div>}
             </div>
           )}
 
@@ -1062,7 +1073,8 @@ function ModelEditor({
 
   /**
    * "Match from models.dev": the server looks the id up under the chosen
-   * provider's slug and fills the fields that are NOT frozen.
+   * provider's slug — or, when that provider has no slug (a relay), by the
+   * model id itself — and fills the fields that are NOT frozen.
    *
    * The form's unsaved edits are deliberately dropped rather than saved first:
    * saving would freeze them (that is what an edit means) and the match would
@@ -1088,6 +1100,13 @@ function ModelEditor({
       // unlinked would produce a model that no picker can see.
       await api.linkAIProviderModels(matchProvider, [modelID]);
       const parts = [t('ai_match_applied', { n: r.applied.length })];
+      // Provenance (§12.5 修订 2026-09-18): with no slug the id is matched
+      // document-wide, so when several providers publish it the values are a
+      // consensus pick — say which copy won instead of presenting it as fact.
+      const source = r.sources?.[modelID];
+      if (source && source.candidates > 1) {
+        parts.push(t('ai_match_source', { slug: source.slug, n: source.candidates }));
+      }
       if (r.unmatched.length > 0) {
         parts.push(t('ai_match_unmatched', { n: r.unmatched.length, ids: r.unmatched.join(', ') }));
       }
