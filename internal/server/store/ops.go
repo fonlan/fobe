@@ -413,6 +413,62 @@ func (s *Store) DeleteNodeSingboxInbound(nodeID string, port int) error {
 	return err
 }
 
+// RestoreNodeSingboxInbound writes a lifecycle row back to the state a report
+// implies: the probe lists the port, and the status is the one the caller
+// derived from that report (running when the probe confirmed the port accepts a
+// local connection, pending otherwise). It is the undo of a panel intent mark,
+// needed by two paths: a push that never left the server must not leave a
+// retirement behind, and an edit that keeps a port an earlier edit retired
+// cancels that removal. Without the latter, a listener that is serving would
+// read 删除中 until the next report — and no report is coming, because an edit
+// that merged back to the same document changes nothing on the probe.
+//
+// Every caller restores a port the last report lists, hence `reported = 1`
+// unconditionally: this is not how a listener the probe has never seen is
+// recorded (`SetNodeSingboxInboundPending`).
+func (s *Store) RestoreNodeSingboxInbound(nodeID string, inbound NodeSingboxInbound) error {
+	_, err := s.db.Exec(
+		`INSERT INTO node_singbox_inbounds (node_id, port, type, tag, status, reported, updated_at)
+		 VALUES (?, ?, ?, ?, ?, 1, ?)
+		 ON CONFLICT(node_id, port) DO UPDATE SET
+		   type = excluded.type, tag = excluded.tag, status = excluded.status,
+		   reported = 1, updated_at = excluded.updated_at`,
+		nodeID,
+		inbound.Port,
+		inbound.Type,
+		inbound.Tag,
+		inbound.Status,
+		now(),
+	)
+	return err
+}
+
+// PruneNodeSingboxInboundOptimism drops the panel's optimistic rows — listeners
+// it declared but the probe has never reported (`reported = 0`) — for ports the
+// document it just pushed no longer declares.
+//
+// A port move that is edited again, or an add a later edit takes back out,
+// would otherwise park a 添加中 row forever: reconciliation only sweeps rows the
+// probe has reported, and a port that never reached the probe never appears in
+// a report. Rows with `reported = 1` are deliberately out of reach — they mirror
+// the probe's file, and a listener the panel's document does not mention is
+// one-sing.sh's, not a stale intent (§9.3 实现修订 2026-09-17h).
+func (s *Store) PruneNodeSingboxInboundOptimism(nodeID string, declaredPorts []int) error {
+	args := []any{nodeID}
+	q := `DELETE FROM node_singbox_inbounds
+	      WHERE node_id = ? AND reported = 0 AND status = 'pending'`
+	if len(declaredPorts) > 0 {
+		ph := make([]string, 0, len(declaredPorts))
+		for _, port := range declaredPorts {
+			ph = append(ph, "?")
+			args = append(args, port)
+		}
+		q += ` AND port NOT IN (` + strings.Join(ph, ", ") + `)`
+	}
+	_, err := s.db.Exec(q, args...)
+	return err
+}
+
 // SetNodeSingboxInboundDeleting records that the panel removed this listener
 // from the desired document while the probe is still serving it. The row
 // survives — marked `deleting` — until an agent report no longer lists the
@@ -420,6 +476,10 @@ func (s *Store) DeleteNodeSingboxInbound(nodeID string, port int) error {
 // and it is why the row must not be dropped at edit time (dropping it made the
 // still-listed listener render as plain `pending` — 添加中 — for the whole
 // apply window).
+//
+// A port move uses this too: the listener is not deleted, but the document the
+// panel just pushed no longer serves it, and the probe keeps it up until it
+// applies that document.
 //
 // A listener the probe never acknowledged (reported=0: an add whose desired
 // state has not been applied yet) has nothing to delete on the probe, so its

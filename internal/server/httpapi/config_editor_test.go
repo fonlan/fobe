@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
@@ -663,5 +664,221 @@ func TestSyncSingboxConfigsSkipsEditedNodes(t *testing.T) {
 	after, _ := api.Store.GetSetting("singbox_config:" + id)
 	if before != after {
 		t.Fatal("the startup sync replaced an operator-edited config")
+	}
+}
+
+// Changing an existing listener's port is a move: the probe keeps serving the
+// old port until it applies the pushed document (its observation gate runs in
+// between), so the panel's own view of the move has to come from the edit
+// action. Without it the port the operator just saved is not on the page at
+// all — the row still shows the old one and nothing reads pending, so the UI
+// has no reason to re-read until the operator reloads by hand.
+func TestPutNodeSingboxConfigPortChangeShowsTheMoveUntilReport(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := loginSession(t, srv)
+	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
+	seedLiveConfig(t, api, id, deleteFixture)
+	if err := api.Store.ReconcileNodeSingboxInbounds(id, []store.NodeSingboxInbound{
+		{Port: 22039, Type: "anytls", Tag: "anytls-in-22039"},
+		{Port: 16929, Type: "vless", Tag: "vless-in-16929"},
+	}, []int{22039}, true); err != nil {
+		t.Fatalf("seed lifecycle rows: %v", err)
+	}
+
+	if got := configRows(t, srv, cookie, id); got[22039] != "running" {
+		t.Fatalf("status before the move = %v, want 22039 running", got)
+	}
+
+	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+id+"/singbox/config", cookie,
+		map[string]any{
+			"reported_hash": hashOf(deleteFixture),
+			"update": []map[string]any{
+				{"number": 0, "type": "anytls", "tag": "anytls-in-22039", "port": 22040},
+			},
+		})
+	if r.Status != http.StatusOK {
+		t.Fatalf("move port = %d %s", r.Status, r.Body)
+	}
+
+	got := configRows(t, srv, cookie, id)
+	if got[22040] != "pending" {
+		t.Fatalf("the new port is not on the page after saving: %v", got)
+	}
+	if got[22039] != "deleting" {
+		t.Fatalf("the port moved away from is not retiring: %v", got)
+	}
+	if got[16929] != "pending" {
+		t.Fatalf("untouched listener disturbed: %v", got)
+	}
+
+	// The document the probe will write carries the new port and the credential
+	// the file had (a blank field means "keep", never "blank the password").
+	doc, err := api.Store.GetSetting("singbox_config:" + id)
+	if err != nil {
+		t.Fatalf("pushed document: %v", err)
+	}
+	if !strings.Contains(doc, "22040") || !strings.Contains(doc, "panel-generated-pw") {
+		t.Fatalf("pushed document lost the move or the credential: %s", doc)
+	}
+
+	// The probe applies and reports the file with the new port: the move is
+	// confirmed, the old row is gone and the new one is running.
+	after := strings.Replace(deleteFixture,
+		`{"type": "anytls", "tag": "anytls-in-22039", "listen": "::", "listen_port": 22039,`,
+		`{"type": "anytls", "tag": "anytls-in-22039", "listen": "::", "listen_port": 22040,`, 1)
+	if after == deleteFixture {
+		t.Fatal("fixture anchor missing")
+	}
+	seedLiveConfig(t, api, id, after)
+	if err := api.Store.ReconcileNodeSingboxInbounds(id, []store.NodeSingboxInbound{
+		{Port: 22040, Type: "anytls", Tag: "anytls-in-22039"},
+		{Port: 16929, Type: "vless", Tag: "vless-in-16929"},
+	}, []int{22040}, true); err != nil {
+		t.Fatalf("reconcile applied report: %v", err)
+	}
+	got = configRows(t, srv, cookie, id)
+	if _, listed := got[22039]; listed {
+		t.Fatalf("the retired port is still listed after the confirming report: %v", got)
+	}
+	if got[22040] != "running" {
+		t.Fatalf("status after the confirming report = %v, want 22040 running", got)
+	}
+}
+
+// ackLivePorts marks the reported file's listeners as locally connectable, the
+// way a real agent's report does. seedLiveConfig leaves the check capability
+// unset — reconciliation models that as an older agent, which never confirms a
+// listener — so a test that needs a confirmed port acknowledges it here.
+func ackLivePorts(t *testing.T, api *Server, nodeID string, ports []int) {
+	t.Helper()
+	snap, err := api.Store.GetNodeSingboxLocal(nodeID, api.Crypt)
+	if err != nil {
+		t.Fatalf("read local snapshot: %v", err)
+	}
+	snap.InboundChecksKnown = true
+	snap.EffectiveInboundPorts = ports
+	if err := api.Store.SetNodeSingboxLocal(nodeID, snap, api.Crypt); err != nil {
+		t.Fatalf("acknowledge ports: %v", err)
+	}
+}
+
+// configRows is the panel's view of a node's listeners: port → status.
+func configRows(t *testing.T, srv *httptest.Server, cookie, nodeID string) map[int]string {
+	t.Helper()
+	r := doReq(t, &http.Client{}, "GET", srv.URL+"/api/nodes/"+nodeID+"/singbox/config", cookie, nil)
+	if r.Status != http.StatusOK {
+		t.Fatalf("GET config = %d %s", r.Status, r.Body)
+	}
+	var body struct {
+		Inbounds []struct {
+			Port   int    `json:"port"`
+			Status string `json:"status"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(r.Body, &body); err != nil {
+		t.Fatalf("decode config payload: %v", err)
+	}
+	out := map[int]string{}
+	for _, inbound := range body.Inbounds {
+		out[inbound.Port] = inbound.Status
+	}
+	return out
+}
+
+// Moving the same listener twice before the probe reports must not park the
+// first target: its row is the panel's own optimism, and the document it just
+// pushed does not declare that port — reconciliation never sweeps it (the probe
+// has never reported it), so the panel would show a 添加中 row forever.
+func TestPutNodeSingboxConfigSecondMovePrunesTheStaleTarget(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := loginSession(t, srv)
+	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
+	seedLiveConfig(t, api, id, deleteFixture)
+	ackLivePorts(t, api, id, []int{22039})
+	if err := api.Store.ReconcileNodeSingboxInbounds(id, []store.NodeSingboxInbound{
+		{Port: 22039, Type: "anytls", Tag: "anytls-in-22039"},
+	}, []int{22039}, true); err != nil {
+		t.Fatalf("seed lifecycle rows: %v", err)
+	}
+
+	move := func(port int) {
+		t.Helper()
+		// The panel renders from the last report, so both edits carry the same
+		// base hash and the same row number.
+		r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+id+"/singbox/config", cookie,
+			map[string]any{
+				"reported_hash": hashOf(deleteFixture),
+				"update": []map[string]any{
+					{"number": 0, "type": "anytls", "tag": "anytls-in-22039", "port": port},
+				},
+			})
+		if r.Status != http.StatusOK {
+			t.Fatalf("move to %d = %d %s", port, r.Status, r.Body)
+		}
+	}
+
+	move(22040)
+	if got := configRows(t, srv, cookie, id); got[22040] != "pending" {
+		t.Fatalf("first move not visible: %v", got)
+	}
+	move(22041)
+	got := configRows(t, srv, cookie, id)
+	if _, listed := got[22040]; listed {
+		t.Fatalf("the superseded target is still parked on the page: %v", got)
+	}
+	if got[22041] != "pending" || got[22039] != "deleting" {
+		t.Fatalf("second move = %v, want 22041 pending and 22039 deleting", got)
+	}
+}
+
+// An edit that keeps a port an earlier edit retired cancels that removal: the
+// document the panel pushes serves it again, and the probe will report nothing
+// new (its own file never changed), so nothing else would clear the 删除中.
+func TestPutNodeSingboxConfigKeepingAPortCancelsItsRetirement(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := loginSession(t, srv)
+	id, _ := seedNode(t, api, "HK-Sharon", "m-hk", "203.0.113.9")
+	seedLiveConfig(t, api, id, deleteFixture)
+	ackLivePorts(t, api, id, []int{22039})
+	if err := api.Store.ReconcileNodeSingboxInbounds(id, []store.NodeSingboxInbound{
+		{Port: 22039, Type: "anytls", Tag: "anytls-in-22039"},
+	}, []int{22039}, true); err != nil {
+		t.Fatalf("seed lifecycle rows: %v", err)
+	}
+
+	edit := func(port int, tag string) {
+		t.Helper()
+		r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+id+"/singbox/config", cookie,
+			map[string]any{
+				"reported_hash": hashOf(deleteFixture),
+				"update": []map[string]any{
+					{"number": 0, "type": "anytls", "tag": tag, "port": port},
+				},
+			})
+		if r.Status != http.StatusOK {
+			t.Fatalf("edit %d/%s = %d %s", port, tag, r.Status, r.Body)
+		}
+	}
+
+	edit(22040, "anytls-in-22039")
+	if got := configRows(t, srv, cookie, id); got[22039] != "deleting" {
+		t.Fatalf("the moved-away port is not retiring: %v", got)
+	}
+	// The same row, now renamed but still on 22039: the document serves it
+	// again, so its row goes back to what the last report said.
+	edit(22039, "anytls-in-renamed")
+	got := configRows(t, srv, cookie, id)
+	if got[22039] != "running" {
+		t.Fatalf("keeping a retired port did not cancel the removal: %v", got)
+	}
+	if _, listed := got[22040]; listed {
+		t.Fatalf("the cancelled target is still parked on the page: %v", got)
+	}
+	doc, err := api.Store.GetSetting("singbox_config:" + id)
+	if err != nil {
+		t.Fatalf("pushed document: %v", err)
+	}
+	if !strings.Contains(doc, "anytls-in-renamed") {
+		t.Fatalf("the rename never reached the document: %s", doc)
 	}
 }

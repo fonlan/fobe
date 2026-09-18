@@ -748,6 +748,27 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
     return () => window.clearInterval(h);
   }, [hasInFlightInbound, onlineNow, load]);
 
+  // Every save is a push the probe answers later: it runs its own apply window
+  // (§9.2 闸门②/③, up to 30s) and only then re-scans the file, and the table
+  // renders what the probe reported. A rename or a credential change leaves no
+  // in-flight row behind (the port is unchanged), so without this watch the
+  // page would keep showing the pre-edit values until the 30s discovery tick —
+  // which reads as "my edit did not save". Watch at the fast cadence for a
+  // minute after any action of ours, then fall back to the normal refresh.
+  const [watchUntil, setWatchUntil] = useState(0);
+  useEffect(() => {
+    if (!watchUntil || !onlineNow) return;
+    const h = window.setInterval(() => {
+      if (Date.now() >= watchUntil) {
+        window.clearInterval(h);
+        setWatchUntil(0);
+        return;
+      }
+      void load();
+    }, 5000);
+    return () => window.clearInterval(h);
+  }, [watchUntil, onlineNow, load]);
+
   const run = async (fn: () => Promise<unknown>, okMsg: string) => {
     if (busy) return;
     setBusy(true);
@@ -756,6 +777,7 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
     try {
       await fn();
       setMsg(okMsg);
+      setWatchUntil(Date.now() + 60000);
       await load();
       onChanged();
     } catch (ex) {

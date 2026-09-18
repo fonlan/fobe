@@ -395,17 +395,39 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 		}
 		inbounds = kept
 	}
+	// A port change on an existing listener is a move, and the two ports it
+	// touches are the panel's business until the probe has applied the document
+	// (§9.3 实现修订 2026-09-18): the new one does not exist on the probe yet
+	// (an add), and the old one is about to stop being served (a delete). Both
+	// halves are collected here, from the file as this request rendered it.
+	var moves []portMove
+	var kept []int
 	for _, up := range req.Update {
 		if up.Number < 0 || up.Number >= len(inbounds) {
 			writeErr(w, http.StatusBadRequest, "bad_index")
 			return
 		}
+		prev, _ := inbounds[up.Number].(map[string]any)
+		oldPort := intFieldOf(prev["listen_port"])
 		next, err := applyInboundEdit(inbounds[up.Number], up)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, errCodeOf(err))
 			return
 		}
 		inbounds[up.Number] = next
+		switch {
+		case oldPort <= 0:
+			// The file declared no port on this row (a listener fobe does not
+			// model): there is no listener to move or to keep.
+		case up.Port == oldPort:
+			kept = append(kept, oldPort)
+		default:
+			moves = append(moves, portMove{
+				from: oldPort, to: up.Port,
+				fromType: stringFieldOf(prev["type"]), fromTag: stringFieldOf(prev["tag"]),
+				toType: stringFieldOf(next["type"]), toTag: stringFieldOf(next["tag"]),
+			})
+		}
 	}
 	for _, add := range req.Add {
 		next, err := applyInboundEdit(nil, add)
@@ -430,41 +452,130 @@ func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Record additions before sending desired state. An online agent can apply
-	// and report immediately; writing this afterwards could overwrite a genuine
-	// running acknowledgement back to pending.
-	for _, add := range req.Add {
-		if err := s.Store.SetNodeSingboxInboundPending(id, store.NodeSingboxInbound{
-			Port: add.Port,
-			Type: add.Type,
-			Tag:  add.Tag,
-		}); err != nil {
-			writeErr(w, http.StatusInternalServerError, "internal")
-			return
-		}
-	}
-	if err := s.pushConfigDocument(id, string(merged)); err != nil {
-		for _, add := range req.Add {
-			_ = s.Store.DeleteNodeSingboxInbound(id, add.Port)
-		}
-		singboxWriteErr(w, err)
+	// The panel's own record of what this edit does, written before the desired
+	// state goes out: an online agent can apply and report immediately, and a
+	// mark written afterwards could overwrite a genuine acknowledgement. Each
+	// entry carries its own undo, because a write that fails halfway — or a push
+	// that never leaves the server — must not leave the panel claiming a
+	// listener was added, moved or retired (§9.3 实现修订 2026-09-17f/2026-09-18).
+	//
+	// `rows` is that record as it stands *before* the edit, which is what the
+	// undo restores.
+	rows, err := s.Store.ListNodeSingboxInbounds(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	// The listener's lifecycle row is not dropped here: it flips to `deleting`
-	// and stays until an agent report no longer lists the port. Deleting it at
-	// edit time made the row — still present in the last reported file — come
-	// back from the GET as plain `pending`, i.e. a running listener showed
-	// 添加中 for the whole apply window (§9.3 实现修订 2026-09-17).
+	rowsByPort := map[int]store.NodeSingboxInbound{}
+	for _, row := range rows {
+		rowsByPort[row.Port] = row
+	}
+	var intents []configIntent
+	for _, add := range req.Add {
+		port := add.Port
+		intents = append(intents, configIntent{
+			apply: func() error {
+				return s.Store.SetNodeSingboxInboundPending(id, store.NodeSingboxInbound{
+					Port: port, Type: add.Type, Tag: add.Tag,
+				})
+			},
+			undo: func() error { return s.Store.DeleteNodeSingboxInbound(id, port) },
+		})
+	}
+	// The listener's lifecycle row is not dropped on a delete: it flips to
+	// `deleting` and stays until an agent report no longer lists the port.
+	// Deleting it at edit time made the row — still present in the last reported
+	// file — come back from the GET as plain `pending`, i.e. a running listener
+	// showed 添加中 for the whole apply window (§9.3 实现修订 2026-09-17).
 	for _, del := range deleted {
 		if del.port <= 0 {
 			continue
 		}
-		if err := s.Store.SetNodeSingboxInboundDeleting(id, store.NodeSingboxInbound{
-			Port: del.port, Type: del.typ, Tag: del.tag,
-		}); err != nil {
+		before, hadRow := rowsByPort[del.port]
+		intents = append(intents, configIntent{
+			apply: func() error {
+				return s.Store.SetNodeSingboxInboundDeleting(id, store.NodeSingboxInbound{
+					Port: del.port, Type: del.typ, Tag: del.tag,
+				})
+			},
+			undo: func() error {
+				if !hadRow {
+					return s.Store.DeleteNodeSingboxInbound(id, del.port)
+				}
+				return s.Store.RestoreNodeSingboxInbound(id, before)
+			},
+		})
+	}
+	// A port move is recorded as both halves at once: the target row (pending,
+	// the probe has never seen that port) and the source row (deleting, the
+	// probe still serves it). Without them the GET keeps rendering the port the
+	// operator moved away from — the file on the probe has not changed yet, and
+	// the agent's own report only arrives after its apply window — so the saved
+	// port is not on the page and nothing reads pending for the UI to poll.
+	for _, move := range moves {
+		before, hadRow := rowsByPort[move.from]
+		intents = append(intents, configIntent{
+			apply: func() error {
+				return s.Store.SetNodeSingboxInboundPending(id, store.NodeSingboxInbound{
+					Port: move.to, Type: move.toType, Tag: move.toTag,
+				})
+			},
+			undo: func() error { return s.Store.DeleteNodeSingboxInbound(id, move.to) },
+		})
+		intents = append(intents, configIntent{
+			apply: func() error {
+				return s.Store.SetNodeSingboxInboundDeleting(id, store.NodeSingboxInbound{
+					Port: move.from, Type: move.fromType, Tag: move.fromTag,
+				})
+			},
+			undo: func() error {
+				// The undo of the retirement is the state the report implies:
+				// this port is the one still on the probe.
+				if hadRow {
+					return s.Store.RestoreNodeSingboxInbound(id, before)
+				}
+				return s.Store.DeleteNodeSingboxInbound(id, move.from)
+			},
+		})
+	}
+	// An edit that keeps a port an earlier edit retired cancels that removal:
+	// the document the panel is about to push serves it again. The row must go
+	// back to what the last report says, not stay 删除中 — the probe will not
+	// report anything new (its file never changed), so nothing else would ever
+	// clear it.
+	for _, port := range kept {
+		before, ok := rowsByPort[port]
+		if !ok || before.Status != "deleting" {
+			continue
+		}
+		restored := before
+		restored.Status = reportedInboundStatus(local, port)
+		intents = append(intents, configIntent{
+			apply: func() error { return s.Store.RestoreNodeSingboxInbound(id, restored) },
+			undo:  func() error { return s.Store.SetNodeSingboxInboundDeleting(id, before) },
+		})
+	}
+	applied := make([]configIntent, 0, len(intents))
+	for _, in := range intents {
+		if err := in.apply(); err != nil {
+			undoIntents(applied)
 			writeErr(w, http.StatusInternalServerError, "internal")
 			return
 		}
+		applied = append(applied, in)
+	}
+	if err := s.pushConfigDocument(id, string(merged)); err != nil {
+		undoIntents(applied)
+		singboxWriteErr(w, err)
+		return
+	}
+	// The document is the panel's own declaration, so it is authoritative over
+	// the rows the panel itself invented: a 添加中 row for a port this document
+	// no longer declares is a stale intent (a move edited again, an add taken
+	// back) and would otherwise stay parked forever. Rows mirrored from the
+	// probe's reports are untouched.
+	if err := s.Store.PruneNodeSingboxInboundOptimism(id, docPorts(inbounds)); err != nil {
+		s.Log.Warn("prune singbox inbound intents", "node", id, "err", err)
 	}
 	s.markConfigEdited(id)
 	s.Store.InsertAudit(&store.AuditEntry{
@@ -503,6 +614,61 @@ func (s *Server) pushConfigDocument(nodeID, doc string) error {
 	s.pushDesired(nodeID)
 	s.publishEvent("node_updated", nodeID)
 	return nil
+}
+
+// portMove is a listener whose port an edit changed: the probe keeps serving
+// `from` until it applies the document, which serves `to` instead.
+type portMove struct {
+	from, to int
+	fromType string
+	fromTag  string
+	toType   string
+	toTag    string
+}
+
+// reportedInboundStatus is the status a listener's lifecycle row has when the
+// last report is the only authority: running once the probe confirmed the port
+// takes a local TCP connection, pending otherwise — including when the probe's
+// agent predates the check (an unproven listener is not a running one).
+func reportedInboundStatus(local store.NodeSingboxLocal, port int) string {
+	if !local.InboundChecksKnown {
+		return "pending"
+	}
+	for _, p := range local.EffectiveInboundPorts {
+		if p == port {
+			return "running"
+		}
+	}
+	return "pending"
+}
+
+// docPorts lists the ports a document declares, for the optimism prune.
+func docPorts(inbounds []any) []int {
+	ports := make([]int, 0, len(inbounds))
+	for _, raw := range inbounds {
+		m, _ := raw.(map[string]any)
+		if port := intFieldOf(m["listen_port"]); port > 0 {
+			ports = append(ports, port)
+		}
+	}
+	return ports
+}
+
+// configIntent is one piece of the panel's own record of an edit, with the way
+// back: an edit that fails halfway, or a push that never leaves the server,
+// must not leave the panel claiming a listener was added, moved or retired.
+type configIntent struct {
+	apply func() error
+	undo  func() error
+}
+
+// undoIntents takes back the panel's intent marks in reverse order. Failures are
+// swallowed on purpose: the rows belong to the probe's reports, and the next
+// one owns them again.
+func undoIntents(applied []configIntent) {
+	for i := len(applied) - 1; i >= 0; i-- {
+		_ = applied[i].undo()
+	}
 }
 
 // errCode is a config-edit failure carrying the API error code.
