@@ -57,6 +57,11 @@ type Hub struct {
 	// terminalSubs routes agent terminal frames to browser sessions.
 	termMu   sync.Mutex
 	termSubs map[string]chan protocol.Envelope // sessionID -> sink
+	// termPush reaches the browser holding a terminal session, so the server
+	// can initiate a buffer query (§12.7.1); termWait carries the answers back
+	// to whichever goroutine asked, keyed by request id.
+	termPush map[string]func(protocol.Envelope) bool
+	termWait map[string]chan protocol.TerminalBuffer
 }
 
 // AgentUpdater is the §5.5 decision surface the hub needs.
@@ -99,6 +104,8 @@ func New(st *store.Store, trust *security.TrustChain, log *slog.Logger, geo ...g
 		log:      log,
 		conns:    map[string]*Conn{},
 		termSubs: map[string]chan protocol.Envelope{},
+		termPush: map[string]func(protocol.Envelope) bool{},
+		termWait: map[string]chan protocol.TerminalBuffer{},
 		wake:     make(chan struct{}, 1),
 	}
 	for _, r := range geo {

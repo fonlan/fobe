@@ -36,7 +36,6 @@ const SINGBOX_JOB_TERMINAL = new Set(['done', 'failed']);
 const DL_FAILURE_VISIBLE = 30 * 60;
 
 const SERVER_KEYS = ['server.public_url'] as const;
-const AI_KEYS = ['ai.base_url', 'ai.model', 'ai.api_key', 'ai.default_policy'] as const;
 /** §14.1 database refresh policy; the database itself has its own endpoints. */
 const GEOIP_KEYS = ['geoip.auto_update', 'geoip.max_age_days', 'geoip.url'] as const;
 const AGENT_KEYS = ['agent.auto_update'] as const;
@@ -147,6 +146,9 @@ export default function Settings() {
           <NavLink to="/settings/notifications" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
             {t('nav_notifications')}
           </NavLink>
+          <NavLink to="/settings/ai" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+            {t('nav_ai')}
+          </NavLink>
           <NavLink to="/settings/audit" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
             {t('nav_audit')}
           </NavLink>
@@ -177,6 +179,9 @@ export default function Settings() {
         <NavLink to="/settings/notifications" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
           {t('nav_notifications')}
         </NavLink>
+        <NavLink to="/settings/ai" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+          {t('nav_ai')}
+        </NavLink>
         <NavLink to="/settings/audit" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
           {t('nav_audit')}
         </NavLink>
@@ -200,21 +205,13 @@ export default function Settings() {
         <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(SERVER_KEYS)} label={t('save')} />
       </section>
 
-      <section className="card">
-        <h3>{t('sec_ai')}</h3>
-        <div className="form-grid">
-          {field('ai.base_url', t('ai_base_url'), {})}
-          {field('ai.model', t('ai_model'), {})}
-          {field('ai.api_key', t('ai_api_key'), { password: true })}
-          {field('ai.default_policy', t('ai_default_policy'), {
-            select: [
-              { value: 'allow', label: t('policy_allow') },
-              { value: 'confirm', label: t('policy_confirm') },
-            ],
-          })}
-        </div>
-        <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(AI_KEYS)} label={t('save')} />
-      </section>
+      {/*
+        §12.1 (2026-09-18): the AI card is gone from base settings entirely —
+        provider/model/key configuration now lives on the dedicated /settings/ai
+        page, and the three legacy keys (ai.base_url / ai.model / ai.api_key)
+        were removed from the server allow-list, so keeping the fields here
+        would render a form whose every save answers unknown_key.
+      */}
 
       <SingboxCacheCard />
       <BackupCard />
@@ -961,6 +958,11 @@ function BackupCard() {
   const [stats, setStats] = useState<ImportStats | null>(null);
 
   const doExport = async () => {
+    // §17 (2026-09-18): the snapshot carries credential material now, so the
+    // download is gated by an explicit confirmation that says what is inside it
+    // and what has to be kept with it. Everything else about the export is
+    // unchanged, but "one click to download every secret" must not be.
+    if (!window.confirm(t('backup_export_confirm'))) return;
     setBusy(true);
     setErr(null);
     try {
@@ -997,6 +999,10 @@ function BackupCard() {
     <section className="card">
       <h3>{t('sec_backup')}</h3>
       <p className="hint">{t('backup_desc')}</p>
+      {/* §17 反转: the file is a credential now, and the one thing that makes the
+          difference between "restorable" and "undecryptable" is whether the
+          operator moved /data/.master_key with it. */}
+      <p className="warn-hint">{t('backup_credentials_warn')}</p>
       {err && <div className="form-error">{err}</div>}
       <div className="row-gap">
         <button type="button" className="btn" disabled={busy} onClick={() => void doExport()}>
@@ -1013,7 +1019,25 @@ function BackupCard() {
             <li>{t('backup_stat_subs', { created: stats.subscriptions_created, updated: stats.subscriptions_updated })}</li>
             <li>{t('backup_stat_templates', { created: stats.templates_created, updated: stats.templates_updated })}</li>
             <li>{t('backup_stat_settings', { n: stats.settings_imported })}</li>
+            {(stats.ai_providers_imported > 0 || stats.ai_models_imported > 0 || stats.ai_provider_models_linked > 0) && (
+              <li>
+                {t('backup_stat_ai', {
+                  providers: stats.ai_providers_imported,
+                  models: stats.ai_models_imported,
+                  links: stats.ai_provider_models_linked,
+                })}
+              </li>
+            )}
           </ul>
+          {/* A skipped credential is NOT an empty one: naming every entry is the
+              difference between "restore worked" and "your bot silently stopped
+              sending". Never collapse this into the counts above. */}
+          {stats.skipped_secrets && stats.skipped_secrets.length > 0 && (
+            <div className="form-error">
+              <div>{t('backup_skipped_secrets', { n: stats.skipped_secrets.length, names: stats.skipped_secrets.join(', ') })}</div>
+              <div className="hint">{t('backup_skipped_secrets_hint')}</div>
+            </div>
+          )}
         </div>
       )}
     </section>

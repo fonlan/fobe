@@ -7,45 +7,66 @@ import (
 )
 
 // AISession is a persisted conversation associated with one node.
+//
+// ProviderID/ModelID/Protocol pin the conversation to one model (§12.1): a
+// reasoning block is protocol-native (Anthropic thinking + signature,
+// Responses reasoning items) and cannot be replayed across protocols, so the
+// model picker starts a NEW session instead of mutating this one.
 type AISession struct {
 	ID                string `json:"id"`
 	NodeID            string `json:"node_id"`
 	TerminalSessionID string `json:"terminal_session_id,omitempty"`
+	ProviderID        string `json:"provider_id,omitempty"`
+	ModelID           string `json:"model_id,omitempty"`
+	Protocol          string `json:"protocol,omitempty"`
 	CreatedAt         int64  `json:"created_at"`
 	LastSeen          int64  `json:"last_seen"`
 }
 
-// AIMessage is one persisted OpenAI-style conversation message.
+// AIMessage is one persisted conversation message. Content is the
+// human-readable text; Blocks carries the protocol-native payload (JSON) that
+// a tool loop must echo back verbatim (§12.5).
 type AIMessage struct {
 	ID        int64  `json:"id"`
 	SessionID string `json:"session_id"`
 	Role      string `json:"role"`
 	Content   string `json:"content"`
+	Blocks    string `json:"blocks,omitempty"`
 	CreatedAt int64  `json:"created_at"`
 }
 
 // AIPendingAction is a model-requested action waiting for confirmation.
 type AIPendingAction struct {
-	ID          string `json:"id"`
-	SessionID   string `json:"session_id"`
-	NodeID      string `json:"node_id"`
-	Kind        string `json:"kind"`
-	Payload     string `json:"payload"`
-	Reason      string `json:"reason"`
-	Risk        string `json:"risk"`
-	Status      string `json:"status"`
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+	NodeID    string `json:"node_id"`
+	Kind      string `json:"kind"`
+	Payload   string `json:"payload"`
+	Reason    string `json:"reason"`
+	Risk      string `json:"risk"`
+	Status    string `json:"status"`
+	// CallID is the model's tool_call id (empty for panel-created actions).
+	CallID      string `json:"call_id,omitempty"`
 	CreatedAt   int64  `json:"created_at"`
 	ConfirmedAt *int64 `json:"confirmed_at,omitempty"`
 	CommandID   string `json:"command_id,omitempty"`
 }
 
-// CreateAISession creates a conversation. The node foreign key ensures that
-// sessions cannot outlive their selected node.
+// CreateAISession creates a conversation that is not pinned to a model. Kept
+// for callers that predate the multi-provider picker (§12.1); new conversations
+// go through CreateAISessionPinned.
 func (s *Store) CreateAISession(id, nodeID, terminalSessionID string) error {
+	return s.CreateAISessionPinned(id, nodeID, terminalSessionID, "", "", "")
+}
+
+// CreateAISessionPinned creates a conversation bound to one (provider, model)
+// pair and its wire protocol.
+func (s *Store) CreateAISessionPinned(id, nodeID, terminalSessionID, providerID, modelID, protocol string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO ai_sessions (id, node_id, terminal_session_id, created_at, last_seen)
-		 VALUES (?, ?, ?, ?, ?)`,
-		id, nodeID, terminalSessionID, now(), now(),
+		`INSERT INTO ai_sessions
+		   (id, node_id, terminal_session_id, provider_id, model_id, protocol, created_at, last_seen)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, nodeID, terminalSessionID, providerID, modelID, protocol, now(), now(),
 	)
 	if err != nil {
 		return fmt.Errorf("create ai session: %w", err)
@@ -56,9 +77,10 @@ func (s *Store) CreateAISession(id, nodeID, terminalSessionID string) error {
 func (s *Store) GetAISession(id string) (*AISession, error) {
 	sess := &AISession{}
 	err := s.db.QueryRow(
-		`SELECT id, node_id, terminal_session_id, created_at, last_seen
+		`SELECT id, node_id, terminal_session_id, provider_id, model_id, protocol, created_at, last_seen
 		 FROM ai_sessions WHERE id = ?`, id,
-	).Scan(&sess.ID, &sess.NodeID, &sess.TerminalSessionID, &sess.CreatedAt, &sess.LastSeen)
+	).Scan(&sess.ID, &sess.NodeID, &sess.TerminalSessionID, &sess.ProviderID,
+		&sess.ModelID, &sess.Protocol, &sess.CreatedAt, &sess.LastSeen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -73,10 +95,53 @@ func (s *Store) TouchAISession(id string) error {
 	return err
 }
 
+// Audit actions written by the §12.7 terminal tool chain. They are shared
+// constants rather than literals because the rate counter reads them back by
+// name — a typo in either place would silently stop counting.
+const (
+	AuditAITerminalRun  = "ai_terminal_run"
+	AuditAITerminalKeys = "ai_terminal_keys"
+)
+
+// CountAITerminalActions counts AI terminal actions on a node since `since`.
+//
+// The per-minute cap (§12.3/§12.6) is derived from `commands` rows, but the
+// terminal tools deliberately do NOT enqueue commands — they type into the
+// operator's PTY (design §12.7). Without this counter the rate axis would
+// silently stop applying to exactly the tools that can now act fastest, so it
+// counts the record they DO write (an audit row per action).
+func (s *Store) CountAITerminalActions(nodeID string, since int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM audit_logs
+		 WHERE node_id = ? AND actor = 'ai' AND action IN (?, ?) AND ts >= ?`,
+		nodeID, AuditAITerminalRun, AuditAITerminalKeys, since,
+	).Scan(&n)
+	return n, err
+}
+
+// SetAISessionTerminal repoints a conversation at the terminal session it is
+// currently bound to (design §12.7.5).
+//
+// The terminal session id is minted per browser WS connection, so a page reload
+// makes the stored value a dangling pointer. Rebinding keeps the "your terminal
+// was replaced" note (§12.7.5) a one-time event instead of a line the model
+// reads on every subsequent turn.
+func (s *Store) SetAISessionTerminal(id, terminalSessionID string) error {
+	_, err := s.db.Exec(`UPDATE ai_sessions SET terminal_session_id = ? WHERE id = ?`, terminalSessionID, id)
+	return err
+}
+
 func (s *Store) InsertAIMessage(sessionID, role, content string) error {
+	return s.InsertAIMessageBlocks(sessionID, role, content, "")
+}
+
+// InsertAIMessageBlocks persists a message together with the protocol-native
+// payload the next loop step has to send back (§12.5).
+func (s *Store) InsertAIMessageBlocks(sessionID, role, content, blocks string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO ai_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)`,
-		sessionID, role, content, now(),
+		`INSERT INTO ai_messages (session_id, role, content, blocks, created_at) VALUES (?, ?, ?, ?, ?)`,
+		sessionID, role, content, blocks, now(),
 	)
 	if err != nil {
 		return fmt.Errorf("insert ai message: %w", err)
@@ -89,7 +154,7 @@ func (s *Store) ListAIMessages(sessionID string, limit int) ([]AIMessage, error)
 		limit = 50
 	}
 	rows, err := s.db.Query(
-		`SELECT id, session_id, role, content, created_at FROM ai_messages
+		`SELECT id, session_id, role, content, blocks, created_at FROM ai_messages
 		 WHERE session_id = ? ORDER BY id DESC LIMIT ?`, sessionID, limit,
 	)
 	if err != nil {
@@ -100,7 +165,7 @@ func (s *Store) ListAIMessages(sessionID string, limit int) ([]AIMessage, error)
 	out := make([]AIMessage, 0, limit)
 	for rows.Next() {
 		var message AIMessage
-		if err := rows.Scan(&message.ID, &message.SessionID, &message.Role, &message.Content, &message.CreatedAt); err != nil {
+		if err := rows.Scan(&message.ID, &message.SessionID, &message.Role, &message.Content, &message.Blocks, &message.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, message)
@@ -117,10 +182,10 @@ func (s *Store) ListAIMessages(sessionID string, limit int) ([]AIMessage, error)
 func (s *Store) CreateAIPendingAction(action *AIPendingAction) error {
 	_, err := s.db.Exec(
 		`INSERT INTO ai_pending_actions
-		 (id, session_id, node_id, kind, payload, reason, risk, status, created_at, command_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, '')`,
+		 (id, session_id, node_id, kind, payload, reason, risk, status, call_id, created_at, command_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, '')`,
 		action.ID, action.SessionID, action.NodeID, action.Kind, action.Payload,
-		action.Reason, action.Risk, now(),
+		action.Reason, action.Risk, action.CallID, now(),
 	)
 	if err != nil {
 		return fmt.Errorf("create ai pending action: %w", err)
@@ -132,10 +197,11 @@ func (s *Store) GetAIPendingAction(id string) (*AIPendingAction, error) {
 	action := &AIPendingAction{}
 	err := s.db.QueryRow(
 		`SELECT id, session_id, node_id, kind, payload, reason, risk, status,
-		        created_at, confirmed_at, command_id
+		        call_id, created_at, confirmed_at, command_id
 		 FROM ai_pending_actions WHERE id = ?`, id,
 	).Scan(&action.ID, &action.SessionID, &action.NodeID, &action.Kind, &action.Payload,
-		&action.Reason, &action.Risk, &action.Status, &action.CreatedAt, &action.ConfirmedAt, &action.CommandID)
+		&action.Reason, &action.Risk, &action.Status, &action.CallID,
+		&action.CreatedAt, &action.ConfirmedAt, &action.CommandID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -184,9 +250,19 @@ func (s *Store) CheckAICommandGate(nodeID string, limit int, at int64) (bool, st
 		failures, pausedUntil = 0, 0
 	}
 
+	// Only failures from a bounded window count. Without the window this
+	// recomputation re-armed the pause on EVERY call from rows that never age
+	// out, so three failures froze a node's AI execution permanently — nothing
+	// could clear it, because a success cannot happen while the gate blocks
+	// execution. The window (10 min) is deliberately longer than the pause
+	// itself (5 min) so a genuine failure cluster still pauses, while the state
+	// always terminates. A successful AI command inside the window clears it
+	// immediately.
+	const failureWindowSeconds = 600
 	rows, err := s.db.Query(
 		`SELECT status FROM commands WHERE node_id = ? AND actor = 'ai'
-		 AND status IN ('ok', 'failed') ORDER BY COALESCE(finished_at, created_at) DESC, id DESC LIMIT 3`, nodeID,
+		 AND status IN ('ok', 'failed') AND COALESCE(finished_at, created_at) >= ?
+		 ORDER BY COALESCE(finished_at, created_at) DESC, id DESC LIMIT 3`, nodeID, at-failureWindowSeconds,
 	)
 	if err != nil {
 		return false, "", fmt.Errorf("read ai command results: %w", err)

@@ -6,7 +6,6 @@
 //	fobe-server admin unblock <ip|all>
 //	fobe-server admin reset-password
 //	fobe-server admin list-sessions [--revoke]
-//	fobe-server admin kill-switch on|off
 package main
 
 import (
@@ -30,6 +29,7 @@ import (
 	"github.com/fonlan/fobe/internal/server/geoipupdate"
 	"github.com/fonlan/fobe/internal/server/httpapi"
 	"github.com/fonlan/fobe/internal/server/hub"
+	"github.com/fonlan/fobe/internal/server/modelsdev"
 	"github.com/fonlan/fobe/internal/server/notify"
 	"github.com/fonlan/fobe/internal/server/scheduler"
 	"github.com/fonlan/fobe/internal/server/security"
@@ -157,6 +157,18 @@ func runServer() {
 	})
 	api.GeoIPUpdater.Start(bgCtx)
 
+	// models.dev metadata (§12.5): a typed api.json index cached under the data
+	// volume and refreshed daily. FOBE_MODELS_URL points at a mirror,
+	// FOBE_MODELS_AUTO_UPDATE=0 disables the automatic refresh (the panel's
+	// manual button keeps working). Start reads the local cache synchronously
+	// and only touches the network in the background, so a panel with no egress
+	// still comes up — with empty metadata and hand-entered models.
+	api.ModelsDev = modelsdev.New(modelsdev.Config{
+		Dir: filepath.Dir(dbPath()),
+		Log: log,
+	})
+	api.ModelsDev.Start(bgCtx)
+
 	stop := make(chan struct{})
 	notifyClient := &http.Client{Timeout: notify.DeliveryTimeout}
 	decryptSetting := func(key string) (string, bool) {
@@ -275,10 +287,7 @@ func runServer() {
 		ServerVersion: version,
 		DLDir:         dlDir,
 		Stagger:       stagger,
-		// §12.3: the freeze wins over follow — a killed panel must not swap
-		// probe binaries while the operator is trying to stop the bleeding.
-		KillSwitch: func() bool { return settingBool(st, "ai.kill_switch") },
-		Enabled:    func() bool { return agentupdate.AutoUpdateEnabled(st) },
+		Enabled:       func() bool { return agentupdate.AutoUpdateEnabled(st) },
 	})
 	h.SetAgentUpdater(agentUpd)
 	api.AgentUpdate = agentUpd
@@ -562,23 +571,6 @@ func runAdmin(args []string) {
 			fmt.Printf("%s  %s  %s  %s  %s\n", sess.ID[:12]+"…", time.Unix(sess.LastSeen, 0).Format(time.RFC3339), sess.IP, state, sess.UA)
 		}
 
-	case "kill-switch":
-		if len(args) != 2 || (args[1] != "on" && args[1] != "off") {
-			fmt.Fprintln(os.Stderr, "usage: fobe-server admin kill-switch on|off")
-			os.Exit(2)
-		}
-		st := mustStore(dbPath())
-		defer st.Close()
-		val := "0"
-		if args[1] == "on" {
-			val = "1"
-		}
-		if err := st.SetSetting("ai.kill_switch", val, false); err != nil {
-			fmt.Fprintf(os.Stderr, "kill-switch: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("AI kill switch: %s\n", args[1])
-
 	default:
 		adminUsage()
 		os.Exit(2)
@@ -589,6 +581,5 @@ func adminUsage() {
 	fmt.Fprintln(os.Stderr, `usage:
   fobe-server admin unblock <ip|all>    # remove IP (or all) from the login blacklist
   fobe-server admin reset-password      # new one-time password, revokes sessions
-  fobe-server admin list-sessions [--revoke]
-  fobe-server admin kill-switch on|off  # freeze all AI execution`)
+  fobe-server admin list-sessions [--revoke]`)
 }

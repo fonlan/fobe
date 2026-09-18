@@ -111,9 +111,6 @@ func TestGatesRefuseTarget(t *testing.T) {
 		{name: "switch off", want: ReasonOffSwitchOff, modified: func(c *Config) {
 			c.Enabled = func() bool { return false }
 		}},
-		{name: "kill switch", want: ReasonOffKillSwitch, modified: func(c *Config) {
-			c.KillSwitch = func() bool { return true }
-		}},
 		{name: "no dl dir", want: ReasonOffNoDLDir, modified: func(c *Config) { c.DLDir = "" }},
 		{name: "dev version", want: ReasonOffNotReleased, modified: func(c *Config) { c.ServerVersion = "dev" }},
 		{name: "artifact missing", want: ReasonOffNoArtifact, modified: func(c *Config) { c.ServerVersion = "9.9.9" }},

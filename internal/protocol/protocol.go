@@ -40,6 +40,18 @@ const (
 	TypeTermClose  = "terminal_close"
 )
 
+// Message types that exist ONLY on the browser ↔ server relay and are never
+// forwarded to the agent (design §12.7.1): the only real screen model lives in
+// the browser's xterm instance — the agent just pumps raw PTY bytes and the
+// server keeps no terminal state — so every observation the AI makes travels
+// this correlated round trip.
+const (
+	// TypeTermQuery is server → browser: "hand me a window of your buffer".
+	TypeTermQuery = "terminal_query"
+	// TypeTermBuffer is browser → server: the answer, keyed by payload id.
+	TypeTermBuffer = "terminal_buffer"
+)
+
 // Envelope is the JSON frame carried on the WebSocket in both directions.
 type Envelope struct {
 	V       int             `json:"v"`
@@ -494,6 +506,38 @@ type TerminalOutput struct {
 type TerminalClosed struct {
 	SessionID string `json:"session_id"`
 	Reason    string `json:"reason,omitempty"`
+}
+
+// TerminalQuery asks the browser for a window of its xterm buffer. It is the
+// server's only way to see a screen: the PTY's bytes vanish into the browser
+// (the server neither stores nor parses them), so "what is on the terminal" is
+// answered by the client that holds the emulator.
+type TerminalQuery struct {
+	// ID correlates the answer (TerminalBuffer.ID); one per request.
+	ID string `json:"id"`
+	// Offset counts lines up from the very bottom of the buffer (0 = bottom).
+	// Deliberately measured from the bottom rather than from the operator's
+	// scroll position: a viewport the operator scrolled up to read is stale
+	// state, not "what the terminal currently says" (§12.7.2).
+	Offset int `json:"offset"`
+	// Lines is the window height. <=0 means "the browser's own viewport height"
+	// — the server does not know the terminal geometry (the browser resizes it).
+	Lines int `json:"lines"`
+}
+
+// TerminalBuffer is the browser's answer to one TerminalQuery: the requested
+// window as plain text lines, already stripped of ANSI by the emulator.
+type TerminalBuffer struct {
+	ID string `json:"id"`
+	// OK is false for a query the client could not serve (e.g. the terminal was
+	// torn down between ask and answer); Error says why.
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+	Cols   int    `json:"cols,omitempty"`
+	Rows   int    `json:"rows,omitempty"`
+	Length int    `json:"length,omitempty"`
+	// Lines is the window in top-to-bottom order, right-trimmed per line.
+	Lines []string `json:"lines,omitempty"`
 }
 
 // ProbeMetrics toggles the temporary 5s high-frequency stream (design §16).

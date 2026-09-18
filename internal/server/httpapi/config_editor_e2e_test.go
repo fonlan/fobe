@@ -152,7 +152,21 @@ func TestPortMoveReachesTheProbeAndConvergesOnThePanel(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, listed := got[22039]; listed {
-		t.Fatalf("the retired port is still on the page: %v", got)
+	// The retired row disappearing is a SEPARATE effect of the same reconcile as
+	// the new port becoming running, and the two are not visible atomically.
+	// Asserting it instantly made this test fail under full-suite load (the read
+	// that saw "running" could still contain the retiring row). The contract is
+	// "eventually gone" — the page polls — so bound the wait instead of assuming
+	// one read sees both.
+	retireDeadline := time.Now().Add(5 * time.Second)
+	for {
+		got = configRows(t, srv, cookie, id)
+		if _, listed := got[22039]; !listed {
+			break
+		}
+		if time.Now().After(retireDeadline) {
+			t.Fatalf("the retired port is still on the page: %v", got)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

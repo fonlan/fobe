@@ -2,11 +2,11 @@ package httpapi
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,71 +14,230 @@ import (
 	"github.com/fonlan/fobe/internal/server/store"
 )
 
-// upstreamAI returns a mock OpenAI-compatible upstream that answers with a
-// canned body and records every request it receives.
-func upstreamAI(t *testing.T, canned string, captured *[]aiOpenAIRequest) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if captured != nil {
-			var body aiOpenAIRequest
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Errorf("decode upstream body: %v", err)
-			}
-			*captured = append(*captured, body)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, canned)
-	}))
+// --- the mock upstream ---
+//
+// §12.6 makes the assistant streaming-only: the adapter rejects a 2xx answer
+// whose Content-Type is not text/event-stream, and it treats a stream that ends
+// without finish_reason/[DONE] as truncated. So every fixture here is a real
+// event stream — serving the old non-streaming JSON body is what made these
+// tests fail. The request bodies are still captured, because "what did the model
+// actually receive" is half of what they assert.
+
+// aiUpstreamRequest is the test-side view of one completions request body.
+// aiOpenAIRequest (the production type) has no tool_call_id, and pairing a tool
+// result with the assistant's own call id is exactly what the loop tests must
+// observe (§12.6: resolveAIConfirmation reuses action.CallID).
+type aiUpstreamRequest struct {
+	Model    string              `json:"model"`
+	Stream   bool                `json:"stream"`
+	Messages []aiUpstreamMessage `json:"messages"`
+	Tools    []aiOpenAIToolSpec  `json:"tools"`
 }
 
-// chatToolCall builds an upstream reply carrying one OpenAI tool_call.
-func chatToolCall(id, name, arguments string) string {
-	reply := map[string]any{
-		"choices": []map[string]any{{
-			"message": map[string]any{
-				"content": "",
-				"tool_calls": []map[string]any{{
-					"id":       id,
-					"type":     "function",
-					"function": map[string]any{"name": name, "arguments": arguments},
-				}},
-			},
-		}},
+type aiUpstreamMessage struct {
+	Role       string             `json:"role"`
+	Content    string             `json:"content"`
+	ToolCalls  []aiOpenAIToolCall `json:"tool_calls"`
+	ToolCallID string             `json:"tool_call_id"`
+}
+
+// toolMessageFor returns the dialect's tool message carrying callID — the proof
+// that a tool result was fed back for the RIGHT call.
+func toolMessageFor(request aiUpstreamRequest, callID string) *aiUpstreamMessage {
+	for i := range request.Messages {
+		if request.Messages[i].Role == "tool" && request.Messages[i].ToolCallID == callID {
+			return &request.Messages[i]
+		}
 	}
-	raw, _ := json.Marshal(reply)
+	return nil
+}
+
+// mockAIUpstream stands in for an OpenAI-compatible gateway that honours
+// stream:true. It records every request body it is handed.
+type mockAIUpstream struct {
+	t      *testing.T
+	server *httptest.Server
+	// check inspects each request (auth header, path, ...). Optional; set it
+	// before the first call.
+	check func(*http.Request)
+
+	seq func(call int) string
+
+	mu       sync.Mutex
+	requests []aiUpstreamRequest
+}
+
+// newMockAIUpstream answers with one canned body per call and repeats the last
+// one if the loop asks for more.
+func newMockAIUpstream(t *testing.T, canned ...string) *mockAIUpstream {
+	t.Helper()
+	if len(canned) == 0 {
+		t.Fatal("newMockAIUpstream needs at least one canned body")
+	}
+	return newMockAIUpstreamFunc(t, func(call int) string {
+		if call > len(canned) {
+			call = len(canned)
+		}
+		return canned[call-1]
+	})
+}
+
+// newMockAIUpstreamFunc answers the n-th call (1-based) with fn(n), for a model
+// that reacts to what it was told.
+func newMockAIUpstreamFunc(t *testing.T, fn func(call int) string) *mockAIUpstream {
+	t.Helper()
+	mock := &mockAIUpstream{t: t, seq: fn}
+	mock.server = httptest.NewServer(http.HandlerFunc(mock.handle))
+	t.Cleanup(mock.server.Close)
+	return mock
+}
+
+func (m *mockAIUpstream) handle(w http.ResponseWriter, r *http.Request) {
+	var body aiUpstreamRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		m.t.Errorf("decode upstream body: %v", err)
+	}
+	if m.check != nil {
+		m.check(r)
+	}
+	m.mu.Lock()
+	m.requests = append(m.requests, body)
+	call := len(m.requests)
+	m.mu.Unlock()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = io.WriteString(w, m.seq(call))
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (m *mockAIUpstream) URL() string { return m.server.URL }
+
+func (m *mockAIUpstream) Calls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.requests)
+}
+
+func (m *mockAIUpstream) Requests() []aiUpstreamRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]aiUpstreamRequest, len(m.requests))
+	copy(out, m.requests)
+	return out
+}
+
+func (m *mockAIUpstream) Request(t *testing.T, index int) aiUpstreamRequest {
+	t.Helper()
+	requests := m.Requests()
+	if index >= len(requests) {
+		t.Fatalf("upstream call %d missing: only %d arrived", index+1, len(requests))
+	}
+	return requests[index]
+}
+
+// --- minimal legal completions streams ---
+
+// openAIData renders one `data:` frame of the completions dialect.
+func openAIData(payload string) string { return "data: " + payload + "\n\n" }
+
+// openAIStreamText ends a turn with text and no tool call.
+func openAIStreamText(t *testing.T, text string) string {
+	t.Helper()
+	return openAIStreamChunks(t, text, nil, "stop")
+}
+
+// openAIStreamToolCall ends a turn with one fully assembled tool call.
+func openAIStreamToolCall(t *testing.T, id, name, arguments string) string {
+	t.Helper()
+	return openAIStreamChunks(t, "", map[string]any{
+		"index": 0, "id": id,
+		"function": map[string]any{"name": name, "arguments": arguments},
+	}, "tool_calls")
+}
+
+func openAIStreamChunks(t *testing.T, text string, toolCall map[string]any, finish string) string {
+	t.Helper()
+	var body strings.Builder
+	body.WriteString(openAIData(openAIChoice(t, map[string]any{"role": "assistant"}, "")))
+	if text != "" {
+		body.WriteString(openAIData(openAIChoice(t, map[string]any{"content": text}, "")))
+	}
+	if toolCall != nil {
+		body.WriteString(openAIData(openAIChoice(t, map[string]any{"tool_calls": []any{toolCall}}, "")))
+	}
+	if finish == "" {
+		finish = "stop"
+	}
+	body.WriteString(openAIData(openAIChoice(t, map[string]any{}, finish)))
+	// [DONE] is the dialect's terminal marker: without it (or a finish_reason)
+	// the adapter calls the stream truncated and turns it into an error.
+	body.WriteString(openAIData("[DONE]"))
+	return body.String()
+}
+
+func openAIChoice(t *testing.T, delta map[string]any, finish string) string {
+	t.Helper()
+	choice := map[string]any{"delta": delta}
+	if finish != "" {
+		choice["finish_reason"] = finish
+	}
+	raw, err := json.Marshal(map[string]any{"choices": []any{choice}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return string(raw)
 }
 
-// finishTailLogsAsync simulates the agent answering a queued tail_logs
-// command. It runs on its own goroutine (the chat handler blocks on the
-// result) and reports the outcome on the returned channel.
-func finishTailLogsAsync(api *Server, nodeID, stdout string) <-chan error {
-	done := make(chan error, 1)
-	go func() {
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			cmds, err := api.Store.ListCommands(nodeID, 50)
-			if err != nil {
-				done <- err
-				return
-			}
-			for _, c := range cmds {
-				if c.Kind != "tail_logs" || c.Status != "pending" {
-					continue
-				}
-				result, _ := json.Marshal(protocol.CmdResult{ID: c.ID, ExitCode: 0, Stdout: stdout})
-				if err := api.Store.FinishCommand(c.ID, "ok", string(result)); err != nil {
-					done <- err
-					return
-				}
-				done <- nil
-				return
-			}
-			time.Sleep(25 * time.Millisecond)
+// --- helpers shared by the tool and loop tests ---
+
+// shrinkAICommandWait shortens the loop's wait for a queued command's result
+// (§12.1 caps it at 8s in production). Tests that leave a command pending have
+// no eight seconds to spare.
+func shrinkAICommandWait(t *testing.T, wait time.Duration) {
+	t.Helper()
+	previous := aiQueuedCommandWait
+	aiQueuedCommandWait = wait
+	t.Cleanup(func() { aiQueuedCommandWait = previous })
+}
+
+// toolResultMessageHas reports whether a persisted tool message carries needle.
+// The transcript is where an outcome the stream does not spell out (a refusal
+// reason, say) is still observable.
+func toolResultMessageHas(t *testing.T, api *Server, sessionID, needle string) bool {
+	t.Helper()
+	if sessionID == "" {
+		t.Fatal("no session id: the session event never arrived")
+	}
+	messages, err := api.Store.ListAIMessages(sessionID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range messages {
+		if message.Role == "tool" && strings.Contains(message.Content, needle) {
+			return true
 		}
-		done <- errors.New("tail_logs command never appeared in the queue")
-	}()
-	return done
+	}
+	return false
+}
+
+// confirmationAuditCount counts the records a held-back action leaves behind.
+// It is the only test-visible way to assert "nothing was staged at all".
+func confirmationAuditCount(t *testing.T, api *Server) int {
+	t.Helper()
+	audit, err := api.Store.ListAudit(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, entry := range audit {
+		if entry.Action == "ai_action_confirmation_required" {
+			count++
+		}
+	}
+	return count
 }
 
 func nodeCommandCount(t *testing.T, api *Server, nodeID string) int {
@@ -88,227 +247,6 @@ func nodeCommandCount(t *testing.T, api *Server, nodeID string) int {
 		t.Fatal(err)
 	}
 	return len(cmds)
-}
-
-func TestAIMetaToolsForceConfirmation(t *testing.T) {
-	tests := []struct {
-		name       string
-		tool       string
-		arguments  string
-		kind       string
-		payloadHas string
-	}{
-		{
-			name:       "install_singbox",
-			tool:       "install_singbox",
-			arguments:  `{"version":"1.10.0","reason":"upgrade attempt"}`,
-			kind:       "install_singbox",
-			payloadHas: `"version":"1.10.0"`,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			server, api := newTestServer(t)
-			defer server.Close()
-			nodeID := createAINode(t, api, "ai-meta-"+test.tool)
-			cookie := loginCookie(t, server.URL)
-			upstream := upstreamAI(t, chatToolCall("call-meta", test.tool, test.arguments), nil)
-			defer upstream.Close()
-			configureAI(t, api, upstream.URL, "k", "m")
-
-			resp, body := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "do it"})
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("status = %d", resp.StatusCode)
-			}
-			tool, ok := body["tool_call"].(map[string]any)
-			if !ok || tool["status"] != "needs_confirmation" || tool["action_id"] == "" {
-				t.Fatalf("tool_call = %v", body["tool_call"])
-			}
-
-			// nothing may enter the commands queue before confirmation
-			if n := nodeCommandCount(t, api, nodeID); n != 0 {
-				t.Fatalf("commands queued = %d, want 0", n)
-			}
-			action, err := api.Store.GetAIPendingAction(tool["action_id"].(string))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if action.Kind != test.kind || action.Status != "pending" || action.Risk != "forced" {
-				t.Fatalf("pending action = %+v", action)
-			}
-			if !strings.Contains(action.Payload, test.payloadHas) {
-				t.Fatalf("payload %q missing %q", action.Payload, test.payloadHas)
-			}
-			audit, err := api.Store.ListAudit(50)
-			if err != nil {
-				t.Fatal(err)
-			}
-			found := false
-			for _, entry := range audit {
-				if entry.Actor == "ai" && entry.Action == "ai_action_confirmation_required" && entry.Risk == "forced" {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("forced confirmation audit missing: %+v", audit)
-			}
-		})
-	}
-}
-
-func TestAIInstallSingboxInvalidVersionRejected(t *testing.T) {
-	server, api := newTestServer(t)
-	defer server.Close()
-	nodeID := createAINode(t, api, "ai-install-invalid")
-	cookie := loginCookie(t, server.URL)
-	upstream := upstreamAI(t, chatToolCall("call-bad", "install_singbox", `{"version":"bad version!"}`), nil)
-	defer upstream.Close()
-	configureAI(t, api, upstream.URL, "k", "m")
-
-	resp, body := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "install"})
-	defer resp.Body.Close()
-	tool, ok := body["tool_call"].(map[string]any)
-	if !ok || tool["status"] != "invalid" {
-		t.Fatalf("tool_call = %v, want invalid", body["tool_call"])
-	}
-	if n := nodeCommandCount(t, api, nodeID); n != 0 {
-		t.Fatalf("commands queued = %d, want 0", n)
-	}
-}
-
-func TestAIRestartSingboxQueuesCommand(t *testing.T) {
-	server, api := newTestServer(t)
-	defer server.Close()
-	nodeID := createAINode(t, api, "ai-restart")
-	cookie := loginCookie(t, server.URL)
-	upstream := upstreamAI(t, chatToolCall("call-r", "restart_singbox", `{"reason":"config apply"}`), nil)
-	defer upstream.Close()
-	configureAI(t, api, upstream.URL, "k", "m")
-
-	// without a singbox desired state the action is refused up front
-	resp, body := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "restart"})
-	defer resp.Body.Close()
-	tool := body["tool_call"].(map[string]any)
-	if tool["status"] != "blocked" || tool["reason"] != "singbox_not_installed" {
-		t.Fatalf("tool_call = %v, want blocked/singbox_not_installed", tool)
-	}
-
-	if err := api.Store.UpsertNodeSingbox(&store.NodeSingbox{
-		NodeID: nodeID, DesiredVersion: "1.10.0", Status: "absent",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	resp2, body2 := postAIChat(t, server.URL, cookie, aiChatRequest{
-		NodeID: nodeID, SessionID: body["session_id"].(string), Message: "restart again",
-	})
-	defer resp2.Body.Close()
-	tool2 := body2["tool_call"].(map[string]any)
-	if tool2["status"] != "queued" || tool2["command_id"] == "" {
-		t.Fatalf("tool_call = %v, want queued", tool2)
-	}
-	cmds, err := api.Store.ListCommands(nodeID, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cmds) != 1 || cmds[0].Kind != "restart_singbox" || cmds[0].Actor != "ai" || cmds[0].Payload != "{}" {
-		t.Fatalf("commands = %+v", cmds)
-	}
-}
-
-func TestAIIncludeLogsInjectsTailLogs(t *testing.T) {
-	server, api := newTestServer(t)
-	defer server.Close()
-	nodeID := createAINode(t, api, "ai-includelogs")
-	cookie := loginCookie(t, server.URL)
-
-	var captured []aiOpenAIRequest
-	upstream := upstreamAI(t, `{"choices":[{"message":{"content":"logs received"}}]}`, &captured)
-	defer upstream.Close()
-	configureAI(t, api, upstream.URL, "k", "m")
-
-	oldWait := aiTailLogsWait
-	aiTailLogsWait = 3 * time.Second
-	defer func() { aiTailLogsWait = oldWait }()
-
-	agentDone := finishTailLogsAsync(api, nodeID, "fobe-tail-marker-42 ERROR sing-box exited\n")
-
-	resp, body := postAIChat(t, server.URL, cookie, aiChatRequest{
-		NodeID: nodeID, Message: "why did sing-box die?", IncludeLogs: true,
-	})
-	defer resp.Body.Close()
-	if err := <-agentDone; err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK || body["message"] != "logs received" {
-		t.Fatalf("response = %d %v", resp.StatusCode, body)
-	}
-	if len(captured) == 0 {
-		t.Fatal("upstream never called")
-	}
-	system := captured[0].Messages[0].Content
-	if !strings.Contains(system, `"node_logs"`) || !strings.Contains(system, "fobe-tail-marker-42") {
-		t.Fatalf("system context missing log section: %s", system)
-	}
-	// the read-only fetch went through the commands queue with actor=ai
-	cmds, err := api.Store.ListCommands(nodeID, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cmds) != 1 || cmds[0].Kind != "tail_logs" || cmds[0].Actor != "ai" {
-		t.Fatalf("commands = %+v", cmds)
-	}
-}
-
-func TestAITailLogsToolCallReturnsStdout(t *testing.T) {
-	server, api := newTestServer(t)
-	defer server.Close()
-	nodeID := createAINode(t, api, "ai-taillogs")
-	cookie := loginCookie(t, server.URL)
-	upstream := upstreamAI(t, chatToolCall("call-tail", "tail_logs", `{"lines":5000}`), nil)
-	defer upstream.Close()
-	configureAI(t, api, upstream.URL, "k", "m")
-
-	oldWait := aiTailLogsWait
-	aiTailLogsWait = 3 * time.Second
-	defer func() { aiTailLogsWait = oldWait }()
-
-	agentDone := finishTailLogsAsync(api, nodeID, "fobe-toolcall-marker-7\n")
-
-	resp, body := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "show me the logs"})
-	defer resp.Body.Close()
-	if err := <-agentDone; err != nil {
-		t.Fatal(err)
-	}
-	tool := body["tool_call"].(map[string]any)
-	if tool["status"] != "ok" {
-		t.Fatalf("tool_call = %v, want ok", tool)
-	}
-	if stdout, _ := tool["stdout"].(string); !strings.Contains(stdout, "fobe-toolcall-marker-7") {
-		t.Fatalf("stdout = %v", tool["stdout"])
-	}
-	cmds, err := api.Store.ListCommands(nodeID, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 5000 requested → clamped to the 500-line cap in the queued payload
-	if len(cmds) != 1 || cmds[0].Payload != `{"lines":500}` {
-		t.Fatalf("commands = %+v", cmds)
-	}
-	sessionID := body["session_id"].(string)
-	messages, err := api.Store.ListAIMessages(sessionID, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hasTool := false
-	for _, m := range messages {
-		if m.Role == "tool" && strings.Contains(m.Content, "fobe-toolcall-marker-7") {
-			hasTool = true
-		}
-	}
-	if !hasTool {
-		t.Fatalf("tool message not persisted: %+v", messages)
-	}
 }
 
 func TestAIContextIncludesNodesAndLatency(t *testing.T) {
@@ -337,17 +275,14 @@ func TestAIContextIncludesNodesAndLatency(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie := loginCookie(t, server.URL)
-	var captured []aiOpenAIRequest
-	upstream := upstreamAI(t, `{"choices":[{"message":{"content":"ok"}}]}`, &captured)
-	defer upstream.Close()
-	configureAI(t, api, upstream.URL, "k", "m")
+	upstream := newMockAIUpstream(t, openAIStreamText(t, "ok"))
+	configureAI(t, api, upstream.URL(), "k", "m")
 
-	resp, _ := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "overview please"})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", resp.StatusCode)
+	result := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "overview please"})
+	if result.Status != http.StatusOK {
+		t.Fatalf("status = %d", result.Status)
 	}
-	system := captured[0].Messages[0].Content
+	system := upstream.Request(t, 0).Messages[0].Content
 	for _, want := range []string{
 		`"nodes"`, `"current":true`, `"agent_version"`,
 		`"latency"`, `"8.8.8.8"`, `"icmp_p95_ms":20`, `"tcp_p95_ms":22.5`,
@@ -356,4 +291,26 @@ func TestAIContextIncludesNodesAndLatency(t *testing.T) {
 			t.Fatalf("system context missing %s:\n%s", want, system)
 		}
 	}
+}
+
+// answerBrowserQueries stands in for the browser that holds a terminal session
+// (design §12.7.1): every buffer query is answered with the same window.
+//
+// The server keeps NO terminal state — that is the whole point of the design —
+// so a test cannot invent a screen any other way. This helper is the test-side
+// equivalent of the xterm instance.
+func answerBrowserQueries(t *testing.T, api *Server, sessionID, screen string) {
+	t.Helper()
+	lines := strings.Split(screen, "\n")
+	cleanup := api.Hub.RegisterTerminalPush(sessionID, func(env protocol.Envelope) bool {
+		var query protocol.TerminalQuery
+		if err := json.Unmarshal(env.Payload, &query); err != nil {
+			return false
+		}
+		return api.Hub.DeliverTerminalBuffer(protocol.TerminalBuffer{
+			ID: query.ID, OK: true, Cols: 80, Rows: len(lines),
+			Length: len(lines), Lines: lines,
+		})
+	})
+	t.Cleanup(cleanup)
 }

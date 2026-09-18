@@ -389,7 +389,8 @@ section.card { margin-bottom: 0; }
 .field input,
 .field select,
 .cmd-input-row input,
-.cmd-input-row select {
+.cmd-input-row select,
+.ai-select-field select {
   appearance: none;
   box-sizing: border-box;
   height: 38px;
@@ -406,7 +407,8 @@ section.card { margin-bottom: 0; }
 .field input:focus,
 .field select:focus,
 .cmd-input-row input:focus,
-.cmd-input-row select:focus {
+.cmd-input-row select:focus,
+.ai-select-field select:focus {
   outline: 2px solid var(--accent-weak);
   border-color: var(--accent);
 }
@@ -980,8 +982,82 @@ section.card { margin-bottom: 0; }
   margin-bottom: 4px;
 }
 .ai-text { margin: 0; white-space: pre-wrap; word-break: break-word; }
-.ai-tool { margin-top: 8px; display: grid; gap: 6px; justify-items: start; }
-.ai-tool .code-block { margin: 0; width: 100%; }
+
+/* --- AI 侧栏的流式对话 (design §12.5/§12.6) -------------------------------- */
+
+/* Model + thinking-level pickers, one panel above the transcript. The provider
+   grouping is a native <optgroup>, so it needs no styling of its own. */
+.ai-controls {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.ai-select-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ai-select-field > span { font-size: 12px; color: var(--text-dim); }
+.ai-select-field select { width: 100%; font-size: 13px; }
+/* "This model exposes no adjustable level": a sentence, not an empty dropdown. */
+.ai-level-none { margin: 0; height: 38px; display: flex; align-items: center; }
+.ai-control-row { display: flex; align-items: flex-end; gap: 8px; }
+.ai-control-row > .ai-select-field { flex: 1 1 auto; }
+.ai-control-row > .btn { flex: none; }
+
+/* Reasoning text (§12.5): collapsed by default, click to expand. */
+.ai-thinking { margin: 0 0 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.ai-thinking > summary {
+  cursor: pointer;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+}
+.ai-thinking[open] > summary { border-bottom: 1px solid var(--border); }
+.ai-thinking-body {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+/* One finished tool execution: name + status + the command it ran. The border
+   is deliberately lighter than a message bubble — it is evidence, not speech. */
+.ai-tool-card {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.ai-tool-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ai-tool-name { font-size: 12.5px; overflow-wrap: anywhere; }
+.ai-tool-card .code-block,
+.ai-tool-history .code-block,
+.ai-confirm .code-block { margin: 0; width: 100%; }
+.ai-tool-history .ai-role { margin-bottom: 6px; }
+
+/* Risk confirmation (§12.3): the operator's only job is judging this command. */
+.ai-confirm {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.ai-confirm .hint { margin: 0; }
+
+/* Why the turn ended — amber unless it actually finished, because a turn cut
+   off by the budget/deadline/repeat gate must not look like a normal answer. */
+.ai-turn-end { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ai-turn-end .hint { margin: 0; }
 
 /* §15 通知页 (2026-09-16): one row per event type, switch on the right. */
 .switch-list { display: flex; flex-direction: column; margin-top: 10px; }
@@ -1027,3 +1103,35 @@ section.card { margin-bottom: 0; }
 
 /* Non-fatal warning (only `shadowed` today) inside the status cell. */
 .sub-entry-warn { color: var(--amber); font-size: 12.5px; }
+
+/* --- AI settings page (/settings/ai, design §12.1/§12.5) -------------------- */
+
+/* Non-fatal but consequential warning (today: "a backup file is a credential").
+   Amber, never red — red is reserved for things that actually failed. */
+.warn-hint { color: var(--amber); font-size: 13px; margin: 4px 0; }
+
+.ai-search { max-width: 320px; }
+
+/* Scrollable candidate list of a provider's own model listing. The border and
+   background live on the container so the rows stay flat. */
+.ai-candidate-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 4px 10px;
+  margin-top: 10px;
+}
+.ai-candidate-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  cursor: pointer;
+  /* A model id is an unbroken token (org/model-version) with no break chance. */
+  overflow-wrap: anywhere;
+}
+.ai-candidate-row + .ai-candidate-row { border-top: 1px solid var(--border); }
+.ai-candidate-row input[type='checkbox'] { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; flex: none; }
+.ai-candidate-id { font-family: var(--mono); font-size: 12.5px; }

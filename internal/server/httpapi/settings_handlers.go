@@ -9,7 +9,8 @@ import (
 )
 
 // Settings groups (design §4.4 / §12.1 / §13 / §14 / §15 / §16):
-//   ai.base_url, ai.model, ai.api_key (encrypted), ai.default_policy
+//   ai.default_policy, ai.default_provider_id, ai.default_model_id
+//   (the §12.5 thinking budgets are built-in constants, not settings)
 //   notify.telegram_bot_token (encrypted), notify.telegram_chat_id,
 //   notify.webhook_url, notify.webhook_secret
 //   notify.feishu_app_id / app_secret (encrypted) / receive_id / bot_name /
@@ -31,8 +32,9 @@ type settingView struct {
 }
 
 // sensitiveKeys are write-only: GET returns set/unset, never the value.
+// AI provider keys are NOT here: since the multi-provider rewrite (§12.1,
+// 2026-09-18) they live in ai_providers.api_key_enc and never touch this table.
 var sensitiveKeys = map[string]bool{
-	"ai.api_key":                   true,
 	"notify.telegram_bot_token":    true,
 	"notify.webhook_secret":        true,
 	"notify.feishu_app_secret":     true,
@@ -48,7 +50,11 @@ var allowedKeys = func() map[string]bool {
 	}
 	for _, k := range []string{
 		"server.public_url",
-		"ai.base_url", "ai.model", "ai.default_policy",
+		// §12.1 (2026-09-18): the three legacy single-provider keys
+		// (ai.base_url / ai.model / ai.api_key) are gone — deliberately NOT
+		// migrated, so there is exactly one shape of AI configuration in the
+		// database instead of two that can disagree.
+		"ai.default_policy", "ai.default_provider_id", "ai.default_model_id",
 		"notify.telegram_chat_id", "notify.webhook_url",
 		// §15 飞书 (2026-09-16): app mode + group custom-bot webhook mode.
 		"notify.feishu_app_id", "notify.feishu_app_secret", "notify.feishu_receive_id",
@@ -62,7 +68,6 @@ var allowedKeys = func() map[string]bool {
 		"retention.metrics_days", "retention.latency_days",
 		"latency.interval_seconds",
 		"alert.traffic_warn_pct", "alert.traffic_crit_pct",
-		"ai.kill_switch",
 		"ui.theme", // light|dark|system; validated below (§16 dual-write)
 		// The §10 rules snippets (sub.rules_singbox / sub.rules_clash) are gone
 		// with the {{rules}} placeholder — their values were inlined into the

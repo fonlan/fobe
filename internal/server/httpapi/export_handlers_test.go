@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -203,13 +204,18 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("subscription node bind: %d %s", resp.StatusCode, raw)
 	}
+	// A sensitive setting is seeded with a sentinel PLAINTEXT: the export must
+	// carry ciphertext only (§17 2026-09-18 修订), asserted below by looking for
+	// the sentinel in the raw JSON while the ciphertext for the same key must be
+	// present. Checking just one half is what let the old "never carries
+	// credentials" comment drift away from the code.
 	resp, raw = doAuthed(t, "PUT", srv1.URL+"/api/settings", cookie1, []byte(
-		`{"settings":{"server.public_url":"https://panel.example.com","ai.api_key":"super-secret-key"}}`))
+		`{"settings":{"server.public_url":"https://panel.example.com","notify.telegram_bot_token":"super-secret-key"}}`))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("settings put: %d %s", resp.StatusCode, raw)
 	}
 
-	// --- export: shape + no credential material ---
+	// --- export: shape + credentials only as ciphertext ---
 	resp, raw = doAuthed(t, "GET", srv1.URL+"/api/export", cookie1, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("export: %d", resp.StatusCode)
@@ -226,6 +232,16 @@ func TestExportImportRoundTrip(t *testing.T) {
 	var ef exportFile
 	if err := json.Unmarshal(raw, &ef); err != nil {
 		t.Fatal(err)
+	}
+	sealed := ef.SensitiveSettings["notify.telegram_bot_token"]
+	if sealed == "" {
+		t.Fatal("sensitive setting not exported as ciphertext")
+	}
+	if _, err := api1.Crypt.Decrypt(sealed); err != nil {
+		t.Fatalf("exported ciphertext does not decrypt under the panel key: %v", err)
+	}
+	if _, ok := ef.Settings["notify.telegram_bot_token"]; ok {
+		t.Fatal("sensitive setting also landed in the plaintext section")
 	}
 	if ef.Version != exportFormatVersion || len(ef.Nodes) != 1 {
 		t.Fatalf("unexpected export header/nodes: version=%d nodes=%d", ef.Version, len(ef.Nodes))
@@ -257,9 +273,11 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if ef.Settings["server.public_url"] != "https://panel.example.com" {
 		t.Fatalf("plaintext settings not exported: %+v", ef.Settings)
 	}
-	if _, ok := ef.Settings["ai.api_key"]; ok {
-		t.Fatal("sensitive setting exported")
-	}
+	// NOTE: the "sensitive setting must not be exported" guard that used to sit
+	// here is gone with the key itself (ai.api_key stopped being a setting in
+	// §12.1's rewrite). The live guarantee is the OPPOSITE now and is asserted
+	// above: the sensitive setting travels as ciphertext in SensitiveSettings,
+	// and the plaintext section must not contain it.
 
 	// --- import into a fresh panel ---
 	srv2, api2 := newTestServer(t)
@@ -272,8 +290,8 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &first); err != nil {
 		t.Fatal(err)
 	}
-	want1 := importStats{NodesCreated: 1, LatencyTargetsCreated: 1, SubscriptionsCreated: 1, TemplatesCreated: 1, SettingsImported: 1}
-	if first != want1 {
+	want1 := importStats{NodesCreated: 1, LatencyTargetsCreated: 1, SubscriptionsCreated: 1, TemplatesCreated: 1, SettingsImported: 1, SensitiveImported: 1}
+	if !reflect.DeepEqual(first, want1) {
 		t.Fatalf("first import stats: %+v, want %+v", first, want1)
 	}
 
@@ -334,7 +352,11 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Fatalf("subscription template not remapped: %+v vs %+v", importedSub, tpls.Templates)
 	}
 
-	// sensitive settings never travel; plaintext ones do
+	// Sensitive settings DO travel (as ciphertext) since the 2026-09-18
+	// reversal: the same master key is in play for both test servers, so the
+	// value must come back readable — and the panel must report it as set. The
+	// "different master key" path is covered by
+	// TestImportSensitiveSettingsWithForeignMasterKey.
 	resp, raw = doAuthed(t, "GET", srv2.URL+"/api/settings", cookie2, nil)
 	var settingsResp struct {
 		Settings []settingView `json:"settings"`
@@ -343,12 +365,15 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sv := range settingsResp.Settings {
-		if sv.Key == "ai.api_key" && sv.Set {
-			t.Fatal("ai.api_key was imported")
+		if sv.Key == "notify.telegram_bot_token" && !sv.Set {
+			t.Fatal("sensitive setting was not restored")
 		}
 		if sv.Key == "server.public_url" && (!sv.Set || sv.Value != "https://panel.example.com") {
 			t.Fatalf("server.public_url not imported: %+v", sv)
 		}
+	}
+	if plain, ok := api2.GetDecryptedSetting("notify.telegram_bot_token"); !ok || plain != "super-secret-key" {
+		t.Fatalf("restored secret does not decrypt to the original: %q ok=%v", plain, ok)
 	}
 
 	// --- second import is a no-op for entity counts ---
@@ -360,8 +385,11 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &second); err != nil {
 		t.Fatal(err)
 	}
-	want2 := importStats{NodesUpdated: 1, SubscriptionsUpdated: 1, TemplatesUpdated: 1, SettingsImported: 1}
-	if second != want2 {
+	want2 := importStats{
+		NodesUpdated: 1, SubscriptionsUpdated: 1, TemplatesUpdated: 1,
+		SettingsImported: 1, SensitiveImported: 1,
+	}
+	if !reflect.DeepEqual(second, want2) {
 		t.Fatalf("second import stats: %+v, want %+v", second, want2)
 	}
 
@@ -388,5 +416,221 @@ func TestExportImportRoundTrip(t *testing.T) {
 	resp, raw = doAuthed(t, "POST", srv2.URL+"/api/import", cookie2, []byte(`{"version":99}`))
 	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "bad_version") {
 		t.Fatalf("version check: got %d %s, want 400 bad_version", resp.StatusCode, raw)
+	}
+}
+
+// TestImportSensitiveSettingsWithForeignMasterKey pins the §20.15 consequence:
+// ciphertext only opens under the SAME master key, so a restore onto a panel
+// whose key differs must NAME every value it could not read instead of
+// installing something no code path can decrypt — which would look exactly like
+// "the notifications were never configured" (§10.1's invariant for anytls
+// passwords, applied to the snapshot path).
+func TestImportSensitiveSettingsWithForeignMasterKey(t *testing.T) {
+	srv1, _ := newTestServer(t)
+	defer srv1.Close()
+	cookie1 := loginCookie(t, srv1.URL)
+	resp, raw := doAuthed(t, "PUT", srv1.URL+"/api/settings", cookie1, []byte(
+		`{"settings":{"notify.telegram_bot_token":"sentinel-token"}}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("settings put: %d %s", resp.StatusCode, raw)
+	}
+	resp, raw = doAuthed(t, "GET", srv1.URL+"/api/export", cookie1, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("export: %d", resp.StatusCode)
+	}
+	snapshot := string(raw)
+
+	srv2, api2 := newTestServer(t)
+	defer srv2.Close()
+	cookie2 := loginCookie(t, srv2.URL)
+
+	// Same schema, DIFFERENT master key: this is what "restored onto another
+	// host without .master_key" actually looks like.
+	foreign, err := security.NewCryptor(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	api2.Crypt = foreign
+
+	resp, raw = doAuthed(t, "POST", srv2.URL+"/api/import", cookie2, []byte(snapshot))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("import: %d %s", resp.StatusCode, raw)
+	}
+	var stats importStats
+	if err := json.Unmarshal(raw, &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.SensitiveImported != 0 {
+		t.Fatalf("foreign ciphertext counted as imported: %+v", stats)
+	}
+	if len(stats.SkippedSecrets) != 1 || stats.SkippedSecrets[0] != "notify.telegram_bot_token" {
+		t.Fatalf("unreadable secret not named in the result: %+v", stats.SkippedSecrets)
+	}
+	if _, ok := api2.GetDecryptedSetting("notify.telegram_bot_token"); ok {
+		t.Fatal("unreadable ciphertext was stored anyway")
+	}
+}
+
+// TestExportImportAIConfiguration covers the AI half of the §17 reversal: the
+// snapshot must carry providers, models and their links, with the provider
+// secrets as CIPHERTEXT (they are the reason the file is now a credential
+// file), and a restore under the same master key must reproduce a working
+// configuration — keys included.
+//
+// This is deliberately separate from TestExportImportRoundTrip, which only
+// exercises the settings half: the provider block has its own shape, its own
+// decrypt check, and its own "unreadable secret" reporting.
+func TestExportImportAIConfiguration(t *testing.T) {
+	srv1, api1 := newTestServer(t)
+	defer srv1.Close()
+	cookie1 := loginCookie(t, srv1.URL)
+
+	resp, raw := doAuthed(t, "POST", srv1.URL+"/api/ai/providers", cookie1, []byte(`{
+		"name":"gateway","protocol":"openai-completions","base_url":"https://gw.example/v1",
+		"api_key":"sentinel-provider-key","extra_headers":"{\"HTTP-Referer\":\"https://panel.example\"}",
+		"models_dev_slug":"tokengo"}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create provider: %d %s", resp.StatusCode, raw)
+	}
+	var provider aiProviderView
+	if err := json.Unmarshal(raw, &provider); err != nil {
+		t.Fatal(err)
+	}
+	resp, raw = doAuthed(t, "POST", srv1.URL+"/api/ai/models", cookie1, []byte(`{
+		"id":"gw-model","display_name":"Gateway Model","context_window":128000,"max_output_tokens":8192,
+		"input_modalities":["text","image"],"output_modalities":["text"],
+		"reasoning_levels":["off","low","high"],"reasoning_off_style":"none",
+		"overridden_fields":["context_window"],"source":"models_dev"}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("save model: %d %s", resp.StatusCode, raw)
+	}
+	resp, raw = doAuthed(t, "POST", srv1.URL+"/api/ai/providers/"+provider.ID+"/models", cookie1,
+		[]byte(`{"model_ids":["gw-model"]}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("link model: %d %s", resp.StatusCode, raw)
+	}
+	resp, raw = doAuthed(t, "PUT", srv1.URL+"/api/ai/defaults", cookie1,
+		[]byte(`{"provider_id":"`+provider.ID+`","model_id":"gw-model"}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("defaults: %d %s", resp.StatusCode, raw)
+	}
+
+	resp, raw = doAuthed(t, "GET", srv1.URL+"/api/export", cookie1, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("export: %d", resp.StatusCode)
+	}
+	exported := string(raw)
+	if strings.Contains(exported, "sentinel-provider-key") {
+		t.Fatal("export leaked the provider key in plaintext")
+	}
+	var ef exportFile
+	if err := json.Unmarshal(raw, &ef); err != nil {
+		t.Fatal(err)
+	}
+	if len(ef.AIProviders) != 1 || ef.AIProviders[0].APIKeyEnc == "" {
+		t.Fatalf("provider block not exported with its ciphertext: %+v", ef.AIProviders)
+	}
+	if ef.AIProviders[0].ExtraHeadersEnc == "" {
+		t.Fatal("extra headers ciphertext not exported")
+	}
+	// The exported ciphertext must be the panel's own (decryptable here), not a
+	// re-encoding that only some other host could read: a snapshot that cannot
+	// decrypt its own credentials is a restore that reports success and loses
+	// every key.
+	if plain, err := api1.Crypt.Decrypt(ef.AIProviders[0].APIKeyEnc); err != nil || plain != "sentinel-provider-key" {
+		t.Fatalf("exported provider ciphertext does not decrypt locally: %q err=%v", plain, err)
+	}
+	if len(ef.AIModels) != 1 || ef.AIModels[0].ID != "gw-model" {
+		t.Fatalf("models not exported: %+v", ef.AIModels)
+	}
+	if ef.AIModels[0].ReasoningOffStyle != "none" {
+		t.Fatalf("off-style not exported (a restore would silently degrade to omit): %+v", ef.AIModels[0])
+	}
+	if len(ef.AIProviderModels) != 1 || ef.AIProviderModels[0].ModelID != "gw-model" {
+		t.Fatalf("links not exported: %+v", ef.AIProviderModels)
+	}
+
+	// --- same master key: everything comes back, keys included ---
+	srv2, api2 := newTestServer(t)
+	defer srv2.Close()
+	cookie2 := loginCookie(t, srv2.URL)
+	resp, raw = doAuthed(t, "POST", srv2.URL+"/api/import", cookie2, []byte(exported))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("import: %d %s", resp.StatusCode, raw)
+	}
+	var stats importStats
+	if err := json.Unmarshal(raw, &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.AIProvidersImported != 1 || stats.AIModelsImported != 1 || stats.AIProviderModelsLinked != 1 {
+		t.Fatalf("AI import counts: %+v", stats)
+	}
+	if len(stats.SkippedSecrets) != 0 {
+		t.Fatalf("nothing should have been skipped under the same master key: %v", stats.SkippedSecrets)
+	}
+	restored, err := api2.Store.GetAIProvider(provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.APIKeyEnc == "" {
+		t.Fatal("provider key was dropped by the round trip")
+	}
+	if plain, err := api2.Crypt.Decrypt(restored.APIKeyEnc); err != nil || plain != "sentinel-provider-key" {
+		t.Fatalf("restored key does not decrypt to the original: %q err=%v", plain, err)
+	}
+	if plain, err := api2.Crypt.Decrypt(restored.ExtraHeadersEnc); err != nil || !strings.Contains(plain, "HTTP-Referer") {
+		t.Fatalf("restored headers do not decrypt: %q err=%v", plain, err)
+	}
+	model, err := api2.Store.GetAIModel("gw-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.ContextWindow != 128000 || model.ReasoningOffStyle != "none" ||
+		len(model.OverriddenFields) != 1 || model.OverriddenFields[0] != "context_window" {
+		t.Fatalf("model did not survive the round trip: %+v", model)
+	}
+	if len(model.InputModalities) != 2 {
+		t.Fatalf("modalities did not survive: %+v", model.InputModalities)
+	}
+	// The default pair is a plaintext setting, and the restored provider must
+	// still be usable as one (a dangling default would make the picker fall
+	// back on every mount).
+	if pid, _ := api2.Store.GetSetting("ai.default_provider_id"); pid != provider.ID {
+		t.Fatalf("default provider not restored: %q", pid)
+	}
+	if usable, err := api2.Store.HasUsableAIModel(); err != nil || !usable {
+		t.Fatalf("restored AI configuration is not usable: %v %v", usable, err)
+	}
+
+	// --- different master key: the ROW is imported, the SECRET is named ---
+	srv3, api3 := newTestServer(t)
+	defer srv3.Close()
+	cookie3 := loginCookie(t, srv3.URL)
+	foreign, err := security.NewCryptor(bytes.Repeat([]byte{5}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	api3.Crypt = foreign
+	resp, raw = doAuthed(t, "POST", srv3.URL+"/api/import", cookie3, []byte(exported))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("foreign import: %d %s", resp.StatusCode, raw)
+	}
+	var foreignStats importStats
+	if err := json.Unmarshal(raw, &foreignStats); err != nil {
+		t.Fatal(err)
+	}
+	named := strings.Join(foreignStats.SkippedSecrets, ",")
+	if !strings.Contains(named, "ai_provider:"+provider.ID+":api_key") {
+		t.Fatalf("unreadable provider key not named: %v", foreignStats.SkippedSecrets)
+	}
+	foreignProvider, err := api3.Store.GetAIProvider(provider.ID)
+	if err != nil {
+		t.Fatalf("provider row should still be imported (only the secret is unusable): %v", err)
+	}
+	if foreignProvider.APIKeyEnc != "" {
+		t.Fatal("unreadable ciphertext was stored anyway: the panel would look configured while every call failed")
+	}
+	if foreignProvider.BaseURL != "https://gw.example/v1" {
+		t.Fatalf("usable parts of the provider were dropped: %+v", foreignProvider)
 	}
 }

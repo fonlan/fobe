@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -11,15 +12,30 @@ import (
 	"github.com/fonlan/fobe/internal/server/store"
 )
 
-// --- panel export / import (design §17: JSON snapshot without credentials) ---
+// --- panel export / import (design §17) ---
 
 // exportFormatVersion bumps when the snapshot shape changes; import accepts
 // exactly this version.
-const exportFormatVersion = 1
+//
+// 2 (2026-09-18): the snapshot now CARRIES CIPHERTEXT CREDENTIALS
+// (SensitiveSettings + the AI provider blocks). Version 1 files are refused
+// rather than half-imported: a v1 file has no secrets at all, so accepting it
+// would produce a restore that quietly drops every key and still reports
+// success.
+const exportFormatVersion = 2
 
-// The snapshot deliberately carries no credential material (§17): no
-// node_secret_hash, no certificate PEM, no subscription token (hash or
-// plaintext), no sensitive settings, and reg_tokens are skipped entirely.
+// The snapshot still carries no PLAINTEXT credential material (§17): no
+// node_secret_hash, no certificate PEM, no subscription token, and reg_tokens
+// are skipped entirely. What changed on 2026-09-18 is that Cryptor ciphertext
+// travels with the file — sensitive settings and AI provider
+// keys/extra-headers — so a restore does not silently lose every credential.
+//
+// Two consequences the operator owns (design §20.15):
+//   - the backup file is now equivalent to a credential file and must be kept
+//     beside .master_key;
+//   - ciphertext only opens under the SAME master key, so a restore onto a
+//     panel with a different key must NAME what it could not read instead of
+//     reporting "unconfigured" (see importSensitiveSettings).
 type exportFile struct {
 	Version        int               `json:"version"`
 	ExportedAt     int64             `json:"exported_at"`
@@ -28,6 +44,47 @@ type exportFile struct {
 	Subscriptions  []exportSub       `json:"subscriptions"`
 	Templates      []exportTemplate  `json:"templates"`
 	Settings       map[string]string `json:"settings"`
+	// SensitiveSettings holds Cryptor ciphertext keyed by setting key, and the
+	// AI block below carries the provider secrets. All three are omitted when
+	// empty so a snapshot with no credentials still looks like one.
+	SensitiveSettings map[string]string  `json:"sensitive_settings,omitempty"`
+	AIProviders       []exportAIProvider `json:"ai_providers,omitempty"`
+	AIModels          []exportAIModel    `json:"ai_models,omitempty"`
+	AIProviderModels  []exportAILink     `json:"ai_provider_models,omitempty"`
+}
+
+// exportAIProvider mirrors store.AIProvider with its secrets in ciphertext.
+type exportAIProvider struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Protocol        string `json:"protocol"`
+	BaseURL         string `json:"base_url"`
+	APIKeyEnc       string `json:"api_key_enc,omitempty"`
+	ExtraHeadersEnc string `json:"extra_headers_enc,omitempty"`
+	ModelsDevSlug   string `json:"models_dev_slug,omitempty"`
+	Enabled         bool   `json:"enabled"`
+}
+
+type exportAIModel struct {
+	ID               string   `json:"id"`
+	DisplayName      string   `json:"display_name"`
+	ContextWindow    int      `json:"context_window"`
+	MaxOutputTokens  int      `json:"max_output_tokens"`
+	InputModalities  []string `json:"input_modalities,omitempty"`
+	OutputModalities []string `json:"output_modalities,omitempty"`
+	ReasoningLevels  []string `json:"reasoning_levels,omitempty"`
+	// How "off" is spelled for this model (§12.5). Carried because losing it
+	// silently degrades to "omit", which does not switch thinking off on
+	// gateways that think by default.
+	ReasoningOffStyle string   `json:"reasoning_off_style,omitempty"`
+	OverriddenFields  []string `json:"overridden_fields,omitempty"`
+	Source            string   `json:"source"`
+	Enabled           bool     `json:"enabled"`
+}
+
+type exportAILink struct {
+	ProviderID string `json:"provider_id"`
+	ModelID    string `json:"model_id"`
 }
 
 type exportNode struct {
@@ -135,13 +192,14 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) buildExport() (*exportFile, error) {
 	ef := &exportFile{
-		Version:        exportFormatVersion,
-		ExportedAt:     nowUnix(),
-		Nodes:          []exportNode{},
-		LatencyTargets: []exportTarget{},
-		Subscriptions:  []exportSub{},
-		Templates:      []exportTemplate{},
-		Settings:       map[string]string{},
+		Version:           exportFormatVersion,
+		ExportedAt:        nowUnix(),
+		Nodes:             []exportNode{},
+		LatencyTargets:    []exportTarget{},
+		Subscriptions:     []exportSub{},
+		Templates:         []exportTemplate{},
+		Settings:          map[string]string{},
+		SensitiveSettings: map[string]string{},
 	}
 
 	nodes, err := s.Store.ListNodes()
@@ -242,16 +300,56 @@ func (s *Server) buildExport() (*exportFile, error) {
 		ef.Templates = append(ef.Templates, exportTemplate{Name: t.Name, Format: t.Format, Content: t.Content})
 	}
 
-	// plaintext keys only: sensitiveKeys stay write-only (§4.4)
+	// Settings: plaintext into Settings, ciphertext into SensitiveSettings
+	// (§17 2026-09-18 修订). Exporting the ciphertext is what makes a restore
+	// complete; the cost is that the file is now a credential file (§20.15).
 	for key := range allowedKeys {
-		if sensitiveKeys[key] {
-			continue
-		}
 		val, err := s.Store.GetSetting(key)
 		if err != nil || val == "" {
 			continue
 		}
+		if sensitiveKeys[key] {
+			ef.SensitiveSettings[key] = val
+			continue
+		}
 		ef.Settings[key] = val
+	}
+
+	// §12.5 AI providers/models: the keys and extra headers travel as
+	// ciphertext; the model rows and links carry no secrets and are exported
+	// so a restored panel does not have to re-fetch every model list.
+	providers, err := s.Store.ListAIProviders()
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range providers {
+		ef.AIProviders = append(ef.AIProviders, exportAIProvider{
+			ID: p.ID, Name: p.Name, Protocol: p.Protocol, BaseURL: p.BaseURL,
+			APIKeyEnc: p.APIKeyEnc, ExtraHeadersEnc: p.ExtraHeadersEnc,
+			ModelsDevSlug: p.ModelsDevSlug, Enabled: p.Enabled,
+		})
+	}
+	models, err := s.Store.ListAIModels()
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range models {
+		ef.AIModels = append(ef.AIModels, exportAIModel{
+			ID: m.ID, DisplayName: m.DisplayName, ContextWindow: m.ContextWindow,
+			MaxOutputTokens: m.MaxOutputTokens, InputModalities: m.InputModalities,
+			OutputModalities: m.OutputModalities, ReasoningLevels: m.ReasoningLevels,
+			ReasoningOffStyle: m.ReasoningOffStyle,
+			OverriddenFields:  m.OverriddenFields, Source: m.Source, Enabled: m.Enabled,
+		})
+	}
+	links, err := s.Store.AIProviderModelIDs()
+	if err != nil {
+		return nil, err
+	}
+	for providerID, modelIDs := range links {
+		for _, modelID := range modelIDs {
+			ef.AIProviderModels = append(ef.AIProviderModels, exportAILink{ProviderID: providerID, ModelID: modelID})
+		}
 	}
 	return ef, nil
 }
@@ -264,14 +362,23 @@ func exportSummary(ef *exportFile) string {
 // --- import ---
 
 type importStats struct {
-	NodesCreated          int `json:"nodes_created"`
-	NodesUpdated          int `json:"nodes_updated"`
-	LatencyTargetsCreated int `json:"latency_targets_created"`
-	SubscriptionsCreated  int `json:"subscriptions_created"`
-	SubscriptionsUpdated  int `json:"subscriptions_updated"`
-	TemplatesCreated      int `json:"templates_created"`
-	TemplatesUpdated      int `json:"templates_updated"`
-	SettingsImported      int `json:"settings_imported"`
+	NodesCreated           int `json:"nodes_created"`
+	NodesUpdated           int `json:"nodes_updated"`
+	LatencyTargetsCreated  int `json:"latency_targets_created"`
+	SubscriptionsCreated   int `json:"subscriptions_created"`
+	SubscriptionsUpdated   int `json:"subscriptions_updated"`
+	TemplatesCreated       int `json:"templates_created"`
+	TemplatesUpdated       int `json:"templates_updated"`
+	SettingsImported       int `json:"settings_imported"`
+	SensitiveImported      int `json:"sensitive_imported"`
+	AIProvidersImported    int `json:"ai_providers_imported"`
+	AIModelsImported       int `json:"ai_models_imported"`
+	AIProviderModelsLinked int `json:"ai_provider_models_linked"`
+	// SkippedSecrets names every credential the restore could NOT read (wrong
+	// master key) or had to drop. It is part of the response on purpose: a
+	// silent skip is indistinguishable from "you never configured it", which
+	// is the failure mode §10.1's invariant exists to prevent.
+	SkippedSecrets []string `json:"skipped_secrets,omitempty"`
 }
 
 // handleImport merges a previously exported snapshot into this panel
@@ -323,7 +430,152 @@ func (s *Server) runImport(ef *exportFile) (*importStats, error) {
 		return nil, err
 	}
 	s.importSettings(ef.Settings, stats)
+	// Secrets and AI configuration last: a restored provider list is useless
+	// without its default pair, and both depend on nothing else in the file.
+	s.importSensitiveSettings(ef.SensitiveSettings, stats)
+	s.importAISettings(ef, stats)
 	return stats, nil
+}
+
+// importSensitiveSettings restores write-only settings from ciphertext.
+//
+// The decrypt check is the whole point. Ciphertext only opens under the SAME
+// master key, so without the check a snapshot restored onto a panel with a
+// different key would install values no code path can read: every notification
+// channel silently dead, every login to the bot failing, and nothing in the
+// panel saying why. A value that does not decrypt is skipped and NAMED in the
+// result instead (§10.1's invariant for anytls passwords, applied to every
+// secret).
+func (s *Server) importSensitiveSettings(settings map[string]string, stats *importStats) {
+	for key, value := range settings {
+		if !sensitiveKeys[key] || strings.TrimSpace(value) == "" {
+			continue
+		}
+		if _, err := s.Crypt.Decrypt(value); err != nil {
+			stats.SkippedSecrets = append(stats.SkippedSecrets, key)
+			continue
+		}
+		if err := s.Store.SetSetting(key, value, true); err != nil {
+			s.Log.Warn("import sensitive setting", "key", key, "err", err)
+			continue
+		}
+		stats.SensitiveImported++
+	}
+	sort.Strings(stats.SkippedSecrets) // deterministic result for tests and operators
+}
+
+// importAISettings restores providers, models and links (§12.5).
+//
+// A provider whose key cannot be decrypted is still imported — the row, its
+// base_url and its protocol are useful, and the operator only has to re-enter
+// the key — but the unreadable ciphertext is DROPPED rather than stored. Keeping
+// it would leave the panel looking configured while every call failed with
+// ai_key_unreadable, and the id is already named in SkippedSecrets.
+func (s *Server) importAISettings(ef *exportFile, stats *importStats) {
+	for _, p := range ef.AIProviders {
+		if p.ID == "" || !store.ValidAIProtocol(p.Protocol) {
+			continue
+		}
+		baseURL, err := normalizeProviderBaseURL(p.BaseURL)
+		if err != nil {
+			continue
+		}
+		row := &store.AIProvider{
+			ID: p.ID, Name: p.Name, Protocol: p.Protocol, BaseURL: baseURL,
+			ModelsDevSlug: p.ModelsDevSlug, Enabled: p.Enabled,
+		}
+		if existing, err := s.Store.GetAIProvider(p.ID); err == nil {
+			row.CreatedAt = existing.CreatedAt
+		}
+		if row.CreatedAt == 0 {
+			row.CreatedAt = nowUnix()
+		}
+		row.UpdatedAt = nowUnix()
+
+		if p.APIKeyEnc != "" {
+			if _, err := s.Crypt.Decrypt(p.APIKeyEnc); err != nil {
+				stats.SkippedSecrets = append(stats.SkippedSecrets, "ai_provider:"+p.ID+":api_key")
+			} else {
+				row.APIKeyEnc = p.APIKeyEnc
+			}
+		}
+		if p.ExtraHeadersEnc != "" {
+			plain, err := s.Crypt.Decrypt(p.ExtraHeadersEnc)
+			if err == nil {
+				_, err = decodeExtraHeaders(plain)
+			}
+			if err != nil {
+				stats.SkippedSecrets = append(stats.SkippedSecrets, "ai_provider:"+p.ID+":extra_headers")
+			} else {
+				row.ExtraHeadersEnc = p.ExtraHeadersEnc
+			}
+		}
+		if err := s.Store.UpsertAIProvider(row); err != nil {
+			s.Log.Warn("import ai provider", "id", p.ID, "err", err)
+			continue
+		}
+		stats.AIProvidersImported++
+	}
+
+	for _, m := range ef.AIModels {
+		if strings.TrimSpace(m.ID) == "" {
+			continue
+		}
+		model := &store.AIModel{
+			ID: m.ID, DisplayName: m.DisplayName, ContextWindow: m.ContextWindow,
+			MaxOutputTokens: m.MaxOutputTokens, Source: m.Source, Enabled: m.Enabled,
+		}
+		if model.DisplayName == "" {
+			model.DisplayName = model.ID
+		}
+		if model.Source == "" {
+			model.Source = "manual"
+		}
+		// Drop vocabulary we do not know instead of importing a level the
+		// adapter layer cannot translate (§12.5).
+		for _, level := range m.ReasoningLevels {
+			if aiReasoningLevels[level] {
+				model.ReasoningLevels = append(model.ReasoningLevels, level)
+			}
+		}
+		for _, field := range m.OverriddenFields {
+			if aiModelOverrideFields[field] {
+				model.OverriddenFields = append(model.OverriddenFields, field)
+			}
+		}
+		if aiReasoningOffStyles[m.ReasoningOffStyle] {
+			model.ReasoningOffStyle = m.ReasoningOffStyle
+		}
+		model.InputModalities, model.OutputModalities = m.InputModalities, m.OutputModalities
+		if existing, err := s.Store.GetAIModel(m.ID); err == nil {
+			model.CreatedAt = existing.CreatedAt
+		}
+		if model.CreatedAt == 0 {
+			model.CreatedAt = nowUnix()
+		}
+		model.UpdatedAt = nowUnix()
+		if err := s.Store.UpsertAIModel(model); err != nil {
+			s.Log.Warn("import ai model", "id", m.ID, "err", err)
+			continue
+		}
+		stats.AIModelsImported++
+	}
+
+	for _, l := range ef.AIProviderModels {
+		// Link only pairs whose two halves actually landed: a dangling link
+		// cannot exist (foreign keys) and would abort the whole import.
+		if _, err := s.Store.GetAIProvider(l.ProviderID); err != nil {
+			continue
+		}
+		if _, err := s.Store.GetAIModel(l.ModelID); err != nil {
+			continue
+		}
+		if err := s.Store.LinkAIProviderModel(l.ProviderID, l.ModelID); err != nil {
+			continue
+		}
+		stats.AIProviderModelsLinked++
+	}
+	sort.Strings(stats.SkippedSecrets)
 }
 
 func (s *Server) importNodes(nodes []exportNode, stats *importStats) (map[string]string, error) {
@@ -651,9 +903,11 @@ func importEntries(entries []exportEntry, nodeByMachine map[string]string) []sto
 	return out
 }
 
-// importSettings applies plaintext settings only: unknown keys and
-// sensitiveKeys are dropped — a snapshot never carries credentials, and an
-// uploaded one must not be able to write them either.
+// importSettings applies plaintext settings only. Unknown keys and
+// sensitiveKeys are dropped here — secrets come in through
+// importSensitiveSettings, which can TELL whether a value is readable, and a
+// hand-crafted snapshot must not be able to write a key this endpoint cannot
+// validate.
 func (s *Server) importSettings(settings map[string]string, stats *importStats) {
 	for key, value := range settings {
 		if !allowedKeys[key] || sensitiveKeys[key] {

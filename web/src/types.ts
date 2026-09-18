@@ -720,7 +720,21 @@ export interface WsEvent {
 
 // Browser terminal WebSocket envelopes. The server stamps the authoritative
 // session_id into payloads as frames pass through to the agent.
-export type TerminalEnvelopeType = 'terminal_open' | 'terminal_input' | 'terminal_resize' | 'terminal_close' | 'terminal_output' | 'terminal_closed';
+//
+// `terminal_query` / `terminal_buffer` are the exception: they exist ONLY on
+// this browser ↔ server hop and are never forwarded to the agent (design
+// §12.7.1). The server keeps no terminal state, so the XTerm buffer in this
+// browser is the only screen model — the server asks for a window of it and the
+// browser answers, correlated by a request id.
+export type TerminalEnvelopeType =
+  | 'terminal_open'
+  | 'terminal_input'
+  | 'terminal_resize'
+  | 'terminal_close'
+  | 'terminal_output'
+  | 'terminal_closed'
+  | 'terminal_query'
+  | 'terminal_buffer';
 
 export interface TerminalEnvelope<TPayload = unknown> {
   v: number;
@@ -761,36 +775,173 @@ export interface TerminalClosedPayload {
   reason?: string;
 }
 
-export interface AIChatRequest {
-  node_id: string;
-  terminal_session_id?: string;
-  message: string;
-  include_logs?: boolean;
-  session_id?: string;
+/**
+ * `terminal_query` (server → browser): hand back a window of the XTerm buffer.
+ *
+ * The window is measured from the BOTTOM of the buffer, never from the
+ * operator's scroll position — scrolling up must not change what the AI reads.
+ * `offset` counts lines up from the bottom (0 = the newest line) and `lines`
+ * is the window height; `lines <= 0` means "use this browser's viewport height"
+ * (`term.rows`).
+ */
+export interface TerminalQueryPayload {
+  /** Correlates the answer; echoed verbatim in `TerminalBufferPayload.id`. */
+  id: string;
+  offset: number;
+  lines: number;
 }
 
-/** Mirrors the backend tool_call map: a run_shell request the model made. */
-export interface AIToolCall {
+/**
+ * `terminal_buffer` (browser → server): the answer to `terminal_query`.
+ *
+ * A failure is a first-class shape rather than an empty window — the server
+ * must be able to tell "this terminal has no buffer" (disposed/unmounted) from
+ * "the screen really was blank".
+ */
+export type TerminalBufferPayload =
+  | {
+      id: string;
+      ok: true;
+      cols: number;
+      rows: number;
+      /** Total buffer length the window was taken from. */
+      length: number;
+      /** The window, oldest first, right-trimmed. */
+      lines: string[];
+    }
+  | { id: string; ok: false; error: string };
+
+/**
+ * POST /api/ai/chat body. The response is an SSE stream, not JSON (§12.6) —
+ * see `streamAIChat` in api.ts. A conversation is pinned to one (provider,
+ * model, protocol) triple because reasoning blocks are protocol-native (§12.5),
+ * so provider_id/model_id only take effect when a NEW session is opened.
+ */
+export interface AIChatRequest {
+  node_id: string;
+  /**
+   * The terminal session the AI's keys must land on. It is resolved by the
+   * server at CALL time, never from the id frozen on the session row: the id is
+   * minted per browser WS connection, so a page refresh leaves the stored value
+   * dangling (§12.7.5). Omitted when no terminal is connected yet.
+   */
+  terminal_session_id?: string;
+  message: string;
+  session_id?: string;
+  provider_id?: string;
+  model_id?: string;
+  /** off | minimal | low | medium | high; omitted = the model's own default. */
+  reasoning_level?: string;
+}
+
+/**
+ * POST /api/ai/chat/continue body — the second half of a confirmation (§12.6).
+ * The stream ENDS at `needs_confirmation`, so answering it re-enters the loop
+ * through this endpoint; `approved: false` is a normal outcome the model gets
+ * told about (it can explain or propose something else).
+ *
+ * Deliberately NOT /api/ai/actions/{id}/confirm: that non-streaming route is
+ * the pre-§12.6 path and cannot report the resumed turn.
+ */
+export interface AIContinueRequest {
+  session_id?: string;
+  action_id: string;
+  approved: boolean;
+  /**
+   * Same contract as AIChatRequest.terminal_session_id: the LIVE terminal id,
+   * re-sent on every request because a resumed turn keeps keying into the PTY
+   * and the frozen session-row value may already be a dangling pointer
+   * (§12.7.5).
+   */
+  terminal_session_id?: string;
+  reasoning_level?: string;
+}
+
+/** `event: session` — first frame; names the conversation before any delta. */
+export interface AISessionEvent {
+  session_id: string;
+  provider_id?: string;
+  model_id?: string;
+  protocol?: string;
+}
+
+/** `event: tool_result` — one tool finished (the authoritative signal; the
+ *  backend does not emit a separate tool_call event today). */
+export interface AIToolResultEvent {
   id?: string;
   name?: string;
-  arguments?: { command?: string; reason?: string; risky?: boolean };
-  status?: 'queued' | 'needs_confirmation' | 'blocked' | 'invalid' | 'internal' | string;
-  action_id?: string;
-  command_id?: string;
+  /** ok | failed | blocked | refused | queued | read (older/newer builds may add more). */
+  status?: string;
+  command?: string;
+  /** null/absent when the tool was not a command or produced no exit code. */
+  exit_code?: number | null;
+  /** Present on budget/repeat refusals. */
   reason?: string;
 }
 
-export interface AIChatResponse {
-  session_id?: string;
-  message: string;
-  tool_call?: AIToolCall;
+/** `event: needs_confirmation` — the stream ends right after this (§12.6). */
+export interface AINeedsConfirmationEvent {
+  id?: string;
+  name?: string;
+  action_id: string;
+  command?: string;
+  reason?: string;
+  risk?: string;
 }
 
-export interface AIConfirmResponse {
+/**
+ * Why a turn ended. MUST be surfaced: a turn cut off by a budget would
+ * otherwise look like a normal finished answer (§12.6).
+ */
+export type AITurnEndReason =
+  | 'completed'
+  | 'turn_budget'
+  | 'repeat_call'
+  | 'turn_timeout'
+  /** More than 10 consecutive read_terminal calls this turn (§12.7.4). */
+  | 'read_limit'
+  | 'needs_confirmation'
+  | 'upstream_error'
+  | string;
+
+export interface AITurnEndEvent {
+  session_id?: string;
+  reason: AITurnEndReason;
+  /** How many change-class commands ran this turn. */
+  changes?: number;
+  action_id?: string;
+}
+
+/** `event: error` — mid-stream failure (a JSON error is impossible once 200). */
+export interface AIErrorEvent {
+  code: string;
+  message?: string;
+}
+
+/** One restored transcript row from GET /api/ai/sessions/{id}. */
+export interface AISessionMessage {
+  /**
+   * `turn_end` marker rows carry the reason a turn stopped (§12.6), which lives
+   * nowhere else — the panel renders them where the live stream shows its
+   * turn-end chip.
+   */
+  turn_reason?: string;
+  changes?: number;
+  role: 'user' | 'assistant' | 'tool' | string;
+  content: string;
+  /** Protocol-native blocks, kept opaque; the panel never parses them. */
+  raw?: unknown;
+  /** Reasoning text, extracted SERVER-side — this is what replays on reload. */
+  thinking?: string;
+}
+
+export interface AISessionHistory {
   session_id: string;
-  action_id: string;
-  status: string;
-  command_id: string;
+  node_id: string;
+  provider_id?: string;
+  model_id?: string;
+  protocol?: string;
+  messages: AISessionMessage[];
 }
 
 // --- panel export / import & GeoIP upload (design §17 / §14) ---
@@ -856,4 +1007,158 @@ export interface ImportStats {
   templates_created: number;
   templates_updated: number;
   settings_imported: number;
+  /** §17: decrypted sensitive settings (the snapshot now carries credentials). */
+  sensitive_imported: number;
+  ai_providers_imported: number;
+  ai_models_imported: number;
+  ai_provider_models_linked: number;
+  /**
+   * §17: credentials the restore could NOT read (the snapshot was sealed with a
+   * different master key) or deliberately dropped. Reported, never swallowed —
+   * a silent skip is indistinguishable from "you never configured it".
+   */
+  skipped_secrets?: string[];
+}
+
+// --- AI providers, models & models.dev metadata (design §12.1/§12.5) ---------
+
+/**
+ * One model as seen THROUGH one provider. `effective_levels` is computed
+ * server-side (protocol capability ∩ the model's documented levels) and is the
+ * only level list the panel may render — re-deriving the rule here is exactly
+ * the duplication that drifts (§12.1 takes the same stance on `ai_configured`).
+ * An empty array means "this model exposes no adjustable thinking level through
+ * this provider"; the UI says so instead of rendering an empty dropdown.
+ */
+export interface AIProviderModel {
+  id: string;
+  display_name: string;
+  context_window: number;
+  max_output_tokens: number;
+  effective_levels: string[];
+  /**
+   * Model-level switch. The settings page lists disabled models (so they can be
+   * turned back on); the picker must not offer them. Optional because an older
+   * server build omits it — undefined is treated as enabled.
+   */
+  enabled?: boolean;
+}
+
+/** GET /api/ai/catalog → providers[]; secrets are write-only (has_key / header_names). */
+export interface AIProvider {
+  id: string;
+  name: string;
+  /** openai-completions | openai-responses | anthropic-messages */
+  protocol: string;
+  /** ROOT semantics: the adapter appends the protocol path. */
+  base_url: string;
+  models_dev_slug: string;
+  enabled: boolean;
+  has_key: boolean;
+  has_headers: boolean;
+  header_names: string[];
+  model_ids: string[];
+  models: AIProviderModel[];
+  created_at: number;
+  updated_at: number;
+  /** Final URL the adapter will call; absent on an older server build. */
+  endpoint?: string;
+}
+
+/** GET /api/ai/catalog → models[]; a model row is global, linked to N providers. */
+export interface AIModel {
+  id: string;
+  display_name: string;
+  context_window: number;
+  max_output_tokens: number;
+  input_modalities: string[];
+  output_modalities: string[];
+  /** Stored (protocol-independent) levels: off|minimal|low|medium|high. */
+  reasoning_levels: string[];
+  /** Hand-edited fields; a refresh from models.dev never overwrites these. */
+  overridden_fields: string[];
+  /** models_dev | manual */
+  source: string;
+  enabled: boolean;
+  provider_ids: string[];
+}
+
+export interface AICatalog {
+  providers: AIProvider[];
+  models: AIModel[];
+  default_provider_id: string;
+  default_model_id: string;
+}
+
+/**
+ * Write shape for POST/PATCH /api/ai/providers. `api_key` / `extra_headers` are
+ * optional on purpose: omitting them leaves the stored secret alone, "" clears
+ * it. That distinction is what lets the form say "I did not touch the key"
+ * without ever echoing a ciphertext back.
+ */
+export interface AIProviderInput {
+  name: string;
+  protocol: string;
+  base_url: string;
+  models_dev_slug: string;
+  api_key?: string;
+  extra_headers?: string;
+  enabled?: boolean;
+}
+
+export interface AIModelInput {
+  id: string;
+  display_name: string;
+  context_window: number;
+  max_output_tokens: number;
+  input_modalities: string[];
+  output_modalities: string[];
+  reasoning_levels: string[];
+  overridden_fields: string[];
+  source: string;
+  enabled?: boolean;
+}
+
+export interface AIModelMatchResult {
+  applied: string[];
+  unmatched: string[];
+  /** "model_id:field" entries a refresh deliberately left alone (frozen). */
+  frozen: string[];
+}
+
+/** POST /api/ai/providers/{id}/import-models: match + create + link in one call. */
+export interface AIModelImportResult {
+  added: string[];
+  unmatched: string[];
+  frozen: string[];
+}
+
+export interface ModelsDevSlug {
+  slug: string;
+  name: string;
+  /** May be "" — 26 of 221 providers publish no api base (anthropic, openai, …). */
+  base_url: string;
+  /** Guessed from the npm hint; "" = beyond the three protocols, operator chooses. */
+  protocol: string;
+}
+
+export interface ModelsDevStatus {
+  loaded: boolean;
+  auto_update: boolean;
+  providers: number;
+  models: number;
+  updated_at?: number;
+  url?: string;
+  last_error?: string;
+  slugs: ModelsDevSlug[];
+}
+
+/** One entry of a provider's own GET {base}/models listing (fetch-models). */
+export interface AIFetchedModel {
+  id: string;
+  display_name: string;
+}
+
+export interface AIFetchedModels {
+  models: AIFetchedModel[];
 }

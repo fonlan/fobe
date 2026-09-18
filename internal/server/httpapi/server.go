@@ -17,6 +17,7 @@ import (
 	"github.com/fonlan/fobe/internal/server/geoip"
 	"github.com/fonlan/fobe/internal/server/geoipupdate"
 	"github.com/fonlan/fobe/internal/server/hub"
+	"github.com/fonlan/fobe/internal/server/modelsdev"
 	"github.com/fonlan/fobe/internal/server/notify"
 	"github.com/fonlan/fobe/internal/server/security"
 	"github.com/fonlan/fobe/internal/server/singboxcache"
@@ -73,6 +74,11 @@ type Server struct {
 	// AgentUpdate is the §5.5 self-update manager. Optional: dev builds and
 	// tests can run without one (no target is offered then).
 	AgentUpdate *agentupdate.Manager
+
+	// ModelsDev is the §12.5 models.dev metadata cache (typed api.json index).
+	// Optional: without it the AI page reports "not wired" and matching is
+	// unavailable, while hand-entered models keep working.
+	ModelsDev *modelsdev.Manager
 
 	// 飞书 notification surface (§15, 2026-09-16 修订). Feishu is the delivery
 	// channel (shared with the scheduler); FeishuReg owns the scan-to-add
@@ -176,7 +182,37 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/notify/test", s.requireSession(s.handleNotifyTest))
 	mux.HandleFunc("DELETE /api/settings/feishu/config", s.requireSession(s.handleFeishuClear))
 	mux.HandleFunc("POST /api/ai/chat", s.requireSession(s.handleAIChat))
-	mux.HandleFunc("POST /api/ai/actions/{id}/confirm", s.requireSession(s.handleConfirmAIAction))
+	// §12.6: a confirmation pauses the turn and the stream ENDS; this is how the
+	// operator's decision resumes it without holding one connection open across
+	// however long they take to decide.
+	mux.HandleFunc("POST /api/ai/chat/continue", s.requireSession(s.handleAIChatContinue))
+	// §12.6: the persisted transcript, so a reload can replay the turn
+	// (including its collapsed thinking) instead of showing an empty panel.
+	mux.HandleFunc("GET /api/ai/sessions/{id}", s.requireSession(s.handleGetAISession))
+	// §12.1/§12.5 (2026-09-18): multi-provider + model catalog. The provider
+	// CRUD is panel-only — §12.3 keeps AI's own configuration a meta operation
+	// the model can never reach (§12.2 has no write tool for it).
+	mux.HandleFunc("GET /api/ai/catalog", s.requireSession(s.handleGetAICatalog))
+	mux.HandleFunc("POST /api/ai/providers", s.requireSession(s.handleCreateAIProvider))
+	mux.HandleFunc("PATCH /api/ai/providers/{id}", s.requireSession(s.handleUpdateAIProvider))
+	mux.HandleFunc("DELETE /api/ai/providers/{id}", s.requireSession(s.handleDeleteAIProvider))
+	mux.HandleFunc("POST /api/ai/providers/{id}/models", s.requireSession(s.handleLinkAIProviderModels))
+	mux.HandleFunc("DELETE /api/ai/providers/{id}/models/{modelID}", s.requireSession(s.handleUnlinkAIProviderModel))
+	mux.HandleFunc("POST /api/ai/models", s.requireSession(s.handleSaveAIModel))
+	mux.HandleFunc("DELETE /api/ai/models/{id}", s.requireSession(s.handleDeleteAIModel))
+	mux.HandleFunc("PUT /api/ai/defaults", s.requireSession(s.handleSetAIDefaults))
+	// §12.5 models.dev metadata: the slug list + cache status, a manual refresh,
+	// and the match pass that fills model rows (freezing edited fields).
+	mux.HandleFunc("GET /api/ai/modelsdev", s.requireSession(s.handleGetModelsDev))
+	mux.HandleFunc("POST /api/ai/modelsdev/refresh", s.requireSession(s.handleRefreshModelsDev))
+	mux.HandleFunc("POST /api/ai/models/match", s.requireSession(s.handleMatchAIModels))
+	// "Add the models I selected": matches where it can, creates hand-entered
+	// rows where it cannot, and links — one call, so a selection is never
+	// half-applied.
+	mux.HandleFunc("POST /api/ai/providers/{id}/import-models", s.requireSession(s.handleImportAIModels))
+	// §12.5: ask the upstream which model ids it serves (GET {base}/models, with
+	// Anthropic's cursor pagination handled inside the adapter).
+	mux.HandleFunc("POST /api/ai/providers/{id}/fetch-models", s.requireSession(s.handleFetchAIModels))
 
 	// geoip MMDB upload/status/update (§14) + panel export / import (§17)
 	mux.HandleFunc("POST /api/geoip/mmdb", s.requireSession(s.handleUploadMMDB))

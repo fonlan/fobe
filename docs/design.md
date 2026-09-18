@@ -19,8 +19,8 @@
 | 5 | Web 终端 | 浏览器 → server → agent 本地 PTY（不依赖 sshd、不存凭据）（2026-09-15 修订：原 SSH + 凭据托管方案废弃） | agent 需要 PTY 权限；协议保留 `mode` 字段仅为滚动升级兼容 |
 | 6 | 平台 | x86 Linux + x86 OpenWrt（v1 硬需求） | procd/init.d、musl 静态、flash 写最小化 |
 | 7 | 到期/超量 | 只提醒，不自动停服 | 需要告警通道，且没有自动止损 |
-| 8 | AI 模型 | OpenAI 兼容 API，自填 base_url + key，服务端加密存储 | key 在服务端；服务端需能出网 |
-| 9 | AI 执行权 ⚠ | **默认放行**：AI 自评有风险才弹确认 | 见 §12，间接提示注入可静默拿到探针 root |
+| 8 | AI 模型 | **多 provider + 多模型 + 三协议**（`openai-completions` / `openai-responses` / `anthropic-messages`），元数据从 models.dev `api.json` 自动匹配且可手改（2026-09-18 修订；此前是单条 OpenAI 兼容 base_url + key） | 每个 provider 一份 key（AES-GCM）；服务端需能出网拉元数据（失败保留上次，首次离线只能手填）；同一模型可挂多个 provider ⇒ **默认模型必须是 (provider, model) 对** |
+| 9 | AI 执行权 ⚠ | **默认放行 + 自主循环**：模型可在一轮内链式执行动作直至自己收敛，自评有风险才弹确认（2026-09-18 修订；此前一轮只执行一个工具调用） | 见 §12.4/§12.6：间接提示注入不再是"一条命令"，而是"一轮无人值守的链式 root 行动"；兜底只有熔断（2026-09-18 修订：Kill Switch 已移除，见 §12.3） |
 | 10 | 构建形态 | server / agent 分开编译；前端**不嵌入 Go 二进制**但**编进生产镜像**；agent 产物进服务端镜像 | 共享 protocol 模块 + 产物分发链路；镜像构建多一个前端 stage；**挂载卷会遮蔽镜像内的 agent 产物，服务端启动时得把它补进卷**（§5.5） |
 | 11 | 数据库 | SQLite（WAL），文件挂载在容器外 | 单写者；指标靠保留期控盘 |
 | 12 | 订阅模型 | 单用户 + 多订阅，每订阅独立节点集与模板文件 | 模板管理 + 双格式引擎 |
@@ -32,7 +32,7 @@
 | 18 | 登录加固 | 失败 3 次拉黑 IP（持久化）+ CLI 解封；**不做 2FA** | 黑名单依赖 XFF 信任链；无第二因子 |
 | 19 | 告警 | Telegram Bot + 通用 Webhook + **飞书**（2026-09-16 增：应用机器人 / 群自定义机器人） | 一条告警要么进 Telegram、要么进飞书或你自己的 Webhook——通道各自独立，配一个是一个 |
 | 20 | 接入层 | **不在 fobe 内实现**：外部 nginx 提供 TLS 与反代，证书自备自管 | fobe 不碰证书；你必须让 nginx 传对 XFF 与 Upgrade 头（见 §3 与 README） |
-| 21 | agent 自更新 | **一直跟随服务端**：版本不一致就切（含降级），agent 自发、免确认；Kill Switch on 时冻结（§5.5） | 服务端版本号成为对外契约；不保留 `.prev` ⇒ **没有本地回滚**；存量探针必须人工重装一次才进入自动跟随 |
+| 21 | agent 自更新 | **一直跟随服务端**：版本不一致就切（含降级），agent 自发、免确认；`agent.auto_update` 面板可关（§5.5） | 服务端版本号成为对外契约；不保留 `.prev` ⇒ **没有本地回滚**；存量探针必须人工重装一次才进入自动跟随 |
 
 ---
 
@@ -113,7 +113,6 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
   - `fobe-server admin unblock <ip|all>` 解封
   - `fobe-server admin reset-password`
   - `fobe-server admin list-sessions --revoke`
-  - `fobe-server admin kill-switch on|off`（冻结所有 AI 执行）
 
 ### 4.2 探针凭证
 
@@ -143,6 +142,7 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 
 - 主密钥 `FOBE_MASTER_KEY`（32 字节，环境变量 / Docker secret）。用它 AES-GCM 加密：AI API Key、Telegram Bot Token、全局 anytls 密码（§10.1）、订阅模板中的敏感段。（2026-09-15：不再加密任何 SSH 凭据——Web 终端已改走 agent 本地 PTY，见 §11。）
 - 未设置主密钥时，服务端**拒绝启动**并打印生成命令（不静默降级为明文）。**（实现修订 2026-09-15：镜像入口脚本 `deploy/docker-entrypoint.sh` 在「未设置」时先行兜底，优先级 env > `FOBE_MASTER_KEY_FILE` > 生成随机 32 字节落盘到数据卷 `/data/.master_key`（0600，重启复用）。服务端的 fail-closed 语义不变——生成失败（如 `/data` 不可写）容器直接退出，绝无明文回退；admin CLI 跳过密钥解析，逃生口永不被堵。代价是密钥与密文同卷，见 §20.12；要分开就显式设置 `FOBE_MASTER_KEY`。）**
+- **密文跟着主密钥走、不跟着机器走（2026-09-18 补）**：Cryptor 是 AES-256-GCM，密钥就是 `FOBE_MASTER_KEY` 那 32 字节本身（`ParseMasterKey` 只负责把它解码成 32 字节），**没有任何与主机 / 安装 / 数据库相关的派生量**；nonce 随密文存，密文形如 `base64(nonce‖ct)`、自包含。所以把 `/data`（含 `.master_key`）整卷搬到另一台机器、或在新机器上显式设同一个 `FOBE_MASTER_KEY`，全部密文照常解开；**只有主密钥不是同一把才会解不开**。这条在 §17 导出快照携带密文凭据之后成为操作面的硬要求：**搬迁 = 搬 key**。
 - 所有审计写 `audit_logs`：谁、何时、对哪个节点、什么动作、命令原文、来源 IP。
 
 ---
@@ -211,7 +211,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 - **判据只有一个：服务端版本号**。服务端在 `hello_ack` 里下发 `agent_target_version`，agent 拿它和自己的 `internal/agent.Version` 比，不等就切换（含降级）。两端版本由构建时同一个 `$VERSION` 注入（`cmd/server` 的 `main.version` 与 `internal/agent.Version`），所以"服务端版本"就是"该配哪一版 agent"。
 - **发布门槛（fail-closed）**：仅当 ① 服务端版本是发布形态（非空、非 `dev`）且 ② `<FOBE_DL_DIR>/agent/<version>/{linux-amd64,linux-amd64.sha256}` 都在时，才下发 target。任一不满足 → 不下发，面板显示停用原因。理由：dev 构建没有"发布"概念，而"下发一个取不到的版本"只会让每台探针反复重试 404。
-- **触发 = agent 自发，不需要任何人确认**：agent 每次握手看到不一致就自己动手。这是**系统行为**，不属于 §12.3 的"元操作"清单；**Kill Switch on 时服务端不下发 target**，因此"永远跟随"在这段时间让位给止损闸。
+- **触发 = agent 自发，不需要任何人确认**：agent 每次握手看到不一致就自己动手。这是**系统行为**，不属于 §12.3 的"元操作"清单；**面板关掉 `agent.auto_update` 时服务端不下发 target**，因此"永远跟随"在那段时间让位给人。（2026-09-18 修订：此前这里还叠加了一道 Kill Switch 冻结，随该功能整体移除——跟随的开关本来就只有一个，见下一条。）
 - **错峰由服务端编排**：服务端重启会让全部探针同时重连、同时发现不一致，因此 `hello_ack` 里带 `agent_update_after`（unix 秒），服务端按 `hash(nodeID + target)` 在 0–5 分钟内给出确定性偏移（同一 node+target 稳定，target 变则重排），并把**锚点**写进 `nodes.agent_update_planned_at`（它是 `StaleAgentUpdates` 的"分发后 15 分钟"判据与跨重连稳定性的依据）。⚠️ **面板显示的「计划时刻」= 锚点 + 该节点偏移（即真正允许开始的时刻），不是锚点本身（实现修订 2026-09-16）**：锚点是服务端第一次发现不一致的那一刻，重启后**对每台探针都是同一秒**，照它显示会让正确的错峰读起来像"卡在计划中 / 集体迟到"；节点视图因此新增 `agent_update_after`（`agentupdate.PlannedStart`），前端只渲染它，`agent_update_planned_at` 留在接口里仅供诊断（与审计时间线对表）。**这不是概率问题**：不错峰就是 N 台同时拉 10MB，而那一刻服务端刚起来。
 - **执行链**（agent 侧，收到 target 且已过 `update_after`）：
   1. 下载到**目标二进制所在目录**里的临时文件（同目录才能 `rename`，跨文件系统会 `EXDEV`）；目标路径由 `os.Executable()` 解析（跟随符号链接）——不猜 `BIN_DIR`，systemd 装的是 `/usr/local/bin`、OpenWrt 是 `/usr/bin`；
@@ -230,7 +230,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 - **存量探针只能人工重装一次**：今天已装的 agent 二进制里没有这段代码，服务端下发 target 它也不认识（Go 忽略未知 JSON 字段，它会照常跑）。判定靠**能力位而非版本号猜测**：新 agent 在 `hello.Caps` 里报 `self_update=true`，不报的一律在面板标"需人工重装（不支持自更新）"并给出重装命令。**不许假装它会自动跟上。**
 - **产物供给**：镜像里**不能**把 agent 产物放在 DL 目录——compose 把 `./data` 挂到 `/data`，`FOBE_DL_DIR=/data/dl` 在卷内，挂载在容器启动时就已生效，镜像里 COPY 进卷的东西**根本不可见**（不是"被覆盖"，是读不到）。因此镜像把产物放在卷外的 `/srv/agent-seed/agent/<version>/`，服务端启动时**复制进 DL 卷**（缺什么补什么，已有则不覆盖；`FOBE_AGENT_SEED_DIR` 可改，置空即关闭；与 §9.5 的 sing-box 缓存互不影响）。同一个启动步骤还会把卷里的 `agent/latest` 指向**服务端自己这一版**——否则升级容器后 `/install.sh` 会继续装上一版的 agent（`latest` 是本地脚手架留下的真实目录时不动它）。不这么做，"跟随服务端"在标准 compose 部署里默认就是 404。
 - **混版承诺**：同一大版本内双向兼容（新增字段一律可选、未知字段/帧忽略并记日志）。升级/降级过渡期必然是混版，"版本不匹配就拒绝"会把探针直接锁死。`protocol.Version` 保持 `1`。
-- **开关**：`settings.agent.auto_update`（默认开，面板可关）。关掉或 Kill Switch on = 不下发 target。AI 侧**不新增任何工具**（§12.2）：状态随既有节点查询返回，触发/冻结/解锁/重试都只能由人在面板操作。
+- **开关**：`settings.agent.auto_update`（默认开，面板可关）。关掉 = 不下发 target。（2026-09-18 修订：原设计还有第二条"Kill Switch on 也不下发"，该功能已移除；这一条因此成了**唯一**的跟随开关，语义更单一。）AI 侧**不新增任何工具**（§12.2）：状态随既有节点查询返回，触发/冻结/解锁/重试都只能由人在面板操作。
 - **面板与接口**（全部走会话鉴权，`GET /api/agent/update` 集群状态、`POST /api/nodes/{id}/agent/retry` 人工解锁、`POST /api/nodes/{id}/agent/reinstall-command` 生成一次重装命令）。节点视图新增 `agent_target_version / agent_update_state / agent_update_attempts / agent_update_error / agent_update_planned_at / agent_update_done_at` 与能力位 `agent_self_update`（外加 `agent_caps_seen`：没握过手的节点不算"不支持"，否则新建节点会被误标重装）；`agent_update_state` 取 `planned|downloading|verifying|committed|failed|transient|suppressed|unsupported`。
 - **"重试"要能推动在线的探针**：`hello_ack` 之外的载体是普通 `desired` 帧（`DesiredState` 里带上同样两个字段），因此解锁不必等下一次握手；服务端由同一个函数同时填两个载体，不可能填出不一致的两份。
 - **两个必须失败关闭的点**（都在实现里显式处理）：① 临时文件必须落在**目标二进制同目录**再 `rename`（跨文件系统 `EXDEV`；`open+truncate` 覆盖正在运行的文件会 `ETXTBSY`）；② 同目录可用空间 < 2×产物即判 `transient` 拒绝，宁可不动也不能写半个二进制。
@@ -252,7 +252,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `users` | id, password_hash | 单行 |
 | `sessions` | id, created_at, last_seen, ua, ip, revoked | 可批量吊销 |
 | `ip_blacklist` | ip, reason, fail_count, created_at, expires_at | 持久化 |
-| `settings` | key, value, encrypted | 全局 anytls 密码（服务端自动生成，§10.1）、AI 配置、Telegram、保留期、延迟测量频率（`latency.interval_seconds`，默认 5）等 |
+| `settings` | key, value, encrypted | 全局 anytls 密码（服务端自动生成，§10.1）、**AI 执行策略与默认模型**（`ai.default_policy` / `ai.default_provider_id` / `ai.default_model_id`，§12.1；思考预算为内置常量、不在此表；原 `ai.base_url` / `ai.model` / `ai.api_key` 三键 2026-09-18 起摘除、存量密文留库不读）、Telegram、保留期、延迟测量频率（`latency.interval_seconds`，默认 5）等 |
 | `reg_tokens` | token_hash, note, expires_at, used_at | 单次 |
 | `nodes` | id, name, machine_id, node_secret_hash, status, last_seen, agent_version, os, arch, kernel, distro_id, distro_version, cpu_cores, primary_ip, country_code, sub_name, tz；**自更新（§5.5）**：agent_target_version, agent_update_state, agent_update_attempts, agent_update_error, agent_update_planned_at, agent_update_done_at | 探针主表；`tz` 与发行版（os-release 自动探测，§16）由 agent 上报，只读；`sub_name` 是 §10.2 的订阅展示名 |
 | `node_ips` | node_id, ip, family, scope, is_primary, manual_primary | 多 IP 全量上报 |
@@ -271,8 +271,12 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `templates` | id, name, format(singbox/clash), content | 完整配置模板 |
 | `node_singbox` | node_id, version, desired_version, desired_uninstall, config_hash, status, last_error, cert_pem, cert_sha256, port | sing-box 期望/实际状态；`desired_uninstall` 是面板的卸载意图（§9.2 实现修订 2026-09-16），探针回报 `absent` 后清零 |
 | `commands` | id, node_id, kind, payload, status, created_at, sent_at, finished_at, result | 指令队列 |
-| `audit_logs` | ts, actor, node_id, action, command, risk, source_ip, ai_session_id | |
+| `audit_logs` | ts, actor, node_id, action, command, risk, source_ip, ai_session_id | AI 发起的动作经 `ai_session_id` 关联到 provider/model/协议（§12.6） |
 | `alerts` | id, kind, node_id, payload, created_at, delivered_at | |
+| `ai_providers` | id, name, protocol(`openai-completions`/`openai-responses`/`anthropic-messages`), base_url, api_key(密文), extra_headers(密文), models_dev_slug, enabled | **2026-09-18 新增**（§12.5）：`base_url` 是 **root 语义**，端点路径由协议拼；`api_key` 与 `extra_headers` 走 §4.4 的 Cryptor |
+| `ai_models` | id(PK), display_name, context_window, max_output_tokens, input_modalities, output_modalities, reasoning_levels, **reasoning_off_style**, overridden_fields, source, enabled | **2026-09-18 新增**（§12.5）：**模型行全局唯一**；元数据来自 models.dev `api.json` 或手填；`overridden_fields` 记哪些字段被手改过（首次匹配即冻结，刷新不再覆盖） |
+| `ai_provider_models` | provider_id, model_id | **2026-09-18 新增**（§12.5）：多对多关联——同一模型可挂多个 provider |
+| `ai_sessions` / `ai_messages` / `ai_pending_actions` | **2026-09-18 加列**：`ai_sessions` 加 provider_id / model_id / protocol；`ai_messages` 加协议原生不透明块；`ai_pending_actions` 加 call_id | §12.6：自主循环的一轮里有多条 assistant(tool_call) / tool(result)；推理块必须原样回传，所以不能只存文本（这也是"换模型即开新会话"的原因） |
 
 索引要点：`metrics_samples(node_id, ts)`、`latency_samples(node_id, target_id, ts)`、`traffic_daily(node_id, date)`。
 
@@ -584,7 +588,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 #### 9.5.5 边界与取舍
 
-- **不暴露给 AI 助手**：本节新增的接口不在 §12.2 工具集内。批量更新影响面覆盖所有节点，不适合落进"默认放行"的模型执行路径；单节点更新仍可用既有的 `update_singbox` 工具。
+- **不暴露给 AI 助手**：本节新增的接口不在 §12.2 工具集内。批量更新影响面覆盖所有节点，不适合落进"默认放行"的模型执行路径。**2026-09-18 更正**：原文写的"单节点更新仍可用既有的 `update_singbox` 工具"是错的——**那个工具从未存在过**（详见 §12.2 的"空头支票"更正），而本轮连 `install_singbox` 也一并删除 ⇒ AI 侧**没有任何受管的 sing-box 更新路径**，它只能在 `run_shell` 里手搓（绕过 §9.2 的三道闸门与回滚，见 §12.7.6）。所以本节接口真正保护的是"面板以外的入口"，**别以为删掉工具就等于禁掉了这条能力**。
 - **保持 panel-only**：agent 侧**不补官方回退**——§9.2 里"失败回退官方地址"这句对 agent 依然不成立，产物只从面板拉。理由：让"探针从哪里拿二进制"只有一个答案，出问题时可复现；服务端缓存本身已经承担了规避 GitHub 不可达的职责（镜像源/手动投放）。
 - **本机手动投放**：把产物按上面 9.5.1 的布局放进 `<FOBE_DL_DIR>/singbox/<version>/` 即可，无需联网——这也是完全离线环境的兜底用法。
 
@@ -685,36 +689,46 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - 代价绑定：探针必须能起 PTY（容器内挂载 devpts）；无法再"借道"探针上已有的 sshd 配置。
 - 兼容：`TerminalOpen.Mode` 字段保留在 v1 wire 上（server 恒写 `pty`）；旧浏览器发来的 `ssh` 由 server 规范化为 `pty`，旧 agent 收到 `ssh` 也只起本地 PTY。旧 `node_ssh` 凭据表在服务端启动迁移时删除。
 - 会话初始化时记审计：操作者、节点、来源 IP、会话 ID、开始/结束时间。浏览器帧限 1 MiB，会话 ID 由 server 生成并覆写，浏览器不能伪造。
-- 终端与 AI 执行共用 agent 指令通道 → 审计口径统一。
+- 终端与 AI 执行共用 agent 指令通道 → 审计口径统一。**2026-09-18 语义变更**：不再是"共用通道"，而是**共用同一个 PTY**——AI 的 `run_shell` / `send_keys` 直接往操作员眼前这个 shell 里敲键（§12.7），因此操作员与助手**共享 cwd、环境变量、命令历史与前台进程**，AI 敲的命令会进操作员的 `history`。这是"复用可见终端"这一选择的固有代价（用户 2026-09-18 确认）。
 - 终端页三个盒子（2026-09-15 修订）：卡片头一行（左标题「Agent Web 终端」，右会话 ID +「重连」+ 连接状态点）→ `.terminal-shell`（深色屏幕框，8px padding 让文字不贴边）→ `.terminal-host`（FitAddon 的量测盒）。卡片自身用默认面板底色，屏幕是页面上唯一的深色面；页面不再另起标题。
 - **padding 不能放在 `.terminal-host` 上**：xterm 的 `.xterm` 是绝对定位盒，绝对定位子元素相对宿主 **padding box** 定位，`inset: 0` 会把字形区直接铺满 padding、把留白盖掉（这就是"padding 设了却依然贴边"的成因）。所以外框（padding/border/深色底）与量测宿主必须是两个元素。
 - `.terminal-host` 高度**必须由卡片所在的网格行决定、不能被 xterm 内容撑高**：宿主 `flex: 1 1 auto`（不写内容高度）、内部 `.xterm` 绝对定位填满，否则每次 fit 都会把外框的 padding+border 折成行数加回去，现象是终端每帧长高一行；fit 只由 rAF 防抖的 `ResizeObserver` 触发（`onResize` 里调 fit 会同步递归），宿主不可见（宽高 ≤0）时跳过 fit，避免把活着的 PTY 缩成 2×1。
 - v1 不做 PTY 全量录制（体积与隐私成本高），但保留 `session_id`，便于后续开启录制。
+- **`scrollback` 必须显式配大（2026-09-18，当前 10000 行）**：AI 的 `read_terminal` 与 `run_shell` 的观察结果都取自浏览器这块缓冲区（§12.7.1）——服务端不留任何终端状态，所以**缓冲区就是屏幕的唯一真相**。默认 1000 行会让长输出的前半截直接掉出可读范围。代价是浏览器内存（每行一份），10k 行量级可接受。
+- **agent 侧只有一个 active PTY**：收到新的 `terminal_open` 会先把旧的 `closeCurrent("replaced by new terminal")`。⇒ 开第二个终端标签会杀掉第一个的 shell（AI 的键也会因 `m.session(id)` 不匹配而被**静默丢弃**），§12.7.5 依赖这一点。
 
 ---
 
 ## 12. AI 助手
 
-### 12.1 形态
+### 12.1 形态（2026-09-18 重写：单 provider → 多 provider + 多模型 + 三协议）
 
-- 服务端代理到 OpenAI 兼容 API：`base_url`、`api_key`（AES-GCM 加密存 `settings`）、`model` 均由面板配置；支持流式输出。
-- 三键缺一即视为**未配置**（2026-09-15 修订）：判定收敛为服务端唯一函数，`GET /api/settings` 额外返回派生字段 `ai_configured`（不是 setting，不受 `allowedKeys` 影响），终端页只在它为 `true` 时渲染 AI 侧栏——否则侧栏每次提交都只会拿到 503 `ai_not_configured`，不如不显示，终端独占整宽。
+- **多 provider**：每个 provider = {名称、协议（`openai-completions` / `openai-responses` / `anthropic-messages`）、`base_url`（**统一 root 语义**，端点路径由协议拼，表单实时显示最终 URL）、`api_key`（AES-GCM，走 §4.4 的 Cryptor）、可选的 `extra_headers`（值同样加密、绝不入日志）、可选的 models.dev slug、启用开关}。
+- **多模型**：模型行**全局唯一**（`UNIQUE(id)`），经关联表挂到任意多个 provider；显示名、最大上下文、最大输出、输入/输出模态、思考档位**全局一份**。有意接受的代价：同一模型经不同网关被裁剪的上下文不同时，你只能填一个值。
+- **默认模型是 `(provider, model)` 对**（不是单个模型 id）：同一模型可挂多个 provider，只存 id 无法定位走哪个网关。存 `settings`（`ai.default_provider_id` / `ai.default_model_id`）；发送框按 provider 分组下拉选择，另有"每节点会话临时覆盖"（不跨刷新保存）。
+- **换模型即开新会话**：推理块与协议绑定（§12.5），跨协议复用历史在 Anthropic 侧会直接 400。
+- **侧栏闸门**：`ai_configured` 字段名沿用不变，语义改为 **≥1 个启用 provider 有 key 且 ≥1 个启用模型**（仍是 `GET /api/settings` 的派生字段、不受 `allowedKeys` 影响，终端页那行判定不用动）。
+- **旧三键不迁移（2026-09-18）**：`ai.base_url` / `ai.model` / `ai.api_key` 从 `allowedKeys`、`sensitiveKeys`、设置页与 i18n 一并摘除，存量密文留库不读。代价：升级后侧栏消失、必须重配一次——刻意如此，避免"没迁移"与"迁移错了"两种状态互相伪装。
 - 上下文注入（默认）：节点列表、当前指标、流量与配额、延迟、sing-box 版本与状态、最近告警。
-- **默认不注入原始日志**：需要时由你在对话里显式打开"附带日志（最近 N 行）"开关。这既减少 token，也显著缩小注入面——**但不改变你选的默认放行语义**。
+- **默认不注入原始日志**：需要时由你在对话里显式打开"附带日志（最近 N 行）"开关。这既减少 token，也显著缩小注入面——**但不改变你选的默认放行语义**。（**2026-09-18：该开关已随 `tail_logs` 一并删除**，见 §12.7.6——AI 要看日志就在终端里 `journalctl` / `logread`，那条路同时把注入面**放大**了：日志文本经由 §12.4 的终端双向通道回到模型。）
 
-### 12.2 工具集
+### 12.2 工具集（2026-09-18 重写：sing-box 工具与 `tail_logs` 全部移除，改为「终端工具链」）
 
 | 工具 | 类型 | 说明 |
 |---|---|---|
-| `list_nodes` / `get_metrics` / `get_traffic` / `get_latency` | 只读 | 结构化查询 |
-| `get_singbox_status` / `tail_logs` | 只读 | 需显式开关日志 |
-| `restart_singbox` / `stop_singbox` / `start_singbox` | 变更 | 走同一闸门 |
-| `install_singbox` / `update_singbox` | 变更 | 指定版本 |
-| `run_shell` | 变更 | 裸 shell |
+| `run_shell` | 变更 | 往操作员那个 PTY 里**真的敲**一条命令：清理当前行 → 注入哨兵 → 回车 → 等结束 → 返回 scrollback 增量 + exit 状态 |
+| `send_keys` | 变更 | 往同一个 PTY 发送任意按键/转义序列（Ctrl+C、`q`、方向键、翻页序列…） |
+| `read_terminal` | 只读 | 读浏览器 xterm 缓冲区的窗口（默认底部视口，可用 `offset` 往上翻）。**豁免重复检测**，但有连续调用上限（§12.7） |
 
-**不在工具集里**：§9.5 的服务端产物缓存与**一键批量更新**接口（`/api/singbox/cache*`、`/api/singbox/update*`、`DELETE /api/singbox/versions/{version}`）。它们影响面覆盖全部节点、且会写服务端缓存，不适合落进"默认放行"的执行路径；单节点更新仍走上面的 `update_singbox`（需显式版本）。
+**本表曾经是空头支票（2026-09-18 更正）**：重写前的表列了 12 个工具，而其中 `list_nodes` / `get_metrics` / `get_traffic` / `get_latency` / `get_singbox_status` / `update_singbox` **从来没有进过 `aiToolsSpec()`**——只读数据一直是靠 §12.1 的上下文注入给的。名字只残留在 `aiToolIsChange` 的只读白名单与 `aiChangeTools`（后者的 `update_singbox` 更是从未存在的工具）。凡"表里有、代码里没有"的条目一律以代码为准，别再照表实现。
+
+**已删除（2026-09-18）**：`restart_singbox` / `stop_singbox` / `start_singbox` / `install_singbox` / `tail_logs`。理由、代价与替代路径逐条记在 §12.7 末尾；其中 `install_singbox` 是工具集里**唯一的元操作（无条件强制确认）**，它一走，§12.3 第 4 条在 AI 侧再无落点——按 §12.3 第 2 条的体例留了墓志铭。
+
+**不在工具集里**：§9.5 的服务端产物缓存与**一键批量更新**接口（`/api/singbox/cache*`、`/api/singbox/update*`、`DELETE /api/singbox/versions/{version}`）。它们影响面覆盖全部节点、且会写服务端缓存，不适合落进"默认放行"的执行路径。**注意这层保护如今是残的**：单节点 sing-box 变更已无 `update_singbox` 可走，而 AI 仍可在 `run_shell` 里手搓——见 §12.7 的代价清单。
 
 **agent 自更新（§5.5）不新增任何工具**（连只读的也不加）：期望版本、计划时刻、尝试次数与失败原因随既有节点查询一并返回，AI 看得到但做不了——不能触发、冻结、解锁或改 target。系统自动跟随是服务端版本变更触发的行为，不在模型的可达范围内。
+
+**工具集在自主循环那一轮不变（2026-09-18）**：自主循环（§12.6）只改"什么时候问、跑几轮"，不新增任何工具。**但同日晚些时候工具集被整体换掉了**（→ 三个终端工具，见本节开头与 §12.7）：那次改动是**能力模型的替换**（命令执行器 → 终端操作者），不是"新增几个工具"。
 
 ### 12.3 执行策略（⚠ 你签下的风险）
 
@@ -726,18 +740,169 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 我按你的决定实现，同时**无条件**加上这几条补偿控制（它们不改变默认体验，成本极低）：
 
-1. **全量审计**：每条命令的原文、模型给出的理由、风险标记、结果全部落 `audit_logs`；
-2. **全局 Kill Switch**：面板一键冻结所有 AI 执行（CLI 也能开），冻结后 AI 退化为只读；
-3. **速率与影响面熔断**：单节点每分钟命令数上限、连续失败自动暂停该节点的 AI 执行；
+1. **全量审计**：每条命令的原文、模型给出的理由、风险标记、结果全部落 `audit_logs`；**2026-09-18 补注（归属能力只剩这一处）**：换成终端工具后，操作员自己的按键**不进审计**，而 AI 敲进去的字节会与操作员的输入交错在同一个 PTY 上 ⇒ 终端里发生过什么，**无法再从终端本身区分"谁干的"**。`audit_logs` 里那条"AI 在 T 时刻发送了这些字节"是**唯一的归属证据**，所以它必须记完整原文，**不能退化成"N 字节"**；
+2. ~~**全局 Kill Switch**~~ **已于 2026-09-18 整体移除**（第 2 条这个位置保留为墓志铭，第 3–5 条沿用原编号以便与历史实现修订对照）。理由：这个助手的**唯一有用能力就是在探针上跑命令**（它就是"操作远程终端"），把它冻成只读等于让它什么都做不了——一个看不出任何效果的开关，只会让人以为它在保护什么。移除范围：`ai.kill_switch` 设置键、`aiKillSwitch()` 与三处判断（`run_shell` / sing-box 生命周期 / 确认续跑）、前端开关与文案、`agentupdate.Config.KillSwitch` 钩子与 `ReasonOffKillSwitch`、`admin kill-switch on|off` 子命令。
+   **代价（写清楚，别让它悄悄消失）**：不再有"一键停掉正在飞的链式执行"的杠杆。剩下的约束是**每轮变更预算**、**单节点每分钟上限**、**连续失败暂停**、**重复检测**，以及 `ai.default_policy=confirm`（每个变更类动作都问）——它们都是**有界的**闸，而不是一个随时可按的总闸。要临时止损，现在只能靠面板「停止」终止当前这一轮 + 把 policy 收紧为 `confirm`。
+   **顺带澄清一处曾经重叠的语义**：Kill Switch 当年还兼任"冻结探针跟随服务端"，而跟随本来就有自己的开关 `agent.auto_update`（§5.5）。所以移除它没有丢掉任何**独立**能力——那件事现在只由 `agent.auto_update` 表达。
+3. **速率与影响面熔断**（**2026-09-18 更正**：这一条**早已实现并接线**——`store.CheckAICommandGate`，在 `enqueueAICommand` / `runAITailLogs` / `confirmAIAction` 三处调用，实现「单节点每分钟 `aiCommandLimit`(=10) 条 + 连续失败 3 次暂停该节点 5 分钟」；此前 §12 的这句"没有限流器"的判断是错的，错因是搜符号时用了小写 `limit` 而常量是 `aiCommandLimit`。它**没有任何测试覆盖**，本轮补测）：本轮真正新增的是**每轮变更类命令预算**这个轴——`aiCommandLimit` 是与它同名不同义的既有分钟闸，实现时别把两个数混成一个常量；阈值与自主循环的关系见 §12.6；
+   **（实现修订 2026-09-18，补测时发现的真 bug）**：失败计数原本没有时间窗，而暂停由**每次调用**从历史重新推导 ⇒ 一旦某节点连续失败 3 次，`paused_until` 被反复续期，**该节点的 AI 执行永久冻结且无法自愈**（能解开它的成功命令永远不可能发生，因为闸门挡住的正是执行本身）。自主循环会把这个洞放大：一次坏回合就能永久停用一台探针的 AI。现在失败只在**最近 600 秒**内计入（窗口刻意长于 5 分钟暂停，保证「失败簇照样暂停」而状态**必然终止**），`aigate_test.go` 五条用例把它钉住；同一处把分钟闸从 10 放宽到 **30**（§12.6）；
+   **2026-09-18 再补注（这条轴的燃料被抽走了）**：失败暂停吃的是命令的 exit code。改成终端工具后 exit code 只能从哨兵里解析（§12.7），而**哨兵没观测到就报"未知"，未知不算失败**（用户 2026-09-18 拍板）⇒ `vim`/`top` 这类拿不到哨兵的正常操作不会攒出暂停，这条轴实际只在"命令跑完且拿到了哨兵"时生效。这个弱化是**有意**的：反过来接线会让正常 TUI 操作把整台探针的 AI 暂停 5 分钟。**别为了"让闸门看起来更严"把未知改成失败**；
 4. **元操作强制确认**：涉及面板密码、主密钥、AI 自身配置、**由 AI 发起的** agent 自更新的动作，无论模型怎么判定都强制确认（防"AI 给自己扩权"）。注意区分：§5.5 的**系统自动跟随**不在这一列——那是服务端版本变更触发的系统行为，没有人在点它；实际实现里 AI 侧连写工具都没有，只有只读查询（§12.2）。
-5. `run_shell` 的 stdout/stderr 截断入审计，防止把凭据回灌进上下文。
+   **2026-09-18 墓志铭（体例同第 2 条）**：`install_singbox` 被删之后，AI 工具集里**再没有任何元操作**——`run_shell` / `send_keys` / `read_terminal` 都不属于"面板密码 / 主密钥 / AI 自身配置 / agent 自更新"这四类，**强制确认在 AI 侧已无落点**。规则本身不废止（HTTP 接口那一侧的动作仍受它管），但"AI 想给自己扩权时一定会被拦"这层保护现在**只剩提示词与审计**：AI 完全可以在 `run_shell` 里改自己的 provider/key、写主密钥、动 agent 自更新（面板密码与 AI 配置都是它自己就能读到的库内数据）。要恢复这层保护，得重新引入一个 `install_singbox` 那种"服务端写 + 强制确认"的通道，或者给 `run_shell` 加命令策略——**当前设计里没有任何命令策略机制**，这是这笔删除最贵的一处代价。
+5. `run_shell` / `send_keys` 的输入原文与 `read_terminal` 的读取窗口截断入审计，防止把凭据回灌进上下文。**2026-09-18 修订**：原条目写的"stdout/stderr"在 PTY 下**不成立**——fd1 与 fd2 被内核合并成同一条流，stderr 无法分离（§12.7）；审计现在记的是"**敲进去的字节**"，而观察结果那侧是 scrollback 增量的截断片段。
+
+**默认放行 × 自主循环（2026-09-18）**：上面这套"直接执行"的语义不变，但它现在作用于一个**自己决定跑几轮**的循环——风险量级见 §12.4，机制与闸门见 §12.6。
 
 ### 12.4 已知未缓解风险（写在这里以便你日后反悔）
 
-> **间接提示注入 → 静默执行 → 探针 root。**
-> 攻击者只要能连上任意一个代理节点，就能影响探针上的日志/进程名/连接来源等文本；这些文本一旦进入模型上下文，模型可能被诱导调用 `run_shell`。由于默认放行，该命令会被静默执行，且以 root 身份。攻击者在拿下第一台探针后，可以横向影响你在面板里配置的其他节点。
+> **间接提示注入 → 静默执行 → 探针 root（2026-09-18：量级升级）。**
+> 攻击者只要能连上任意一个代理节点，就能影响探针上的日志/进程名/连接来源等文本；这些文本一旦进入模型上下文，模型可能被诱导调用 `run_shell`。由于默认放行，该命令会被静默执行，且以 root 身份；而自主循环（§12.6）让它**不再是一条命令**——模型可以在一轮里链式地"看 → 改 → 重启 → 再验证"，最长跑到单轮 10 分钟上限，中途不需要你点头。攻击者在拿下第一台探针后，可以横向影响你在面板里配置的其他节点。
 >
-> 缓解到"白名单外默认确认"只需改一个配置项（`ai.default_policy: allow|confirm`），数据模型与工具集都不用动。建议你至少在暴露面扩大（加节点、给别人用订阅）之前重新评估一次。
+> 兜底只有两道：熔断（§12.6 的每轮预算 / 每分钟上限）、以及你自己盯屏——**没有第三道**（Kill Switch 已于 2026-09-18 移除，见 §12.3）。原列在熔断里的"连续失败暂停"在终端工具下基本失效（exit code 多数时候拿不到，未知不算失败，见 §12.3 第 3 条），别把它算进兜底。
+>
+> **量级再升级（2026-09-18，终端工具链上线后）**：攻击面从"能影响模型上下文"变成"**能直接影响模型正在操作的 root shell**"。终端屏幕此刻同时是模型的**输入**和它的**操作对象**——任何能往这个 PTY 写字的东西（日志行、程序名、`echo` 出来的伪造提示符、伪造的哨兵行）都会**直接进入模型的下一步决策**，而下一步动作就是在这同一个 shell 里敲键。具体新增的伪造面：① **伪造哨兵**：模型靠屏幕上的 `__FOBE_<nonce>_<code>__` 判断命令是否成功，能写终端的人可以打印一条同格式的假哨兵（nonce 就写在屏幕上），让失败的变更看起来成功；② **伪造提示符/状态**：让模型相信命令已结束、或让它在错误的 cwd/用户下继续操作；③ **诱导清理键**：`run_shell` 每次都会先发 `Ctrl+U` `Ctrl+C`（§12.7），被诱导时这几个字节本身就打在操作员的前台进程上。
+> 缓解手段**只有**：`ai.default_policy=confirm`（每个变更类动作先问一次）、以及盯屏确认屏幕上到底发生了什么。**没有自动检测**伪造哨兵的机制。
+
+> 缓解到"白名单外默认确认"只需改一个配置项（`ai.default_policy: allow|confirm`），数据模型与工具集都不用动。建议你至少在暴露面扩大（加节点、给别人用订阅）之前重新评估一次——**2026-09-18 之后这句话更重要了**：工具集虽然从 6 个减到 3 个，但单个工具的能力边界从"一条有超时、有 exit code、有输出归集的命令"扩张到"在你自己的交互式 root shell 里持续敲键"，`confirm` 现在是唯一粒度可用的闸。
+
+### 12.5 多 provider、协议适配与模型元数据（2026-09-18 新增）
+
+**三协议的差异不止端点**（实现时按这张表分叉，别指望只改 URL）：
+
+| 维度 | openai-completions | openai-responses | anthropic-messages |
+|---|---|---|---|
+| 端点（root base_url 拼） | `/chat/completions` | `/responses` | `/messages` |
+| 鉴权 | `Authorization: Bearer` | 同左 | `x-api-key` + `anthropic-version` |
+| 系统提示 | `messages[0].role=system` | 顶层 `instructions` | 顶层 `system` |
+| 输出上限 | `max_tokens`（可选） | `max_output_tokens` | `max_tokens`（**必填**，取该模型的「最大输出」） |
+| 开启思考 | `reasoning_effort` | `reasoning.effort`（+summary） | `thinking{type:"enabled",budget_tokens}` |
+| 关闭思考 | 省略字段或 `none` | 同左 | **只能省略字段**（传 `disabled` 会 400） |
+| 工具定义 | `tools[].function` | `tools[]`（扁平） | `tools[].input_schema` |
+| 工具结果 | `role=tool` 消息 | `function_call_output` 项 | `tool_result` 块，**必须紧跟**对应的 `tool_use` |
+| 推理块回传 | 无此概念 | reasoning item（`encrypted_content`） | `thinking` 块 + `signature` |
+| 流式形态 | `choices[].delta` | 命名事件 `response.*` | `content_block_delta` 等 |
+
+- **推理块必须原样回传**：Anthropic 的手动 extended thinking 在工具循环里要求把 `thinking`（含签名）连同 `tool_use`/`tool_result` 一起送回，丢了直接 400；Responses 在无状态模式下也要回传 reasoning item。所以 `ai_messages` 存的是**协议原生不透明块**（不是纯文本），行上带 provider/协议——这也是 §12.1「换模型即开新会话」的原因。
+- **上下文裁剪按整轮**：落库保留全量，发给上游时**从最早的整轮开始丢**，绝不把一轮拆开（`tool_use`/`tool_result` 必须成对、thinking 与同轮绑定）。阈值取该模型的「最大上下文」（models.dev 匹配、可手改），留出最大输出的余量。
+- **元数据源是 `api.json`，不是 `models.json`（2026-09-18 实测）**：`models.dev/models.json` 的 406 个模型**没有一个**带 `reasoning_options`（只有布尔 `reasoning`），拿不到「支持的思考级别」；`api.json`（4.7 MB / 221 providers / 7843 models）才有 `reasoning_options`（`effort` / `toggle` / `budget_tokens`）、`limit.context`、`limit.output`、`modalities`、`npm`（协议提示）与 `cost`。
+- **缓存与刷新**（照 §14.1 GeoIP 的先例）：启动补缺 + 每天一轮；落 `/data` 卷文件（**不进 SQLite**——单写者，别塞 4.7 MB blob）；`FOBE_MODELS_URL` 换镜像、`FOBE_MODELS_AUTO_UPDATE=0` 关闭；拉取失败保留上次，首次离线则元数据为空、全部手填。**解析必须用类型化结构**：同一份文档用通用 `map[string]any` 解析要 ~22–27 MB 常驻，类型化后只有 ~3 MB（实测）。
+- **匹配规则**：provider 上显式选的 models.dev slug × 模型 id **精确匹配**（`<slug>/<id>`）。不做全局模糊匹配——同一个 id 会在几十个网关里重复出现，猜出来的元数据比没有更糟。
+- **首次匹配即冻结、逐字段标记**：自动写入的字段记进 `overridden_fields`；刷新只补**从未填过**的字段，手改过的永不被覆盖。未命中的模型全部手填。
+- **slug 预填协议与 base_url**：`@ai-sdk/anthropic` → `anthropic-messages`、`@ai-sdk/openai` → `openai-responses`、`@ai-sdk/openai-compatible` → `openai-completions`（可手改）；超出这三种的（azure / google / vertex / groq 等）**只预填 base_url，协议强制手选**——能不能用取决于该上游是否恰好兼容三者之一（Vertex/Google 就不兼容），表单不许替你猜。
+- **模型列表自动获取**：调 provider 的 `GET {base}/models`（Anthropic 同名端点、需 `x-api-key` + `anthropic-version`，且响应是 `has_more` / `last_id` 分页，要跟页）。结果进一个可搜索列表，并标注每条与 models.dev 的匹配状态（命中 / 未命中 / 多候选），勾选后批量添加。部分网关没有该端点（404 或返回 HTML）——此时降级为手填模型 id，不是错误。
+- **思考档位**：统一为 `off / minimal / low / medium / high`，按协议翻译；**档位集合 = 协议能力 ∩ 该模型 `reasoning_options`**：
+  - `effort` → 直传档位名；
+  - `toggle` → 只有开 / 关两档；
+  - `budget_tokens` → 固定映射 `low 2k / medium 8k / high 16k`，**内置写死、面板不暴露**（2026-09-18 修订：原设计是设置项 `ai.reasoning_budget`，操作员判断"经验值就够、不想为此多一个界面"，于是改为常量；这样做还有一个附带好处——越界的值再也无法进入系统，Anthropic「budget 必须 < max_tokens」那条约束只剩适配层的就地钳制在管）；
+  - `off` **只在该模型真能关闭时露出**：Anthropic 是 opt-in（省略字段即关）⇒ 恒可关；OpenAI 侧只有 toggle 型或非推理模型可关，其余最低档必须在 UI 里**诚实标注为「最低档」**，不许谎称已关闭。
+- **思考文本**：流式拼装出的 thinking / reasoning summary 在侧栏以**折叠面板**实时显示（默认收起）并落库，刷新后可回放（`GET /api/ai/sessions/{id}` 回放，`thinking` 由服务端从原生块里提取，面板不解析协议）；它同时就是工具循环要回传的那份块。
+
+> **实现修订 2026-09-18（实测把三处规格补成了硬要求）**：
+> 1. **`reasoning_off_style` 是独立一列，不能从档位列表推导**。`models.dev` 的 `reasoning_options[].type` 之外还有 `values`：实测 3415 个 effort 型模型里**1273 个的 values 含 `"none"`** —— 这些模型**省略推理字段并不会真的关闭**（网关默认开思考），必须显式发 `reasoning_effort:"none"`；而 toggle 型模型要走各自的关闭形态、Anthropic 传关闭形态直接 400。三种写法都合法、都叫"关"，所以"关"必须由模型行记住（`omit`/`none`/`disabled`），不能靠上层猜。相应地 `minimal` 是**真实可达**的档位（232 个模型），store 校验与面板下拉都必须接受它；`values` 为空的模型按 `low/medium/high` 保守给档（不猜宽）。
+> 2. **940 个模型 `reasoning=true` 但没有任何 `reasoning_options`** ⇒ 档位集合为空。面板必须显式显示「该模型未提供可调档位」，渲染一个空下拉会被当成表单坏了。
+> 3. **`api` 字段大面积缺失**：221 个 provider 里 26 个没有 `api`（含 anthropic / openai / google / azure / xai / groq），`npm` 则 221/221 都有。所以 slug 只用于**预填**，`base_url` 为空是常态、协议提示为空时要**强制手选**（azure/google/vertex 超出三协议，表单不许替用户猜）。Anthropic 的模型列表分页游标是 `after_id`（不是 `after`），`limit=1000` 且必须处理 `has_more` 但游标不前进的退化情形。
+> 4. **缓存常驻内存 3.1 MiB**（类型化流式解析、221 providers / 7843 models、~50 ms；通用 `map[string]any` 解析同一份文档要 22–27 MB）。
+
+### 12.6 自主循环、流式与熔断（2026-09-18 新增）
+
+- **循环语义（本轮新增能力，不是改造既有循环）**：一次用户消息 = 服务端自主多轮——模型请求工具 → 执行 → 结果喂回 → 继续生成，直到模型不再请求工具或撞上闸门。此前是单轮：一个用户消息只执行一个工具调用，结果要等下一条用户消息才被模型看到（`appendAIToolResults`）。
+- **并行工具调用**：一步里模型返回多个调用时，只读类并发执行、变更类串行；命令队列与审计按执行序落库。
+- **流式**：`POST /api/ai/chat` 改为 SSE。事件名与载荷是前端契约：`session`（`{session_id,provider_id,model_id,protocol}`）、`text_delta`（`{text}`）、`thinking_delta`（`{text}`）、`tool_result`（`{id,name,status,command,exit_code}`）、`needs_confirmation`（`{id,name,action_id,command,reason,risk}`，**随后流即结束**）、`turn_end`（`{session_id,reason,changes}`，`reason` ∈ `completed`/`turn_budget`/`repeat_call`/`turn_timeout`/`needs_confirmation`/`upstream_error`/`read_limit`（**`read_limit` 为 2026-09-18 新增**：连续 `read_terminal` 超上限，见 §12.7.4）—— 面板必须把它显示出来，否则被预算掐断的回合看起来像正常答完）、`error`（`{code,message?}`）。**中断后的续跑走 `POST /api/ai/chat/continue`（同样是 SSE）**：`{session_id, action_id, approved}`，拒绝也是一次续跑（把「操作员拒绝」当作工具结果喂回模型，让模型解释或换方案，比报错有用）。响应头带 `X-Accel-Buffering: no`，让操作员自备的 nginx 默认不缓冲这条响应。**连接不长时间挂起**：一旦命中需确认（模型自评 risky，或 §12.3 的元操作），服务端发事件并**收流**，前端确认后再发续跑请求（复用持久化的不透明块重建上下文）。这样自备 nginx 不需要为长挂连接做特殊配置。反向代理侧仍需不缓冲（否则事件被攒成「最后一起到达」，现象就是「流式不工作」）：响应头因此显式带 `X-Accel-Buffering: no`，而 README 的 nginx 样例本来就有 `proxy_buffering off`，两条互为兜底。
+- **超时**：45s 总超时改为**空闲超时**（每次上游调用在无字节到达时判定）+ **单轮 10 分钟上限**。
+- **停止**：面板「停止」= 前端断开 SSE → 服务端 ctx 取消 → 终止循环；**已执行的步骤全部落库**（半轮也是既成事实，不能丢）。
+- **熔断**（§12.3 第 3 条**已实现**，见该条的更正；本轮在既有基础上改造）：
+  - 每轮**变更类**命令预算（**新增**，默认 10）——与既有 `aiCommandLimit`（分钟闸，同样默认 10）**必须分开命名/分开存储**，否则实现时极易把两者混成一个数；
+  - 单节点**每分钟**上限：既有值 10 条/分钟，本轮**放宽到 30**——agent 式循环一轮打十几条命令是常态，10 会把它卡死；~~注意这条闸也计 `tail_logs`（`runAITailLogs` 同样过闸），读日志会烧预算~~（**2026-09-18：`tail_logs` 已删**。现在过这道闸的是 `run_shell` / `send_keys`；`read_terminal` 作为只读**不过**分钟闸——它走的是"服务端问浏览器"那条路，不排命令队列——由 §12.7.4 的连续上限单独约束）；
+  - 连续失败 3 次暂停该节点的 AI 执行（既有，暂停 5 分钟，`paused_until = at + 300` 硬编码）；
+  - **重复检测**：同工具 + 同参数第二次即停（新增）；
+  - 既有的这道闸**零测试覆盖**（`failure_paused` / `rate_limited` 在测试里搜不到），本轮补测。
+- **为什么是两个轴**：Codex 式循环里「查 → 改 → 重启 → 验」一轮打出十几条命令是**合法**的，单一严格的每分钟闸会把 agent 卡成残废；但只按分钟限又会放走「单轮跑很久」。
+- **已知的洞（有意接受；2026-09-18 部分收紧）**：**只读步骤没有步数上限**——一个病态循环（反复读同一段日志/同一屏）能一直烧到单轮 10 分钟上限，唯一自动刹车是重复检测。**终端工具链上线后这条被改了一半**：重复检测对 `read_terminal` **豁免**（"看"天然是同参重复），换来一条**连续 10 次上限**（§12.7.4）——这是目前唯一对只读步骤生效的硬上限，把病态只读循环的爆炸半径从"烧满 10 分钟"缩到"读第 11 次就结束回合"。`run_shell` / `send_keys` 仍照旧受重复检测与变更预算管。**总步数上限依然不存在**（要收紧就得加）。
+- **审计**：`ai_sessions` 加 `provider_id` / `model_id` / 协议列（换模型即开新会话，所以一行一模型），AI 发起的动作在 `audit_logs` 里带上同一组信息——多 provider 下「这条 root 命令是谁下的」必须可回答。
+
+**回合结束原因是会落库的（2026-09-18 追加）**：`turn_end` 的 `reason` 原先只出现在 SSE 事件里，**别处没有**——刷新后一个被预算/停止/上游故障掐断的回合看起来就是"模型话说了一半"，操作员无从知道是模型自己停了、撞了闸还是上游挂了。现在每回合结束时写一条 `turn_end` 标记行（`ai_messages.role='turn_end'`，`content` = reason，`blocks` = `{changes,...}`），`GET /api/ai/sessions/{id}` 以 `turn_reason` / `changes` 回放，面板渲染在实时流显示回合结束提示的同一位置。**标记行是面板元数据，绝不能进上游请求**：`aiLoopMessages` 显式跳过它——未知 role 会被 Anthropic 直接拒，OpenAI 两协议也会把一段非对话内容喂给模型。
+
+> **实现修订 2026-09-18（只有真跑一遍才暴露的两个坑）**：
+> 1. **系统上下文只能进 `Request.System`，不能在消息列表里再插一条 system**。适配层会按方言把 `System` 放到它该在的位置（completions 的 `messages[0]`、另两个的顶层字段），两边都放就把整份上下文**发了两遍**——真机冒烟里上游收到的 `roles` 是 `[system, system, user, assistant, tool]`：prompt 成本翻倍，且模型要自行调和两份指令。只看"有没有 tool 结果"的单测发现不了它，所以要有一条断言钉住「`aiLoopMessages` 不产出 system 消息」。
+> 2. **确认事件必须带上"为什么问"**：`needs_confirmation` 的 `risk` 原本是空串，于是那块唯一用于提示风险的面板上显示的是"没有异常"。现在两个强制确认分支分别写入 `risky` / `forced`，另有策略驱动的 `policy`（install_singbox 是元操作，无论模型怎么判都要问）。
+
+> **实现修订 2026-09-18（第二批：自主循环特有的三个正确性问题）**：
+> 3. **`ai.default_policy` 之前根本没被读取**——设置页写它、服务端不看它，于是 §12.4 那句"缓解到白名单外默认确认只需改一个配置项"**在代码里不成立**。现在它真正生效：`confirm` 时**每一个变更类动作**都先弹确认（`risk=policy`），只读动作照旧自动执行；点确认后经 `/api/ai/chat/continue` 继续（所以它是提示，不是死路）。这条在自主循环之下尤其关键——它是"一次一条命令"与"一串命令"之间的开关。
+> 4. **被拒/被中断的调用必须落库成 tool 结果**。助手轮（含 `tool_calls`）在工具执行前就已落库；若随后因每轮预算、重复检测、停止、或"操作员不答确认而是直接打新消息"而结束，transcript 里就留下一个**没有 tool_result 的 tool_use**。Anthropic 对 `tool_use`/`tool_result` 严格配对，**下一条**用户消息会被上游 400 掉——故障出现在离病因很远的地方。现在：拒绝分支在结束前落库拒绝结果；新回合开始前 `closeDanglingToolCalls` 会把未答复的调用收口成一条"未执行"结果（幂等，已配对的不再补）。
+> 5. **`tail_logs` 曾经写两条 tool 行**：`handleAITailLogs` 自己 `InsertAIMessage(role=tool)`，循环随后又落一条 envelope 行 ⇒ transcript 与注入上下文都重复一份输出。现在只由循环落库（stdout 已在结果里）。真机冒烟核对过：一次 `tail_logs` 在历史里恰好 1 条 tool 行。（**2026-09-18：该工具已删除**，这条修订随之作废，保留以免有人照旧描述实现。）
+
+### 12.7 终端工具链（2026-09-18 新增：AI 直接在操作员的 PTY 里干活）
+
+> **实现进度（2026-09-18：本节的规格已全部落地）**——读规格时先看这里：
+> - **工具集**：§12.2 的删除（sing-box 四个 + `tail_logs`）与三个工具的实现；`read_terminal`（§12.7.1 的双向帧 + §12.7.2 的窗口语义）；`send_keys`；**`run_shell` 走 §12.7.3 的完整生命周期**（清理 → 哨兵 → 回车 → 快路径/静默/30s 上限 → scrollback 增量 + 解析出的 exit）。
+> - **闸门**：§12.7.4 三种轴（`read_terminal` 豁免重复检测 + 连续 10 次上限 + `run_shell`/`send_keys` 仍受重复检测与每轮变更预算）；并把这两个工具接回"每分钟上限"——它们不排命令队列，所以分钟数改从 `audit_logs` 里数（`store.CountAITerminalActions`），否则恰恰是最能快速动作的两个工具会没有任何速率约束。
+> - **绑定**：§12.7.5（请求里的活 id → 回写行 + 一次性合成提示）。
+> - **提示词与前端**：§12.7.7 的回显拆除（真实 PTY 自己回显）；系统提示词已按本节重写——旧版那句"没有 queued command id 就不算跑过"在新模型下是**错的**，留着比没有更糟（模型会理直气壮地按它推理）。
+> - **代价上的一条实现注记**：`aiCommandExitCode` / `aiCommandOutput` / `waitAICommand` / `enqueueAICommand` 这一整套"AI 动作经命令队列"的代码已全部删除——AI 侧不再有任何动作排进 `commands` 表，所以留着的失败计数轴（`consecutive_failures`）对这三个工具**不再有输入**，与 §12.3 第 3 条的补注一致。
+
+**这是能力模型的替换，不是新增几个工具。** 旧 `run_shell` 是 agent 上的一次性 `exec`（`runShell(cmd, cmdTimeout=30s)`）：屏幕上什么都看不见，输出走 tool result 回给模型。新的 `run_shell` 是**往操作员那个可见 PTY 里真的敲键**，`read_terminal` 读的是**同一块屏幕**。前端过去往 xterm 里写的那行 `[AI] $ <命令>` 是**本地伪造**（`onEcho`，纯 `term.write`，不经 PTY）——也就是说"AI 的命令在我的终端里跑"这个假象**此前就已经存在**；这次是把假象变成真的。
+
+#### 12.7.1 屏幕的真相在浏览器里，而服务端一行终端状态都没有
+
+- `relayTerminal` 是**纯转发**：按 session id 找订阅 channel，**没有订阅者时直接丢弃**（`if ok` 没有 `else`）；agent 侧只把 PTY 的原始字节泵出来（`t.pty.Read` → `terminal_output`），**不解析 ANSI、不留缓冲、没有屏幕模型**。⇒ 过去"没人在看时产生的输出等于不存在"。
+- 因此观察结果一律**向浏览器要 xterm.js 的缓冲区**（用户 2026-09-18 拍板）。xterm 是当前唯一持有真实屏幕的地方（光标定位、软换行、备用屏都在它那里）。用户对"页面没开怎么办"的答复是：页面没开它也操作不了 AI 助手，不用兜底。
+- **`Terminal.tsx` 的 xterm `scrollback` 必须显式配大（10000 行）**：当前没配，吃的是默认 1000 行——长输出的前半截会直接掉出可读范围，`run_shell` 的"增量"也就拿不全。
+- **这条链路今天完全不存在，是本次改动的主体工作量**：需要新增 server→browser 的查询帧与 browser→server 的应答帧（带**相关 id**）+ 超时 + "浏览器没答/没连"的失败态。`SubscribeTerminal` 目前只返回一个 `chan`，**没有"向某个浏览器提问"的句柄**，得补一个"session id → 应答器"的注册。查询发生在 SSE 工具执行的 goroutine 里，必须**阻塞等待 + 随请求 ctx 取消**（否则操作员一断开就把 goroutine 永久挂住）。
+
+#### 12.7.2 窗口语义
+
+- `read_terminal`：默认返回**底部视口**（最后 `rows` 行）；带 `offset` 时向上取窗口（`buffer.active.baseY - offset` 起）。**往上翻不用按键**——`PageUp` 会被 xterm 原样发给远端程序（`\x1b[5~`），**xterm 自己的视口纹丝不动**（`Terminal.tsx` 没有任何键盘拦截），所以"教模型按 PageUp 再读"这条链是错的，**别照它实现**。另注意"视口"= 操作员当前的滚动位置：他往上翻着看日志时，读到的是陈旧内容（可接受，但别把视口当成"底部"）。
+- `run_shell`：返回"打字前标记 → 结束判定"之间的 **scrollback 增量**（剥掉哨兵行）+ 解析出的 **exit 状态**。**它不是 stdout、也不是 stderr**：PTY 把 fd1/fd2 合并成一条流（内核行为，无法分离），增量里还混着命令回显、提示符和 ANSI 序列。
+
+#### 12.7.3 一条命令的完整生命周期
+
+1. **清理当前行**：先发 `Ctrl+U` `Ctrl+C`（`\x15\x03`），再发命令文本。**这是盲打**：前台若不是 shell 提示符（`vim` / `less` / `apt` 的对话框 / 密码提示），这两个字节是**发给那个程序的别的命令**，并且会杀掉操作员正在跑的任务、清掉他正在输入的命令。用户 2026-09-18 明确接受，并要求 **AI 在飞的时候操作员照常可输入**（后果由操作员承担，**不做锁、不做占用指示**）。
+2. **注入哨兵**：实际敲进去的文本是 `<cmd>; printf '\n__FOBE_<nonce>_%d__\n' $?`，**nonce 每次调用随机生成**（8 位十六进制），末尾回车确保执行。
+3. **等结束**：
+   - **快路径**：在本次增量里观察到**本轮哨兵行** ⇒ 立即返回。哨兵就是"命令结束"的可靠信号，`$?` 就是 exit code——**这比任何超时启发式都可靠，是拿回 exit code 的唯一手段**。
+   - **慢路径（哨兵没出现）**：TUI 命令（`vim`/`top`）、命令仍在跑、或输出已被挤出 buffer ⇒ 退化为**静默启发式**：**连续 1 秒没有新字节**即认为可以返回（经验值，可调常量）。此时 exit 报**未知**。
+   - **上限**：整次等待**最长 30 秒**（与被删掉的 `cmdTimeout` 对齐，理由是"模型的耐心"，不是"杀命令的绳"）。**超时不杀命令**（用户 2026-09-18 拍板）：只把"超时"这个结果报给模型，并建议它用 `read_terminal` 自己判断该等还是该发 Ctrl+C 强杀。
+4. **返回值**：`增量片段 + exit 状态 + timed_out 标志`。**哨兵没命中 ⇒ exit=未知，未知不算失败**（见 §12.3 第 3 条的补注），否则正常 TUI 操作会把该节点 AI 暂停 5 分钟。
+5. **审计**：记**敲进去的完整字节原文** + reason + risk（§12.3 第 1、5 条）。
+
+**静默判定的已知缺陷（写清楚，别当成可靠的完成判定）**：无输出的命令（`sleep 30`、安静的 build）与"已经跑完"在服务端看起来一模一样。快路径能救回绝大多数情况（哨兵总会打印），但哨兵被伪造或被挤出 buffer 时就只剩这个启发式。
+
+#### 12.7.4 键、重复检测与三种不同的闸
+
+- `send_keys`：**接受任意按键/转义序列**（用户 2026-09-18 拍板），**不做白名单**——它是"卡在某个状态出不来"的逃生口（Ctrl+C / `q` / 方向键 / 翻页序列）。代价：等于给模型一条任意控制字节通道（`\x1a`、`\x1c`、`\x1b[201~`…），记在 §12.4。
+- **`send_keys` 与 `run_shell` 仍受重复检测管**：`aiTurnBudget.NoteCall` 按"工具 + 参数"在**整轮内**计数，第二次相同调用直接 `repeat_call` 结束回合。**重复检测不看间隔**——中间插一次 `read_terminal` 也不会重置它。⇒ **"再按一次 Ctrl+C"必须写进同一次调用**（如 `\x03\x03`）。这是有意保留的：一模一样的调用反复出现就是死循环信号。
+- **`read_terminal` 豁免重复检测**（用户拍板），替代约束是**连续调用上限 10 次**：连续 `read_terminal` 超过 10 次即**结束本回合**（`turn_end.reason = read_limit`，**新枚举值，前端必须能显示**，否则被掐断的回合看起来像模型话说了一半），中间调用过**其他工具**则计数重置。豁免、连续计数、上限是**三个独立机制**：别和 `aiCommandLimit`（分钟闸 30）或每轮变更预算（10）混成一个常量——§12.6 已经为后两者记过一次"同名不同义"的坑。
+- 分类：`run_shell` / `send_keys` = **变更类**（吃每轮变更预算）；`read_terminal` = 只读（不吃变更预算，但有上面的 10 次上限）。未知工具一律算变更（`aiToolIsChange` 的 fail-safe 方向不变）。
+
+#### 12.7.5 绑定与刷新（**最容易实现错的一处**）
+
+- 终端会话 id 由**服务端在每次浏览器 WS 连接时现生成**（`security.RandomToken(16)`），而 agent 侧**只有一个 active PTY**（`open()` 第一件事是 `closeCurrent("replaced by new terminal")`）⇒ **开第二个终端标签会杀掉第一个的 shell**；此后往旧 id 发键，agent 的 `m.session(id)` 返回 nil 而**静默丢弃**（连 warning 都没有），模型却被告知"已输入"。
+- **刷新页面 ≠ 新 AI 会话**：前端把 AI 会话 id 存在 sessionStorage，挂载时 `getAISession` 回放并**复用同一条会话**（这是 §12.5 协议原生推理块与 §12.6 回放的前提）。所以刷新后是「**新 PTY + 同一个 AI 会话**」，`ai_sessions.terminal_session_id`（创建时冻结、至今**只写不读**）立刻成为**悬空指针**。
+- **因此绑定必须在调用时解析**：聊天请求带上**当前活着的**终端会话 id，服务端**以请求里的为准**（并顺手更新行上该字段以便审计追溯），**绝不能拿会话行里冻结的旧值去发键**。
+- 绑定发生变化（新 PTY 顶替旧 PTY）时，服务端要向模型注入一条**合成上下文**，说明"你的终端已被替换、先前的屏幕状态不再可读"；否则模型会拿 transcript 里的旧屏幕印象做判断。（`aiLoopMessages` 里那条"标记行不进上游"的规则照旧，合成上下文走 `Request.System`。）
+- 浏览器断开时的处置（用户 2026-09-18 拍板）：**当作异常中断**。接受"一次页面刷新会把 AI 正在跑的 `apt install` 谋杀在半途"这个风险，也接受因此**没有回滚**。
+
+#### 12.7.6 删掉 sing-box 工具与 `tail_logs` 的代价清单
+
+删除项：`restart_singbox` / `stop_singbox` / `start_singbox` / `install_singbox` / `tail_logs`，以及随 `tail_logs` 一同消失的 §12.1「附带日志」开关（`include_logs` 请求字段、`fetchAINodeLogs`、`runAITailLogs`、`ctx["node_logs"]`、agent 侧 `tail_logs` command kind、相关 i18n 与测试）。用户决定：**sing-box 的事在网页上做，不需要 AI 参与**。
+
+| 失去的东西 | 后果 |
+|---|---|
+| `install_singbox` 的**三道闸门 + 30s 观察 + `.prev` 回滚**（§9.2） | AI 仍能在 `run_shell` 里 `wget` 一个 tarball 覆盖二进制后重启——**删掉的是唯一安全的路，留下的恰是不安全的那条**。AGENTS.md 不变量 #10 对 AI 的 shell **不再成立**，已加例外注记 |
+| 元操作强制确认（§12.3 第 4 条）在 AI 侧**唯一的载体** | 该规则在 AI 侧已无落点：AI 可以改自己的 provider/key、写主密钥、动 agent 自更新（墓志铭见 §12.3 第 4 条） |
+| `restart/stop/start_singbox` 的**服务管理器探测**（systemd `one-sing.service` / procd / fallback） | 模型得自己先探测再选命令；敲 `systemctl restart one-sing` 在 OpenWrt 探针上必错（探针发行版未知） |
+| `handleAINodeCommand` 的 `singbox_not_installed` 守卫、`sbx.Nudge()` 的重新观测 | 面板状态刷新的那条即时路径没了，退回周期性上报兜底 |
+| `tail_logs` 的**日志来源判断**（`journalctl -u one-sing` / `logread`） | 提示词**没有文件路径可写**——日志不是文件；只能告诉模型"先探测管理器"，判断力交回给模型，试错烧的是真探针 |
+| 结构化日志输出（行数受限、截断后直接进 tool result） | 改成在终端里 `cat` / `journalctl`，token 成本更高，且**经由 §12.4 的注入面** |
+
+**代价的定性（别自我安慰）**：工具数从 6 降到 3，看起来是收窄；实际是**把一条受管、有审计、有回滚、有硬超时的执行路径，换成了一个无边界、无超时、无 exit code、且与被操作对象共用同一块屏幕的交互式 shell**。这笔交易是用户 2026-09-18 明确接受的（"接受只剩手搓、无回滚"），风险量级记在 §12.4。
+
+#### 12.7.7 前端与 UI 的连带改动
+
+- 删掉 `TerminalPage.tsx` 里向 xterm **本地**写 `[AI] $ <命令>` 与 `exit {code}` 的那两行（真实 PTY 会自己回显）；`onEcho` 若无他用一并删除。
+- `ai_exit_code` 文案**保留**：面板 transcript 仍在渲染工具结果里的 exit（`entry.exitCode`），且 `ai_exit_unknown`（"退出码未上报"）已有 zh/en 两份——改成哨兵后"未知"会更常见，这个已有分支正好用上。
+- 新增 i18n：`read_limit` 的回合结束提示（zh/en 两份，§16 的约定）。
+- 删除「附带日志」复选框及其 i18n（`ai_include_logs`）。
 
 ---
 
@@ -841,6 +1006,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - **端口转发卡片（实现修订 2026-09-16，§21）**：编辑服务器页新增「端口转发（nftables）」卡片，列出探针 `ip nat prerouting` 里所有 DNAT 规则——**包括 nfpf.sh 或手工命令加的**——并可增删改。列表默认读服务端快照（打开页面不阻塞探针、离线也能看），「从探针刷新」按钮才走一次实况往返；改动手感是同步的：在线探针一次往返内返回新规则集，离线/超时则如实提示「已入队，探针上线后执行（10 分钟内有效）」并每 5s 重读快照直到探针回答。规则带面板不建模的匹配条件（源地址、计数器、端口范围）时只允许查看与删除，编辑按钮禁用并给出原因提示。备注（comment）可写，写在 DNAT 规则上、位置与 nfpf.sh 相同；双引号在 nft 字符串语法里无法表示，因此被拒绝（见 §21.3）。保存后若备注为空，agent 会回报 `comment_not_applied`，卡片按 §21.6 给出"agent/后端是旧二进制"的红字提示，不静默。
 
 - **审计日志独立成页（2026-09-16）**：审计从基础设置页的卡片移出，成为设置的子页 `/settings/audit`（子导航入口「审计日志」），表格结构与 `GET /api/audit` 的其余字段不变。节点列显示节点名称而非 ID：`ListAudit` 读取时 `LEFT JOIN nodes` 带出 `node_name`（`COALESCE` 成空串，避免无节点记录的 NULL 扫描错误），改名后的历史记录显示当前名称，节点已删除时前端回退显示原始 ID；审计表本身不回写，无 schema 变更。
+- **AI 设置独立成页（2026-09-18，§12）**：AI 从基础设置页的卡片升级为子页 `/settings/ai`（子导航入口「AI 助手」），承载：provider 列表（增删改 / 协议 / root `base_url` / 密钥 / 额外请求头 / models.dev slug / 启用开关 / 「拉取模型列表」）、模型列表（拉取结果是可搜索列表、标注与 models.dev 的匹配状态、勾选批量添加、逐字段手改、启用开关）、默认模型（按 provider 分组的选择器）、`ai.default_policy`（思考预算与 Kill Switch 都不再有界面，见 §12.5 / §12.3）。基础设置页删除 AI 卡片、`ai.base_url` / `ai.model` / `ai.api_key` 三键与相应 i18n 文案。终端页发送框同步新增：按 provider 分组的模型下拉、思考档位下拉（含 `off`，按模型能力裁剪）、「停止」按钮、思考折叠面板（默认收起）。
 - 实时（2026-09-15 修订）：`/ws/events` 只覆盖状态类变化（节点增删改、sing-box、订阅、设置、GeoIP）——**常规指标上报不产生任何事件**，所以数据新鲜度必须靠「轮询 + 高频上报」两条腿：
   - **概览**：挂载且标签页可见期间，对每个在线节点打开 §16 的 5s 探测流，并 5s 拉一次列表。打开探测流是必要的：不打开就只能等 60s 基线节奏，卡片墙看起来像「不自动更新」。
   - **详情**：5s 拉节点快照（与探测流对齐），30s 拉图表 / 流量 / 延迟曲线（重查询）。
@@ -882,6 +1048,7 @@ fobe/
 │  ├─ fobe.db
 │  ├─ .master_key             # 未显式设置主密钥时由入口脚本生成（§4.4）
 │  ├─ geoip/                  # GeoLite2-Country.mmdb（§14.1，与 fobe.db 同卷）
+│  ├─ models/                 # models.dev api.json 缓存（§12.5，与 fobe.db 同卷）
 │  ├─ dl/                     # 容器内 /data/dl：agent 产物（§5.5）+ sing-box 缓存（§9.5）
 │  │  ├─ agent/<version>/     # 二进制 + .sha256 + manifest.json（首次启动由 seed 目录补进卷）
 │  │  └─ singbox/<version>/   # 服务端自动下载或手动投放的 sing-box 产物
@@ -921,7 +1088,7 @@ services:
 - **server 为速度编译**（实现修订 2026-09-16）：编译期真正的杠杆只有两条。①**PGO**：`cmd/server/default.pgo` 提交进仓库，`-pgo=auto`（go 的默认行为，三处构建入口都显式写出来，好让"这份剖面真的被用上"在脚本里看得见）自动把它吃进编译；`scripts/pgo.sh` 默认用测试套件采一份（不需要起服务），`--url` 从跑着的面板上采真实热点，热点漂移后重采再提交。收益是几个百分点（工作量相关，不是常数），**代价**是这份剖面只对采它那版代码最有效，代码大改后收益衰减（Go 官方口径是不具代表性的剖面也很少造成回退）。②`FOBE_SERVER_GOAMD64`（Docker 侧 `--build-arg SERVER_GOAMD64`，默认 v1）：v2/v3 用新指令集换几个百分点，代价是老 CPU 上直接非法指令。server **故意不 strip**：保留 DWARF，pprof 才出得了符号，而 `-s -w` 对运行速度没有任何影响（只影响体积与排障能力）。验证 PGO 真的生效别看编译器输出（`grep -i pgo` 会命中 `prepGoExitFrame` 这类假阳性），看 `go version -m <binary> | grep -- -pgo`——它会打印实际吃进去的剖面路径。
 - **`FOBE_PPROF`：只读诊断口**（实现修订 2026-09-16，默认关）：设成回环地址（如 `127.0.0.1:6060`）即暴露标准 `/debug/pprof/*`，用来回答"面板慢在哪"并给 `scripts/pgo.sh --url` 供剖面；**非回环地址直接拒绝并记 error 日志**——heap profile 就是一份内存快照，而这个进程内存里躺着主密钥、AI key 与 bot token，"临时开一分钟"的代价是这些凭据可能落进日志或对象存储。容器里采集**不需要发布任何端口**：`docker compose exec server wget -qO- 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30' > cpu.pprof`；远程主机走 `ssh -L`。
 - **发布管线**（实现修订 2026-09-15）：推 `v*` tag 触发 `.github/workflows/release.yml`——先过 `gofmt`/`go vet`/`go test ./...`/前端 `tsc+vite build`，全绿才用 buildx 构建 `linux/amd64` 镜像推送到 `ghcr.io/<owner>/<repo>`，标签 `{version, v<tag>, latest}`；`$VERSION` = tag 去掉 `v` 前缀，同时注入 server 与 agent。镜像默认单平台、关 provenance：探针产物本就只有 linux/amd64（§10），attestation manifest list 会让旧 docker 引擎匿名拉取失败。compose 的 `image:` 指向它，`docker compose up -d` 即用预构建镜像；首次发布是 GHCR 私有包，转公开或 `docker login` 后再 `up`。
-- **备份**（实现修订 2026-09-16，默认开启）：启动即拍 + 每 24h 一轮 + 数据库迁移前必拍，`VACUUM INTO` 快照到 `./data/backup/fobe-<时间戳>.db`，保留 3 份；`FOBE_BACKUP_DIR` 换位置、`FOBE_BACKUP_DIR=off` 关闭。另提供面板导出/导入 JSON（不含凭据明文）。损坏恢复流程见 `README.md` 排障表。
+- **备份**（实现修订 2026-09-16，默认开启）：启动即拍 + 每 24h 一轮 + 数据库迁移前必拍，`VACUUM INTO` 快照到 `./data/backup/fobe-<时间戳>.db`，保留 3 份；`FOBE_BACKUP_DIR` 换位置、`FOBE_BACKUP_DIR=off` 关闭。另提供面板导出/导入 JSON（**2026-09-18 修订：快照改为携带密文凭据**——`settings` 的敏感键与全部 provider 密钥 / 额外请求头都以 AES-GCM 密文导出，导出前二次确认并明确警示；导入时逐条解密校验，解不开的条目跳过并列入导入结果，绝不静默当作「未配置」。**备份文件从此等同凭据**，需与主密钥（§4.4 的 `/data/.master_key`）一同保管：密文只认那一把 32 字节主密钥、**与主机无关**——搬迁时把 `/data/.master_key` 一起带走（或在新机显式设同一个 `FOBE_MASTER_KEY`）就照常解开；只搬 JSON、或让新机先自建了一把 key，才会解不开）。损坏恢复流程见 `README.md` 排障表。
 
 ---
 
@@ -933,7 +1100,7 @@ services:
 | **M2 监控** | 指标采集 + 实时面板 + 7 天明细 + 日流量表 + 四模式配额 + 重置锚点 + 缴费周期 | 面板 CPU/内存/磁盘/流量数字与 `top`、机房账单对得上 |
 | **M3 sing-box** | 安装/更新/回滚/启停 + anytls 自签 + 证书 pinning + 订阅与模板 | 从零到"手机能导入订阅并连通"；故意写坏配置能自动回滚 |
 | **M4 运维面** | Web 终端（agent 本地 PTY）+ IP/国旗 + 延迟测量 + 告警 | 浏览器里能上探针改配置；离线节点 90s 内告警到 Telegram |
-| **M5 AI** | 工具集 + 确认弹窗 + 审计 + Kill Switch + 熔断 | 用自然语言完成"看这台为什么负载高"和"把 sing-box 升到 x.y.z" |
+| **M5 AI** | 工具集 + 确认弹窗 + 审计 + 熔断 | 用自然语言完成"看这台为什么负载高"和"把 sing-box 升到 x.y.z" |
 | **M6 打磨** | i18n + 明暗主题 + OpenWrt 实机验证 + 备份恢复 + 文档 | x86 OpenWrt 软路由上完整跑通 M2–M4 |
 
 每阶段可独立验收，M3 结束即具备"最小可用产品"价值。
@@ -949,7 +1116,7 @@ services:
 1. 离线探针的指令入队后 TTL **10 分钟**，超时标失败（避免迟到指令突然生效）。
 2. 探针防火墙：agent **尝试自动放行** sing-box 端口（ufw / firewalld / nft / fw4），失败则把需要你手动执行的命令原文返回面板。
 3. 备份：每日 `VACUUM INTO` 快照保留 3 份 + 面板导出/导入。（实现修订 2026-09-16：由 14 压到 3，库体量随节点数增长，池子刻意压小；启动即拍 + 迁移前必拍见 §6/§17。）
-4. agent 自更新：与 sing-box 同样三道闸门 + 版本显式指定。**（实现修订 2026-09-15：此条已被 §5.5 取代——agent 没有 `check`/观察期可用，实际是"下载 + sha256 + 旁路自检 + 原子替换"，且不保留 `.prev`；"跟随服务端"改为双向（含降级），触发是系统行为、不需确认，Kill Switch on 时冻结。）**
+4. agent 自更新：与 sing-box 同样三道闸门 + 版本显式指定。**（实现修订 2026-09-15：此条已被 §5.5 取代——agent 没有 `check`/观察期可用，实际是"下载 + sha256 + 旁路自检 + 原子替换"，且不保留 `.prev`；"跟随服务端"改为双向（含降级），触发是系统行为、不需确认；面板的 `agent.auto_update` 可关。）**
 5. anytls 端口默认随机高位端口，面板可改。
 6. **接入层完全外部化**：fobe 不碰 nginx、不签发也不续期证书；README 提供可直接复制的 nginx 配置（单上游 + WS 升级 + 真实 IP + 超时 + 上传体量）。
 7. 证书 pinning 替代 `insecure`：订阅里内嵌证书 PEM。
@@ -964,19 +1131,22 @@ services:
 
 ## 20. 已接受的已知风险（签字区）
 
-1. ⚠ **AI 默认放行 → 间接提示注入可静默执行任意 root 命令**（§12.4）。缓解路径已设计，改一个配置项即可收紧。
+1. ⚠ **AI 默认放行 + 自主循环 → 间接提示注入可静默执行链式 root 命令**（§12.4 / §12.6；2026-09-18 量级升级：此前一次注入最多换一条命令、下一条消息前你看得见，现在模型能在一轮内自主链式行动、单轮最长 10 分钟）。缓解路径已设计，改一个配置项即可收紧。
 2. ⚠ **登录面只有密码 + IP 黑名单**，无第二因子。黑名单依赖你自备的 nginx 正确传递 XFF、且 `FOBE_TRUSTED_PROXIES` 与实际拓扑一致；**接 CDN 后忘记同步回源网段 = 要么封不到人，要么把真实用户全封了**。
 3. ~~⚠ **共享 anytls 密码**：无法按订阅吊销代理访问，泄漏只能全局轮换~~ **已消除（2026-09-17e）**：口令改为每个入口一份、创建时现生成、跟着该入口的配置走（§10.1 实现修订）。泄漏面按入口切分，换某个节点的密码只影响该节点。遗留的代价是面板不再有"一键全场轮换"的杠杆——那正是被打断全场客户端的对价。
 4. ⚠ **指标只存 7 天**：7 天以外的曲线不可得（月曲线依赖永久日表，可信；但"上月某天下午的 CPU"查不到）。
 5. ⚠ **不做自动停服**：配额超标不会自动止损，完全依赖告警通道可达。
 6. ⚠ **agent 自更新不留 `.prev`**（§5.5）：没有本地回滚。旁路自检把"坏产物"挡在提交之前，但**自检过、`-run` 起不来**（只有 run 路径才用到的内核特性/配置）这种残余情形只能 SSH 上去跑面板给的重装命令。你选了省下 OpenWrt overlay 上的 10MB，代价就在这里。
-7. ⚠ **Kill Switch on 期间探针不跟随**："一直跟着服务端走"有例外——冻结是全局止损闸，优先级高于跟随。恢复跟随要你手动关掉它。
+7. ⚠ **关掉 `agent.auto_update` 期间探针不跟随**："一直跟着服务端走"有例外，而那是**唯一**的例外开关（2026-09-18 修订：原本还有一条 Kill Switch 冻结，随该功能移除）。恢复跟随要你手动把它打开。
 8. ⚠ **存量探针必须人工重装一次**：今天已装的 agent 二进制里没有自更新代码，服务端下发 target 它也不认识（Go 忽略未知字段，照常跑）。面板按能力位把它标成"需人工重装"，不会自动跟上。
 9. ⚠ **服务端版本号成了对外契约**：随便打一个版本号（含把 `VERSION` 改成别的时间戳）就等于让**全部探针换一次二进制**，而降级路径是自动化测试里最容易缺的那条。发版前想清楚这个数字。
 10. ⚠ **混版窗口**：升级/降级过渡期一定是混版。承诺是"同大版本内双向兼容（新增字段可选、未知帧忽略）"，**不保证行为等价**。
 11. ⚠ **DL 目录是产物单点**：`data/` 没挂载成持久卷（被重建容器清空）或换了机器，全部探针会停在原地并告警——fail-closed 不会把探针搞砖，但也绝不会跟上，直到你把产物补齐。
 13. ⚠ **面板整文件重写 `/etc/nftables.conf`（§21）**：端口转发的持久化沿用 nfpf.sh 的做法——`nft list ruleset` 的实况快照整个写进该文件，并按需 `systemctl enable nftables`、写 `net.ipv4.ip_forward=1`。手工维护这个文件的人要注意：下一次在面板里增删改转发规则时，文件会被实况覆盖（注释头写明来源）。不想被覆盖就别让面板管转发，或把持久化交给别的文件（面板不读该文件，只写）。
 12. ⚠ **主密钥与密文同卷**（实现修订 2026-09-15，§4.4/§19.13）：零输入部署把自动生成的主密钥放在 `/data/.master_key`，与它加密的设置同一个挂载卷——能读卷的人（宿主机 root、备份文件拿到手的人）就能解密 AI key / Bot Token。换来的是不填任何变量即可启动。不接受这个代价：显式设置 `FOBE_MASTER_KEY`（env / secret），入口脚本就完全不碰磁盘。
+14. ⚠ **只读步骤无步数上限**（§12.6，2026-09-18）：自主循环不限制总步数，只保留「同工具同参数重复即停」。一个病态循环（反复读同一段日志）能一直烧到单轮 10 分钟上限；要收紧就得加总步数上限。
+15. ⚠ **备份文件等同凭据**（§12.5 / §17，2026-09-18）：导出快照携带密文凭据（`settings` 敏感键 + 全部 provider 密钥 / 额外请求头）。密文与**主密钥**绑定、**与主机无关**（AES-GCM，密钥就是 `FOBE_MASTER_KEY` 那 32 字节，无任何主机 / 安装相关派生量）——带上同一把 `.master_key` 换任何主机都能解开；解不开的唯一原因是目标环境手里那把主密钥不同（换机却没带 `/data/.master_key`，或新机已先启动并自建了一把 key）。解不开的条目逐条跳过并列入导入结果，不会静默当成「未配置」。
+16. ⚠ **模型元数据依赖外部网络与第三方准确性**（§12.5，2026-09-18）：`models.dev/api.json` 由服务端每天拉一次；拉不到就沿用上次缓存，首次离线则元数据全空、只能手填。上下文 / 最大输出 / 思考档位是否正确不在本项目控制范围内，所以每个字段都可手改、且首次匹配后即冻结。
 
 ---
 

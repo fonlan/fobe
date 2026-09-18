@@ -13,6 +13,7 @@ import Alerts from './pages/Alerts';
 import Audit from './pages/Audit';
 import Notifications from './pages/Notifications';
 import Settings from './pages/Settings';
+import SettingsAI from './pages/SettingsAI';
 import Subscriptions from './pages/Subscriptions';
 import TerminalPage from './pages/TerminalPage';
 
@@ -48,6 +49,7 @@ export default function App() {
             <Route path="subscriptions" element={<Subscriptions />} />
             <Route path="audit" element={<Audit />} />
             <Route path="notifications" element={<Notifications />} />
+            <Route path="ai" element={<SettingsAI />} />
           </Route>
           <Route path="/targets" element={<Navigate to="/settings/targets" replace />} />
           <Route path="/subs" element={<Navigate to="/settings/subscriptions" replace />} />

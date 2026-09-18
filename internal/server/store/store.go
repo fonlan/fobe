@@ -24,7 +24,7 @@ var schemaFS embed.FS
 // and idempotent, so forgetting a bump only loses the backup-on-change
 // guarantee, never correctness. Upgrade and downgrade semantics: §6 "schema
 // 兼容策略" in design.md.
-const SchemaVersion = 13
+const SchemaVersion = 15
 
 // Store is the database handle. Safe for concurrent use.
 type Store struct {
@@ -251,6 +251,29 @@ func (s *Store) migrateAdditive() error {
 		// §10.2 订阅里的展示名：节点名属于面板，订阅名常常要另起一个（中文名、
 		// 带地区缩写），而且中转入口的默认名要用它做前缀。
 		{"nodes", "sub_name", `ALTER TABLE nodes ADD COLUMN sub_name TEXT NOT NULL DEFAULT ''`},
+		// §12.1/§12.6 (2026-09-18): a session is pinned to one (provider, model)
+		// pair — reasoning blocks are protocol-native and cannot be replayed
+		// across protocols, so the model picker starts a new session instead.
+		{"ai_sessions", "provider_id", `ALTER TABLE ai_sessions ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''`},
+		{"ai_sessions", "model_id", `ALTER TABLE ai_sessions ADD COLUMN model_id TEXT NOT NULL DEFAULT ''`},
+		{"ai_sessions", "protocol", `ALTER TABLE ai_sessions ADD COLUMN protocol TEXT NOT NULL DEFAULT ''`},
+		// §12.5 (2026-09-18): the protocol-native payload (thinking block +
+		// signature, tool_use / tool_result, Responses reasoning items) must be
+		// echoed back verbatim on the next loop step; `content` alone (plain
+		// text) loses it and makes Anthropic reject the request.
+		{"ai_messages", "blocks", `ALTER TABLE ai_messages ADD COLUMN blocks TEXT NOT NULL DEFAULT ''`},
+		// §12.5: "turn thinking off" is not one wire spelling. Anthropic omits
+		// the field, effort-style models may need an explicit "none" (many
+		// gateways think by default), toggle-style models need their own close
+		// shape. The row records which one this model needs, because the loop
+		// cannot tell from the level list alone and guessing sends a body the
+		// upstream rejects.
+		{"ai_models", "reasoning_off_style", `ALTER TABLE ai_models ADD COLUMN reasoning_off_style TEXT NOT NULL DEFAULT ''`},
+		// §12.6: a confirmation interrupts the loop, and the resumed turn must
+		// report the tool_result under the ORIGINAL call id — Anthropic pairs
+		// tool_use/tool_result strictly and rejects an orphan result, so the id
+		// has to survive the interruption.
+		{"ai_pending_actions", "call_id", `ALTER TABLE ai_pending_actions ADD COLUMN call_id TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, m := range migrations {
 		if s.columnExists(m.table, m.column) {

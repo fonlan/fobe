@@ -48,6 +48,22 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 	subs, unsub := s.Hub.SubscribeTerminal(sessionID)
 	defer unsub()
 
+	// Server-initiated queries (design §12.7.1): the AI's terminal tools need to
+	// ask *this browser* for its xterm buffer, because the screen exists nowhere
+	// else. The request goes through pushCh and is written by the same single
+	// goroutine that writes agent frames — gorilla forbids concurrent writers on
+	// one Conn, so a second writer here would corrupt the stream.
+	pushCh := make(chan protocol.Envelope, 8)
+	unpush := s.Hub.RegisterTerminalPush(sessionID, func(env protocol.Envelope) bool {
+		select {
+		case pushCh <- env:
+			return true
+		default: // buffer full: the caller times out rather than blocking the hub
+			return false
+		}
+	})
+	defer unpush()
+
 	ip := s.Trust.RealIP(r)
 	s.Store.InsertAudit(&store.AuditEntry{
 		Actor:    "panel",
@@ -75,6 +91,11 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-relayDone:
 				return
+			case env := <-pushCh:
+				if !writeTerminalFrame(ws, env) {
+					_ = ws.Close()
+					return
+				}
 			case env := <-subs:
 				if !writeTerminalFrame(ws, env) {
 					// Closing the socket unblocks the browser read loop as well;
@@ -94,6 +115,16 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if env.V != protocol.Version {
+			continue
+		}
+		// The answer to a server-initiated buffer query (design §12.7.1). It is a
+		// browser↔server frame and must NEVER be forwarded to the agent, which
+		// would only log it as unhandled.
+		if env.Type == protocol.TypeTermBuffer {
+			var answer protocol.TerminalBuffer
+			if json.Unmarshal(env.Payload, &answer) == nil {
+				s.Hub.DeliverTerminalBuffer(answer)
+			}
 			continue
 		}
 		if !s.stampTerminalFrame(sessionID, &env, &closeSent) {

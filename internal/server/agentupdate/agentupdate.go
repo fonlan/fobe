@@ -83,7 +83,6 @@ type OffReason string
 
 const (
 	ReasonOffSwitchOff   OffReason = "switch_off"
-	ReasonOffKillSwitch  OffReason = "kill_switch"
 	ReasonOffNoDLDir     OffReason = "no_dl_dir"
 	ReasonOffNotReleased OffReason = "not_released"
 	ReasonOffNoArtifact  OffReason = "artifact_missing"
@@ -115,8 +114,6 @@ type Config struct {
 	ServerVersion string
 	// DLDir is FOBE_DL_DIR — where <dl>/agent/<version>/ artifacts live.
 	DLDir string
-	// KillSwitch reports ai.kill_switch (design §12.3: freeze wins over follow).
-	KillSwitch func() bool
 	// Enabled reports the panel switch; nil means "always on".
 	Enabled func() bool
 	// Now overrides the clock in tests; nil = time.Now().Unix().
@@ -154,11 +151,6 @@ func New(cfg Config) *Manager {
 }
 
 func (m *Manager) now() int64 { return m.cfg.Now() }
-
-// KillSwitchOn reports the current freeze state.
-func (m *Manager) KillSwitchOn() bool {
-	return m.cfg.KillSwitch != nil && m.cfg.KillSwitch()
-}
 
 // IsReleaseVersion decides whether a build identifier may serve as a target.
 //
@@ -199,8 +191,6 @@ func (m *Manager) status() (ok bool, reason OffReason) {
 	switch {
 	case m.cfg.Enabled != nil && !m.cfg.Enabled():
 		return false, ReasonOffSwitchOff
-	case m.KillSwitchOn():
-		return false, ReasonOffKillSwitch
 	case m.cfg.DLDir == "":
 		return false, ReasonOffNoDLDir
 	case !IsReleaseVersion(m.cfg.ServerVersion):

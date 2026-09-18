@@ -46,8 +46,23 @@ import type {
   TrafficResp,
   WsEvent,
   AIChatRequest,
-  AIChatResponse,
-  AIConfirmResponse,
+  AICatalog,
+  AIContinueRequest,
+  AIErrorEvent,
+  AIFetchedModels,
+  AINeedsConfirmationEvent,
+  AISessionEvent,
+  AISessionHistory,
+  AIToolResultEvent,
+  AITurnEndEvent,
+  AIModel,
+  AIModelImportResult,
+  AIModelInput,
+  AIModelMatchResult,
+  AIProvider,
+  AIProviderInput,
+  ModelsDevStatus,
+  TerminalBufferPayload,
   TerminalClosePayload,
   TerminalEnvelope,
   TerminalInputPayload,
@@ -818,16 +833,361 @@ export type TerminalClientEnvelope =
   | TerminalEnvelope<TerminalOpenPayload>
   | TerminalEnvelope<TerminalInputPayload>
   | TerminalEnvelope<TerminalResizePayload>
-  | TerminalEnvelope<TerminalClosePayload>;
+  | TerminalEnvelope<TerminalClosePayload>
+  // The answer to a `terminal_query` (§12.7.1). It is a client → server frame
+  // like the others, but the server never forwards it to the agent.
+  | TerminalEnvelope<TerminalBufferPayload>;
 
-/** Send a chat message to the node-bound AI assistant (server proxies the configured upstream). */
-export function chatWithAI(body: AIChatRequest): Promise<AIChatResponse> {
-  return request<AIChatResponse>('/api/ai/chat', { method: 'POST', body });
+// --- AI streaming chat (SSE, design §12.6) -----------------------------------
+//
+// POST /api/ai/chat answers with `text/event-stream`, so it cannot go through
+// `request<T>()` (which parses one JSON body) and cannot use EventSource either:
+// EventSource only issues GETs and cannot carry a request body or an abort
+// signal. The stream is therefore read with fetch + ReadableStream and parsed
+// here, once, so pages never re-implement framing.
+
+/** Typed handlers for the §12.6 event names. Unknown events are ignored. */
+export interface AIStreamHandlers {
+  /** `session` — first frame; the conversation id to persist for replay. */
+  onSession?: (event: AISessionEvent) => void;
+  /** `text_delta` — append to the current assistant bubble. */
+  onTextDelta?: (text: string) => void;
+  /** `thinking_delta` — append to the collapsed thinking block. */
+  onThinkingDelta?: (text: string) => void;
+  /** `tool_result` — one tool finished (status/command/exit_code). */
+  onToolResult?: (event: AIToolResultEvent) => void;
+  /** `needs_confirmation` — the stream ends right after; answer via continue. */
+  onNeedsConfirmation?: (event: AINeedsConfirmationEvent) => void;
+  /** `turn_end` — why the turn stopped; must be shown to the operator. */
+  onTurnEnd?: (event: AITurnEndEvent) => void;
+  /** `error` — mid-stream failure (upstream/internal/…). */
+  onError?: (event: AIErrorEvent) => void;
 }
 
-/** Confirm a pending AI action the backend held back (risky / kill switch). */
-export function confirmAIAction(actionId: string): Promise<AIConfirmResponse> {
-  return request<AIConfirmResponse>(`/api/ai/actions/${encodeURIComponent(actionId)}/confirm`, { method: 'POST' });
+/**
+ * True when a thrown value is our own "the caller aborted this" marker. The
+ * stop button aborts the fetch, and §12.6 makes that a normal cancellation (the
+ * server keeps the committed half-turn) — it must not be rendered as an error.
+ */
+export function isAbortError(e: unknown): boolean {
+  return e instanceof ApiError && e.code === 'aborted';
+}
+
+/**
+ * Did this failure come from our own AbortController?
+ *
+ * Two checks on purpose: the abort reason is not standardized across engines
+ * (a DOMException in Chrome/Firefox, historically a plain Error elsewhere), and
+ * `signal.aborted` alone also covers the race where the stop button lands while
+ * the request is failing for an unrelated reason — in which case "the operator
+ * stopped it" is the more useful explanation than "network error".
+ */
+function abortedBy(e: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  return typeof e === 'object' && e !== null && (e as { name?: unknown }).name === 'AbortError';
+}
+
+/** One SSE frame after framing: the event name plus its joined data lines. */
+interface SSEMessage {
+  event: string;
+  data: string;
+}
+
+/**
+ * Find the end of the first complete event in `buffer`.
+ *
+ * SSE separates events by a BLANK LINE, which browsers write as `\n\n` but may
+ * write as `\r\n\r\n` (and a proxy may rewrite). Returns the index of the
+ * separator plus its length, or null when the buffer holds only a partial
+ * event. A trailing lone `\r` legitimately means "wait for the next chunk" —
+ * deciding early would split `\r\n`.
+ */
+function findSSEEventEnd(buffer: string): { index: number; length: number } | null {
+  for (let i = 0; i < buffer.length; i++) {
+    const c = buffer[i];
+    if (c === '\n') {
+      if (buffer[i + 1] === '\n') return { index: i, length: 2 };
+      if (buffer[i + 1] === '\r' && buffer[i + 2] === '\n') return { index: i, length: 3 };
+    } else if (c === '\r') {
+      if (buffer[i + 1] === '\r') return { index: i, length: 2 };
+      if (buffer[i + 1] === '\n') {
+        if (buffer[i + 2] === '\n') return { index: i, length: 3 };
+        if (buffer[i + 2] === '\r' && buffer[i + 3] === '\n') return { index: i, length: 4 };
+      }
+    }
+  }
+  return null;
+}
+
+/** Parse one event block's fields (`event:` / `data:`; comments and unknown
+ *  fields are ignored, and several `data:` lines join with `\n` per spec). */
+function parseSSEBlock(block: string): SSEMessage | null {
+  let event = '';
+  const data: string[] = [];
+  for (const line of block.split(/\r\n|\n|\r/)) {
+    if (line === '' || line.startsWith(':')) continue;
+    const colon = line.indexOf(':');
+    const field = colon === -1 ? line : line.slice(0, colon);
+    let value = colon === -1 ? '' : line.slice(colon + 1);
+    if (value.startsWith(' ')) value = value.slice(1);
+    if (field === 'event') event = value;
+    else if (field === 'data') data.push(value);
+  }
+  if (data.length === 0) return null;
+  return { event: event || 'message', data: data.join('\n') };
+}
+
+/** Route one decoded frame to the typed handler. A frame whose JSON does not
+ *  parse is DROPPED: one bad event must not tear down the rest of the turn. */
+function dispatchAIEvent(message: SSEMessage, handlers: AIStreamHandlers): void {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(message.data);
+  } catch {
+    return;
+  }
+  const obj = payload !== null && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+  const text = typeof obj.text === 'string' ? obj.text : '';
+  switch (message.event) {
+    case 'session':
+      handlers.onSession?.(obj as unknown as AISessionEvent);
+      break;
+    case 'text_delta':
+      if (text) handlers.onTextDelta?.(text);
+      break;
+    case 'thinking_delta':
+      if (text) handlers.onThinkingDelta?.(text);
+      break;
+    case 'tool_result':
+      handlers.onToolResult?.(obj as unknown as AIToolResultEvent);
+      break;
+    case 'needs_confirmation':
+      handlers.onNeedsConfirmation?.(obj as unknown as AINeedsConfirmationEvent);
+      break;
+    case 'turn_end':
+      handlers.onTurnEnd?.(obj as unknown as AITurnEndEvent);
+      break;
+    case 'error':
+      handlers.onError?.({ code: typeof obj.code === 'string' ? obj.code : 'internal', message: typeof obj.message === 'string' ? obj.message : undefined });
+      break;
+    case 'tool_call':
+      // The backend does not emit this today (§12.6 sends tool_result only).
+      // Ignored on purpose: half-rendering a tool before it ran would show a
+      // command that may still be refused by the budget gate.
+      break;
+    default:
+      break;
+  }
+}
+
+/** Consume everything `buffer` already contains, returning the remainder. */
+function drainSSEBuffer(buffer: string, handlers: AIStreamHandlers): string {
+  let rest = buffer;
+  for (;;) {
+    const end = findSSEEventEnd(rest);
+    if (!end) return rest;
+    const block = rest.slice(0, end.index);
+    rest = rest.slice(end.index + end.length);
+    const message = parseSSEBlock(block);
+    if (message) dispatchAIEvent(message, handlers);
+  }
+}
+
+/**
+ * Open one SSE request and pump it into `handlers`.
+ *
+ * Failure modes are split on purpose: anything before the response headers is a
+ * normal JSON error (ApiError with the backend code); anything after is an
+ * `error` EVENT inside the stream, because a 200 has already been written.
+ */
+async function streamAI(path: string, body: unknown, handlers: AIStreamHandlers, signal?: AbortSignal): Promise<void> {
+  let resp: Response;
+  try {
+    resp = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (e) {
+    if (abortedBy(e, signal)) throw new ApiError('aborted', 0);
+    throw new ApiError('network_error', 0);
+  }
+  if (resp.status === 401 || !resp.ok) {
+    if (resp.status === 401) onUnauthorized?.();
+    let code = resp.status === 401 ? 'unauthorized' : resp.status === 403 ? 'forbidden' : 'internal';
+    try {
+      const j = (await resp.json()) as { error?: { code?: string } };
+      if (j?.error?.code) code = j.error.code;
+    } catch {
+      // non-JSON error body
+    }
+    throw new ApiError(code, resp.status);
+  }
+  if (!resp.body) throw new ApiError('bad_response', resp.status);
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      // `stream: true` keeps a multi-byte UTF-8 character split across two
+      // chunks from being decoded as mojibake — Chinese deltas are the common
+      // case here, and they are exactly 3 bytes wide.
+      buffer += decoder.decode(value, { stream: true });
+      buffer = drainSSEBuffer(buffer, handlers);
+    }
+    buffer += decoder.decode();
+  } catch (e) {
+    if (abortedBy(e, signal)) throw new ApiError('aborted', 0);
+    throw new ApiError('network_error', 0);
+  }
+  // A final event may lack its terminating blank line if the connection closed
+  // right after it; parse what is left rather than dropping the last frame.
+  if (buffer.trim() !== '') {
+    const message = parseSSEBlock(buffer);
+    if (message) dispatchAIEvent(message, handlers);
+  }
+}
+
+/** One user message driving the server-side autonomous loop (§12.6). */
+export function streamAIChat(body: AIChatRequest, handlers: AIStreamHandlers, signal?: AbortSignal): Promise<void> {
+  return streamAI('/api/ai/chat', body, handlers, signal);
+}
+
+/**
+ * Answer a pending confirmation and resume the turn (§12.6). `approved: false`
+ * is a first-class outcome: the model is told the action was rejected by the
+ * operator, so it can explain or propose a different plan.
+ */
+export function streamAIContinue(body: AIContinueRequest, handlers: AIStreamHandlers, signal?: AbortSignal): Promise<void> {
+  return streamAI('/api/ai/chat/continue', body, handlers, signal);
+}
+
+/**
+ * Restore a session's transcript. This is what makes a reload show the
+ * reasoning blocks again: `thinking` is extracted server-side per message, so
+ * the panel renders it without knowing which dialect produced it.
+ */
+export function getAISession(id: string): Promise<AISessionHistory> {
+  return request<AISessionHistory>(`/api/ai/sessions/${encodeURIComponent(id)}`);
+}
+
+// --- AI providers & models (design §12.1/§12.5) ------------------------------
+
+/**
+ * Everything the AI settings page and the model picker need in one round trip
+ * (providers + models + the default pair). The server computes the per-provider
+ * effective reasoning levels, so the panel never re-derives the protocol rule.
+ *
+ * The server normalizes its lists (nil slices serialize as `[]`), but a `null`
+ * array would crash the page on the first `.length`, so the shape is repaired on
+ * arrival — the same stance normCommand / normSubscriptionEntry take.
+ */
+export async function getAICatalog(): Promise<AICatalog> {
+  const raw = await request<Partial<AICatalog>>('/api/ai/catalog');
+  return {
+    providers: (raw.providers ?? []).map((p) => ({
+      ...p,
+      header_names: p.header_names ?? [],
+      model_ids: p.model_ids ?? [],
+      models: (p.models ?? []).map((m) => ({ ...m, effective_levels: m.effective_levels ?? [] })),
+    })),
+    models: (raw.models ?? []).map((m) => ({
+      ...m,
+      input_modalities: m.input_modalities ?? [],
+      output_modalities: m.output_modalities ?? [],
+      reasoning_levels: m.reasoning_levels ?? [],
+      overridden_fields: m.overridden_fields ?? [],
+      provider_ids: m.provider_ids ?? [],
+    })),
+    default_provider_id: raw.default_provider_id ?? '',
+    default_model_id: raw.default_model_id ?? '',
+  };
+}
+
+export function createAIProvider(body: AIProviderInput): Promise<AIProvider> {
+  return request('/api/ai/providers', { method: 'POST', body });
+}
+
+/**
+ * Same body as create. api_key / extra_headers omitted = leave the stored
+ * secret alone; "" = clear it. The panel never receives the ciphertext back.
+ */
+export function updateAIProvider(id: string, body: AIProviderInput): Promise<AIProvider> {
+  return request(`/api/ai/providers/${encodeURIComponent(id)}`, { method: 'PATCH', body });
+}
+
+/** Deletes the provider AND every model link it holds — confirm before calling. */
+export function deleteAIProvider(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/ai/providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function linkAIProviderModels(id: string, modelIDs: string[]): Promise<{ ok?: boolean }> {
+  return request(`/api/ai/providers/${encodeURIComponent(id)}/models`, { method: 'POST', body: { model_ids: modelIDs } });
+}
+
+export function unlinkAIProviderModel(id: string, modelID: string): Promise<{ ok?: boolean }> {
+  return request(`/api/ai/providers/${encodeURIComponent(id)}/models/${encodeURIComponent(modelID)}`, { method: 'DELETE' });
+}
+
+/**
+ * Match metadata + create missing rows + link, in ONE call (§12.5): a model the
+ * upstream advertises but models.dev does not know must still become a row the
+ * operator can fill by hand, and splitting this into two requests would leave a
+ * half-applied selection whenever the second one fails.
+ *
+ * `unmatched` entries were created with hand-fill defaults — the UI must say so.
+ */
+export function importAIProviderModels(id: string, modelIDs: string[]): Promise<AIModelImportResult> {
+  return request(`/api/ai/providers/${encodeURIComponent(id)}/import-models`, { method: 'POST', body: { model_ids: modelIDs } });
+}
+
+/**
+ * Ask the provider for its own model listing (`GET {base}/models`).
+ *
+ * The endpoint is part of a later stage and may not exist yet on the running
+ * server; callers must treat unknown_endpoint / not_found as "not available
+ * here" and fall back to typing model ids by hand, not as a crash.
+ */
+export function fetchAIProviderModels(id: string): Promise<AIFetchedModels> {
+  return request(`/api/ai/providers/${encodeURIComponent(id)}/fetch-models`, { method: 'POST' });
+}
+
+/** Create or update a model row. `overridden_fields` marks hand-edited fields. */
+export function saveAIModel(body: AIModelInput): Promise<AIModel> {
+  return request('/api/ai/models', { method: 'POST', body });
+}
+
+export function deleteAIModel(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/ai/models/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/** Refill model rows from models.dev; fields in overridden_fields are left alone. */
+export function matchAIModels(providerID: string, modelIDs: string[]): Promise<AIModelMatchResult> {
+  return request('/api/ai/models/match', { method: 'POST', body: { provider_id: providerID, model_ids: modelIDs } });
+}
+
+/**
+ * The default is a (provider, model) PAIR: the same model can hang off several
+ * gateways, so a bare model id could not say which one to call. Both ids must
+ * be given together; an empty pair clears the default.
+ */
+export function setAIDefaults(providerID: string, modelID: string): Promise<{ ok: boolean }> {
+  return request('/api/ai/defaults', { method: 'PUT', body: { provider_id: providerID, model_id: modelID } });
+}
+
+/** models.dev cache state + the provider slugs the form offers. */
+export function getModelsDev(): Promise<ModelsDevStatus> {
+  return request('/api/ai/modelsdev');
+}
+
+/** Force a metadata fetch (manual only; the server also refreshes daily). */
+export function refreshModelsDev(): Promise<{ ok: boolean }> {
+  return request('/api/ai/modelsdev/refresh', { method: 'POST' });
 }
 
 

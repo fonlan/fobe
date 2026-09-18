@@ -5,9 +5,11 @@ import '@xterm/xterm/css/xterm.css';
 import * as api from '../api';
 import { useI18n } from '../i18n';
 import type {
+  TerminalBufferPayload,
   TerminalClosedPayload,
   TerminalEnvelope,
   TerminalOutputPayload,
+  TerminalQueryPayload,
 } from '../types';
 
 type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'closed';
@@ -32,6 +34,33 @@ function payloadRecord(payload: unknown): Record<string, unknown> {
 
 function sizeFor(term: XTerm): { cols: number; rows: number } {
   return { cols: Math.max(2, term.cols), rows: Math.max(2, term.rows) };
+}
+
+/**
+ * Read one window of the XTerm buffer for a `terminal_query` (design §12.7.1).
+ *
+ * The window is anchored to the BOTTOM of the buffer, never to the operator's
+ * scroll position: the server asks for "the last N lines" (offset 0) and would
+ * otherwise get whatever stale screen the operator happens to be reading while
+ * scrolled up — a window that changes under the AI without it moving.
+ *
+ * The server keeps no terminal state at all, so this buffer IS the screen
+ * model; `getLine` may return undefined for rows the terminal has not
+ * allocated, hence the defensive read.
+ */
+function readTerminalWindow(term: XTerm, query: TerminalQueryPayload): TerminalBufferPayload {
+  const active = term.buffer.active;
+  const length = active.length;
+  const offset = Number.isFinite(query.offset) ? Math.max(0, Math.trunc(query.offset)) : 0;
+  // lines <= 0 means "use this browser's viewport height" (contract §12.7.2).
+  const wanted = Number.isFinite(query.lines) && query.lines > 0 ? Math.trunc(query.lines) : term.rows;
+  const end = Math.max(0, Math.min(length, length - offset));
+  const start = Math.max(0, end - Math.max(1, wanted));
+  const lines: string[] = [];
+  for (let i = start; i < end; i++) {
+    lines.push(active.getLine(i)?.translateToString(true) ?? '');
+  }
+  return { id: query.id, ok: true, cols: term.cols, rows: term.rows, length, lines };
 }
 
 export interface TerminalHandle {
@@ -76,6 +105,11 @@ export default function Terminal({
     const terminal = new XTerm({
       cursorBlink: true,
       convertEol: true,
+      // Explicit and large on purpose (design §12.7.1): every observation the
+      // AI makes — read_terminal AND run_shell's delta — is taken from THIS
+      // buffer, because the server keeps no terminal state. The 1000-line
+      // default drops the head of a long build/log the moment the AI wants it.
+      scrollback: 10000,
       // Canvas renderer cannot resolve CSS variables — use a concrete stack.
       fontFamily: '"SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
       fontSize: 13,
@@ -151,6 +185,28 @@ export default function Terminal({
               onSessionChangeRef.current?.(payload.session_id);
             }
             terminal.write(payload.data);
+          }
+        } else if (value.type === 'terminal_query') {
+          // Server → browser: "hand me a window of your buffer" (§12.7.1). This
+          // branch must NOT touch React state — a query is a read-only round
+          // trip, and re-rendering the card on every AI look would make the
+          // terminal flicker while the model works.
+          const payload = payloadRecord(value.payload);
+          const id = typeof payload.id === 'string' && payload.id !== '' ? payload.id : '';
+          if (id === '') return;
+          const query: TerminalQueryPayload = {
+            id,
+            offset: typeof payload.offset === 'number' ? payload.offset : 0,
+            lines: typeof payload.lines === 'number' ? payload.lines : 0,
+          };
+          try {
+            send(api.terminalEnvelope('terminal_buffer', readTerminalWindow(terminal, query)));
+          } catch {
+            // The terminal can already be disposed if unmount raced this frame.
+            // Answer with a correlated failure: silence would leave the server
+            // waiting out its whole timeout for an answer that cannot come.
+            const failure: TerminalBufferPayload = { id, ok: false, error: 'buffer_unavailable' };
+            send(api.terminalEnvelope('terminal_buffer', failure));
           }
         } else if (value.type === 'terminal_closed') {
           const payload = payloadRecord(value.payload) as TerminalClosedPayload;

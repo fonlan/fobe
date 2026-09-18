@@ -327,11 +327,61 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_logs(ts);
 
+-- AI providers and models (design.md §12.1/§12.5, 2026-09-18).
+-- A model row is GLOBALLY unique: the same model id reachable through several
+-- gateways stays ONE row, and ai_provider_models says where it can be reached.
+-- Trade-off accepted in §12.1: per-provider differences (a gateway that clips
+-- the context) cannot be expressed.
+CREATE TABLE IF NOT EXISTS ai_providers (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL DEFAULT '',
+    protocol          TEXT NOT NULL DEFAULT '',  -- openai-completions|openai-responses|anthropic-messages
+    base_url          TEXT NOT NULL DEFAULT '',  -- ROOT semantics; the protocol adapter appends the path
+    api_key_enc       TEXT NOT NULL DEFAULT '',  -- Cryptor ciphertext (§4.4), never plaintext
+    extra_headers_enc TEXT NOT NULL DEFAULT '',  -- Cryptor ciphertext of a JSON object
+    models_dev_slug   TEXT NOT NULL DEFAULT '',  -- optional link to a models.dev provider
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    created_at        INTEGER NOT NULL DEFAULT 0,
+    updated_at        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS ai_models (
+    id                TEXT PRIMARY KEY,
+    display_name      TEXT NOT NULL DEFAULT '',
+    context_window    INTEGER NOT NULL DEFAULT 0,
+    max_output_tokens INTEGER NOT NULL DEFAULT 0,
+    input_modalities  TEXT NOT NULL DEFAULT '',   -- csv: text,image,audio,video,pdf
+    output_modalities TEXT NOT NULL DEFAULT '',   -- csv
+    reasoning_levels  TEXT NOT NULL DEFAULT '',   -- csv of the unified levels this model exposes (§12.5)
+    reasoning_off_style TEXT NOT NULL DEFAULT '', -- how "off" is spelled on the wire: omit|none|disabled (§12.5)
+    overridden_fields TEXT NOT NULL DEFAULT '',   -- csv of fields the operator edited; never overwritten by a refresh
+    source            TEXT NOT NULL DEFAULT 'manual', -- models_dev|manual
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    created_at        INTEGER NOT NULL DEFAULT 0,
+    updated_at        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS ai_provider_models (
+    provider_id TEXT NOT NULL REFERENCES ai_providers(id) ON DELETE CASCADE,
+    model_id    TEXT NOT NULL REFERENCES ai_models(id) ON DELETE CASCADE,
+    created_at  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (provider_id, model_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_provider_models_model ON ai_provider_models(model_id);
+
 -- AI conversations and confirmation records (design.md §12).
+-- provider_id / model_id / protocol pin the session to one model: reasoning
+-- blocks are protocol-native and cannot be replayed across providers, so
+-- switching the model starts a NEW session (§12.1/§12.5).
+-- ai_messages.blocks holds the protocol-native payload (JSON) that must be
+-- echoed back verbatim in a tool loop; content stays the human-readable text.
 CREATE TABLE IF NOT EXISTS ai_sessions (
     id                   TEXT PRIMARY KEY,
     node_id              TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     terminal_session_id  TEXT NOT NULL DEFAULT '',
+    provider_id          TEXT NOT NULL DEFAULT '',
+    model_id             TEXT NOT NULL DEFAULT '',
+    protocol             TEXT NOT NULL DEFAULT '',
     created_at           INTEGER NOT NULL,
     last_seen            INTEGER NOT NULL
 );
@@ -342,6 +392,7 @@ CREATE TABLE IF NOT EXISTS ai_messages (
     session_id TEXT NOT NULL REFERENCES ai_sessions(id) ON DELETE CASCADE,
     role       TEXT NOT NULL,
     content    TEXT NOT NULL,
+    blocks     TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ai_messages_session ON ai_messages(session_id, id);
@@ -355,6 +406,7 @@ CREATE TABLE IF NOT EXISTS ai_pending_actions (
     reason       TEXT NOT NULL DEFAULT '',
     risk         TEXT NOT NULL DEFAULT '',
     status       TEXT NOT NULL DEFAULT 'pending', -- pending|confirmed|rejected
+    call_id      TEXT NOT NULL DEFAULT '',       -- the model's tool_call id, so the result can be paired with it
     created_at   INTEGER NOT NULL,
     confirmed_at INTEGER,
     command_id   TEXT NOT NULL DEFAULT ''
