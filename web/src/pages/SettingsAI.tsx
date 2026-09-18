@@ -1401,6 +1401,16 @@ function DefaultCard({
 
   const selected = provider?.models.find((m) => m.id === modelID) ?? null;
 
+  // The level list is the SELECTED pair's own set, never the global vocabulary
+  // (§12.5: effective_levels = protocol capability ∩ the model's
+  // reasoning_options) — a level this provider/model cannot take is not a
+  // default anyone can use. `effectiveReasoning` is what the card both shows
+  // and persists: a draft level the current pair does not offer must never be
+  // displayed (React would silently render the first <option> while the state
+  // kept the old value, and the save would write it) nor written back.
+  const levels = selected?.effective_levels ?? [];
+  const effectiveReasoning = levels.includes(reasoning) ? reasoning : '';
+
   const save = async () => {
     if (busy) return;
     if (!providerID || !modelID) {
@@ -1409,7 +1419,7 @@ function DefaultCard({
     }
     setBusy(true);
     try {
-      await api.setAIDefaults(providerID, modelID, reasoning);
+      await api.setAIDefaults(providerID, modelID, effectiveReasoning);
       await onChanged(t('ai_default_saved'));
     } catch (e) {
       onError(apiErrorMessage(e, t));
@@ -1495,24 +1505,30 @@ function DefaultCard({
         </label>
         <label className="field">
           <span>{t('ai_default_reasoning')}</span>
-          <select value={reasoning} onChange={(e) => setReasoning(e.target.value)}>
-            <option value="">{t('ai_reasoning_default')}</option>
-            {REASONING_LEVELS.map((l) => (
-              <option key={l} value={l}>
-                {l}
-              </option>
-            ))}
-          </select>
+          {selected && levels.length === 0 ? (
+            // Never an empty dropdown (same rule as the model card): the honest
+            // statement is that this pair exposes no adjustable level.
+            <span className="hint">{t('ai_model_levels_empty')}</span>
+          ) : (
+            <select
+              value={effectiveReasoning}
+              disabled={!selected}
+              onChange={(e) => setReasoning(e.target.value)}
+            >
+              <option value="">{t('ai_reasoning_default')}</option>
+              {levels.map((l) => (
+                <option key={l} value={l}>
+                  {l}
+                </option>
+              ))}
+            </select>
+          )}
         </label>
       </div>
       {provider && provider.models.length === 0 && <p className="hint">{t('ai_default_no_models')}</p>}
-      {reasoning !== '' && <p className="hint">{t('ai_default_reasoning_hint')}</p>}
-      {selected && (
-        <p className="hint">
-          {selected.effective_levels.length === 0
-            ? t('ai_model_levels_empty')
-            : t('ai_effective_levels', { levels: selected.effective_levels.join(' / ') })}
-        </p>
+      {effectiveReasoning !== '' && <p className="hint">{t('ai_default_reasoning_hint')}</p>}
+      {selected && levels.length > 0 && (
+        <p className="hint">{t('ai_effective_levels', { levels: levels.join(' / ') })}</p>
       )}
 
       <div className="row-end">

@@ -89,6 +89,21 @@ function pairIsDefault(catalog: AICatalog | null, providerId: string, modelId: s
   return !!catalog && catalog.default_provider_id === providerId && catalog.default_model_id === modelId;
 }
 
+/**
+ * The thinking level the picker starts on for one pair: the operator's default
+ * (ai.default_reasoning, §12.1) when THIS model really exposes it, else "" —
+ * the "unset" option. A model that does not publish the stored level must not
+ * start on it: the server refuses a level the pair does not expose
+ * (bad_reasoning_level), so preselecting it would turn the first send into an
+ * error instead of a default.
+ */
+function defaultReasoningFor(catalog: AICatalog | null, providerId: string, modelId: string): string {
+  const stored = catalog?.default_reasoning ?? '';
+  if (!stored) return '';
+  const option = usableModels(catalog).find((o) => o.provider.id === providerId && o.model.id === modelId);
+  return option && option.model.effective_levels.includes(stored) ? stored : '';
+}
+
 // A `/` cannot appear inside an encodeURIComponent() result, so splitting on the
 // first one is unambiguous even when a model id contains a slash (org/model).
 function encodePair(providerId: string, modelId: string): string {
@@ -302,6 +317,11 @@ function AssistantPanel({
 
       setProviderId(chosen?.provider.id ?? '');
       setModelId(chosen?.model.id ?? '');
+      // Start the picker on the configured default instead of leaving it at
+      // "unset": the two mean the same level server-side (§12.5), and showing
+      // "默认(不指定)" while the settings row names a level reads as if the
+      // default were being ignored.
+      setReasoning(defaultReasoningFor(cat, chosen?.provider.id ?? '', chosen?.model.id ?? ''));
       setDefaultUnavailable(!fallback ? false : !pairIsDefault(cat, fallback.provider.id, fallback.model.id));
       if (history) {
         setAiSessionId(history.session_id);
@@ -584,7 +604,10 @@ function AssistantPanel({
     setTurnEnd(null);
     setProviderId(next.providerId);
     setModelId(next.modelId);
-    setReasoning('');
+    // Re-derive rather than clear: the level belongs to the NEW model's own
+    // level set, and the operator's configured default is the right starting
+    // point whenever that model exposes it (§12.1).
+    setReasoning(defaultReasoningFor(catalog, next.providerId, next.modelId));
     setDefaultUnavailable(false);
     setSessionNotice(t('ai_model_switched'));
   };

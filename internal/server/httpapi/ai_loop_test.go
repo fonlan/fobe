@@ -492,3 +492,31 @@ func TestAIChatRejectsUnknownReasoningLevelBeforeStreaming(t *testing.T) {
 		t.Fatalf("upstream called %d times for a refused reasoning level", upstream.Calls())
 	}
 }
+
+// TestAIChatAppliesStoredDefaultReasoning pins the other half of the default
+// trio on the real turn path: a request that carries NO reasoning level (the
+// panel's picker left at "unset") must still reach the model at the level stored
+// in ai.default_reasoning. TestAIDefaultReasoningLevel unit-checks the fallback
+// itself; this one proves it is WIRED into the turn, because a fallback that no
+// caller consults looks identical to no fallback at all from the panel's side.
+func TestAIChatAppliesStoredDefaultReasoning(t *testing.T) {
+	server, api := newTestServer(t)
+	defer server.Close()
+	nodeID := createAINode(t, api, "ai-default-level")
+	cookie := loginCookie(t, server.URL)
+	upstream := newMockAIUpstream(t, openAIStreamText(t, "answered"))
+	configureAI(t, api, upstream.URL(), "k", "m")
+	// configureAI declares off/low/medium/high for the model, so "high" is a
+	// level this pair really exposes.
+	if err := api.Store.SetSetting("ai.default_reasoning", "high", false); err != nil {
+		t.Fatal(err)
+	}
+
+	result := postAIChat(t, server.URL, cookie, aiChatRequest{NodeID: nodeID, Message: "hello"})
+	if result.Status != http.StatusOK {
+		t.Fatalf("status = %d (%s)", result.Status, result.Raw)
+	}
+	if got := upstream.Request(t, 0).ReasoningEffort; got != "high" {
+		t.Fatalf("upstream reasoning_effort = %q, want the stored default high", got)
+	}
+}

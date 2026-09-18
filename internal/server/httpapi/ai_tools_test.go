@@ -28,10 +28,15 @@ import (
 // result with the assistant's own call id is exactly what the loop tests must
 // observe (§12.6: resolveAIConfirmation reuses action.CallID).
 type aiUpstreamRequest struct {
-	Model    string              `json:"model"`
-	Stream   bool                `json:"stream"`
-	Messages []aiUpstreamMessage `json:"messages"`
-	Tools    []aiOpenAIToolSpec  `json:"tools"`
+	Model string `json:"model"`
+	// ReasoningEffort is the §12.5 thinking request as the wire carries it. It
+	// has to be recorded here because it is the only place a test can see the
+	// level the MODEL was handed, as opposed to the one the panel sent or the
+	// one a settings row stores.
+	ReasoningEffort string              `json:"reasoning_effort"`
+	Stream          bool                `json:"stream"`
+	Messages        []aiUpstreamMessage `json:"messages"`
+	Tools           []aiOpenAIToolSpec  `json:"tools"`
 }
 
 type aiUpstreamMessage struct {
