@@ -1020,7 +1020,28 @@ section.card { margin-bottom: 0; }
   padding: 8px 10px;
   background: var(--panel-2);
 }
-.ai-message.ai-user { border-color: var(--accent-weak); }
+/* One bubble per turn, two different surfaces (2026-09-18f): the operator's own
+   message wears the accent tint the panel already uses for "this is about you"
+   (--accent-weak — the same idiom as the offline card's --red-weak) plus an
+   inline accent bar, because a 10% tint alone is not what separates the two on a
+   low-contrast display. The assistant keeps the neutral raised surface, which is
+   also what its nested tool cards sit on. */
+.ai-message.ai-user {
+  background: var(--accent-weak);
+  border-color: var(--accent-weak);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+/* The assistant bubble stacks the parts of one turn (thinking, answer, tool
+   cards, results). gap, not margins: the children are Markdown blocks whose own
+   margins would otherwise collapse against the bubble edge. */
+.ai-message.ai-assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* The gap between a question and its answer is deliberately smaller than the
+   gap between turns, so the pair reads as one exchange. */
+.ai-turn { display: flex; flex-direction: column; gap: 6px; }
 .ai-role {
   display: block;
   font-size: 11px;
@@ -1030,6 +1051,71 @@ section.card { margin-bottom: 0; }
   margin-bottom: 4px;
 }
 .ai-text { margin: 0; white-space: pre-wrap; word-break: break-word; }
+/* .ai-role is a flex item inside an assistant bubble, where the row gap already
+   spaces it — its own margin would double that up. */
+.ai-message.ai-assistant > .ai-role { margin-bottom: 0; }
+.ai-working { margin: 0; }
+
+/* Markdown inside an assistant bubble (2026-09-18f). Content typography only:
+   the bubble is the card, so nothing here draws another one. Margins live on the
+   elements rather than on .ai-md, because a code block or a table has to be able
+   to run to the bubble's full width. */
+.ai-md { overflow-wrap: anywhere; }
+.ai-md > :first-child { margin-top: 0; }
+.ai-md > :last-child { margin-bottom: 0; }
+.ai-md p { margin: 8px 0; }
+.ai-md h1, .ai-md h2, .ai-md h3, .ai-md h4 { margin: 12px 0 6px; font-size: 14px; line-height: 1.35; }
+.ai-md h1 { font-size: 16px; }
+.ai-md h2 { font-size: 15px; }
+.ai-md ul, .ai-md ol { margin: 8px 0; padding-left: 22px; }
+.ai-md li { margin: 3px 0; }
+/* A loose list item keeps its text in a <p>; that paragraph must not add the
+   block margin back inside the item. */
+.ai-md li > p { margin: 0; }
+.ai-md code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+/* A long log or command scrolls inside the bubble instead of stretching the
+   sidebar; the cap is what keeps one pasted 2000-line log from swallowing the
+   transcript. */
+.ai-md pre {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: auto;
+  max-height: 320px;
+}
+.ai-md pre code { padding: 0; border: 0; background: none; font-size: 12.5px; line-height: 1.5; }
+.ai-md blockquote {
+  margin: 8px 0;
+  padding: 2px 0 2px 10px;
+  border-left: 3px solid var(--border);
+  color: var(--text-dim);
+}
+/* A wide table scrolls inside the bubble rather than widening the sidebar (the
+   same call .table-wrap makes elsewhere); block layout is what makes overflow
+   apply to a table at all. */
+.ai-md table {
+  display: block;
+  overflow-x: auto;
+  width: 100%;
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.ai-md th, .ai-md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.ai-md th { background: var(--panel); font-weight: 600; }
+.ai-md hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
+.ai-md a { word-break: break-all; }
+/* A Markdown image never loads (design §12.6 UI); this is what the tag becomes. */
+.ai-md-image { color: var(--text-dim); font-size: 12.5px; }
 
 /* --- AI 侧栏的流式对话 (design §12.5/§12.6) -------------------------------- */
 
@@ -1080,7 +1166,9 @@ section.card { margin-bottom: 0; }
   padding: 8px 10px;
   border: 1px dashed var(--border);
   border-radius: 8px;
-  background: var(--panel-2);
+  /* --panel, not --panel-2: this card now sits INSIDE the assistant bubble,
+     whose surface is --panel-2 (2026-09-18f). */
+  background: var(--panel);
 }
 .ai-tool-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .ai-tool-name { font-size: 12.5px; overflow-wrap: anywhere; }
@@ -1096,7 +1184,8 @@ section.card { margin-bottom: 0; }
   padding: 10px 12px;
   border: 1px solid var(--amber);
   border-radius: 8px;
-  background: var(--panel-2);
+  /* Same reason as .ai-tool-card: it lives inside the assistant bubble. */
+  background: var(--panel);
 }
 .ai-confirm .hint { margin: 0; }
 

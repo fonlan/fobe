@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useMemo,
   useRef,
@@ -13,6 +14,8 @@ import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
 import Terminal from '../components/Terminal';
+import { Markdown } from '../components/Markdown';
+import { groupTurns, historyToEntries, type ChatEntry } from '../components/aiTranscript';
 import type {
   AICatalog,
   AINeedsConfirmationEvent,
@@ -22,33 +25,6 @@ import type {
   AIToolResultEvent,
   AITurnEndReason,
 } from '../types';
-
-/**
- * The assistant transcript, as the panel keeps it.
- *
- * A flat list rather than nested turns: the loop (§12.6) can interleave text →
- * tool → text → tool inside ONE user message, and a nested model would have to
- * invent a grouping the server never sends (a tool result carries no
- * "which assistant turn asked for it" field).
- */
-type ChatEntry =
-  | { kind: 'user'; text: string }
-  | { kind: 'assistant'; text: string; thinking: string }
-  | { kind: 'tool'; name: string; status: string; command: string; exitCode: number | null; reason: string }
-  | { kind: 'tool_log'; text: string }
-  // The reason a turn stopped, replayed from the transcript (§12.6). Without it
-  // a reloaded conversation shows a half answer with no explanation, which reads
-  // as a broken model rather than "the per-turn budget cut it short".
-  | { kind: 'turn_end'; reason: string; changes: number }
-  | {
-      kind: 'confirm';
-      name: string;
-      actionId: string;
-      command: string;
-      reason: string;
-      risk: string;
-      answered?: 'approved' | 'rejected';
-    };
 
 /** One selectable (provider, model) pair — the unit a session is pinned to. */
 interface ModelOption {
@@ -123,38 +99,6 @@ function decodePair(value: string): { providerId: string; modelId: string } {
   const slash = value.indexOf('/');
   if (slash < 0) return { providerId: '', modelId: '' };
   return { providerId: decodeURIComponent(value.slice(0, slash)), modelId: decodeURIComponent(value.slice(slash + 1)) };
-}
-
-/**
- * Turn a stored transcript into bubbles. Assistant rows with neither text nor
- * thinking are dropped: those are the pure tool-call turns the envelope stores,
- * and an empty bubble would look like a rendering bug.
- */
-function historyToEntries(history: AISessionHistory): ChatEntry[] {
-  const out: ChatEntry[] = [];
-  for (const message of history.messages ?? []) {
-    if (message.role === 'user') {
-      out.push({ kind: 'user', text: message.content });
-    } else if (message.role === 'assistant') {
-      const thinking = message.thinking ?? '';
-      if (message.content === '' && thinking === '') continue;
-      out.push({ kind: 'assistant', text: message.content, thinking });
-    } else if (message.role === 'turn_end') {
-      const reason = message.turn_reason ?? '';
-      // A natural completion needs no banner — the answer itself is the
-      // completion, and replaying "turn completed" under it is pure noise.
-      // Abnormal endings (budget / timeout / upstream error…) still replay so
-      // a reloaded conversation explains why the answer looks cut short.
-      if (reason === 'completed') continue;
-      out.push({ kind: 'turn_end', reason, changes: message.changes ?? 0 });
-    } else if (message.role === 'tool') {
-      // The stored shape keeps only the model-facing text (the envelope's
-      // tool_results carry call ids, not names/commands), so this renders as a
-      // plain result block rather than pretending to be a tool card.
-      out.push({ kind: 'tool_log', text: message.content });
-    }
-  }
-  return out;
 }
 
 function AssistantPanel({
@@ -669,6 +613,11 @@ function AssistantPanel({
     setSessionNotice(null);
   };
 
+  // Bubbles, not entries: one assistant bubble per turn (§12.6 UI). The
+  // regrouping is a pure function of the flat list, so the streaming path keeps
+  // appending to the same entries and the open bubble simply grows.
+  const turns = useMemo(() => groupTurns(entries), [entries]);
+
   return (
     <section className="ai-panel card">
       <div className="terminal-head">
@@ -708,109 +657,134 @@ function AssistantPanel({
         {entries.length === 0 && (
           <p className="hint">{historyLoading ? t('ai_history_loading') : t('ai_panel_empty')}</p>
         )}
-        {entries.map((entry, index) => {
-          if (entry.kind === 'user') {
-            return (
-              <div key={index} className="ai-message ai-user">
-                <span className="ai-role">{t('ai_role_user')}</span>
-                <p className="ai-text">{entry.text}</p>
-              </div>
-            );
-          }
-          if (entry.kind === 'assistant') {
-            return (
-              <div key={index} className="ai-message ai-assistant">
-                <span className="ai-role">{t('ai_role_assistant')}</span>
-                {entry.thinking !== '' && (
-                  // Collapsed by default (§12.5). <details> keeps its open state
-                  // across the re-renders the deltas cause, so expanding it while
-                  // the model is still thinking works.
-                  <details className="ai-thinking">
-                    <summary>{t('ai_thinking')}</summary>
-                    <pre className="ai-thinking-body">{entry.thinking}</pre>
-                  </details>
-                )}
-                {/* Omitted while only reasoning is streaming, so a thinking-first
-                    turn does not show a blank paragraph above the text. */}
-                {entry.text !== '' && <p className="ai-text">{entry.text}</p>}
-              </div>
-            );
-          }
-          if (entry.kind === 'tool') {
-            return (
-              <div key={index} className="ai-tool-card">
-                <div className="ai-tool-head">
-                  <span className="mono ai-tool-name">{entry.name || t('unknown')}</span>
-                  {entry.status && <span className={`chip ${toolStatusClass(entry.status)}`}>{toolStatusText(entry.status)}</span>}
-                </div>
-                {entry.command !== '' && <pre className="code-block small">{entry.command}</pre>}
-                {entry.command !== '' && (
-                  <span className="hint">
-                    {typeof entry.exitCode === 'number' ? t('ai_exit_code', { code: entry.exitCode }) : t('ai_exit_unknown')}
-                  </span>
-                )}
-                {entry.reason !== '' && <span className="hint">{t('ai_cmd_reason')}: {entry.reason}</span>}
-              </div>
-            );
-          }
-          if (entry.kind === 'turn_end') {
-            return (
-              <div key={index} className="ai-turn-end">
-                <span className="hint">{t('ai_turn_end_label')}</span>
-                <span className={turnReasonClass(entry.reason as AITurnEndReason)}>
-                  {turnReasonText(entry.reason as AITurnEndReason)}
-                </span>
-                {entry.changes > 0 && <span className="hint">{t('ai_turn_changes', { n: entry.changes })}</span>}
-              </div>
-            );
-          }
-          if (entry.kind === 'tool_log') {
-            return (
-              <div key={index} className="ai-message ai-tool-history">
-                <span className="ai-role">{t('ai_tool_result')}</span>
-                <pre className="code-block small">{entry.text}</pre>
-              </div>
-            );
-          }
+        {turns.map((turn, turnIndex) => {
+          // The live turn is the last one, and the only bubble that may have to
+          // exist before the model has said anything: a message that was just
+          // sent shows "thinking" inside the assistant bubble it is about to
+          // fill, not as a stray hint underneath it.
+          const streaming = busy && turnIndex === turns.length - 1;
+          // One bubble per turn (§12.6): every step the model took between this
+          // message and the next one shares it, so a read → run → explain turn
+          // reads as one answer instead of three.
           return (
-            <div key={index} className="ai-confirm">
-              <div className="ai-tool-head">
-                <strong>{t('ai_confirm_title')}</strong>
-                {entry.risk !== '' && <span className="chip status-failed">{entry.risk}</span>}
-              </div>
-              {entry.name !== '' && <span className="hint mono">{entry.name}</span>}
-              {entry.reason !== '' && <p className="hint">{t('ai_cmd_reason')}: {entry.reason}</p>}
-              {/* The full command, never truncated: judging it is the operator's
-                  only job at this point (§12.3). */}
-              {entry.command !== '' && <pre className="code-block small">{entry.command}</pre>}
-              {entry.answered ? (
-                <span className={`chip ${entry.answered === 'approved' ? 'status-ok' : ''}`}>
-                  {entry.answered === 'approved' ? t('ai_confirmed') : t('ai_rejected')}
-                </span>
-              ) : (
-                <div className="row-wrap">
-                  <button
-                    type="button"
-                    className="btn primary small"
-                    disabled={busy}
-                    onClick={() => void answerConfirmation(entry, true)}
-                  >
-                    {t('ai_confirm')}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn small"
-                    disabled={busy}
-                    onClick={() => void answerConfirmation(entry, false)}
-                  >
-                    {t('ai_confirm_reject')}
-                  </button>
+            <div className="ai-turn" key={turnIndex}>
+              {turn.user && (
+                <div className="ai-message ai-user">
+                  <span className="ai-role">{t('ai_role_user')}</span>
+                  {/* Plain text, not Markdown: the operator typed a sentence, and
+                      parsing it as Markdown would quietly reformat whatever
+                      punctuation it happens to contain. */}
+                  <p className="ai-text">{turn.user.text}</p>
+                </div>
+              )}
+              {(turn.body.length > 0 || streaming) && (
+                <div className="ai-message ai-assistant">
+                  <span className="ai-role">{t('ai_role_assistant')}</span>
+                  {turn.body.map((entry, index) => {
+                    if (entry.kind === 'assistant') {
+                      return (
+                        <Fragment key={index}>
+                          {entry.thinking !== '' && (
+                            // Collapsed by default (§12.5). <details> keeps its
+                            // open state across the re-renders the deltas cause,
+                            // so expanding it while the model is still thinking
+                            // works.
+                            <details className="ai-thinking">
+                              <summary>{t('ai_thinking')}</summary>
+                              <pre className="ai-thinking-body">{entry.thinking}</pre>
+                            </details>
+                          )}
+                          {/* Omitted while only reasoning is streaming, so a
+                              thinking-first turn does not show a blank paragraph
+                              above the text. Markdown is re-parsed on every
+                              delta, so the answer reads formatted as it arrives. */}
+                          {entry.text !== '' && <Markdown text={entry.text} />}
+                        </Fragment>
+                      );
+                    }
+                    if (entry.kind === 'tool') {
+                      return (
+                        <div key={index} className="ai-tool-card">
+                          <div className="ai-tool-head">
+                            <span className="mono ai-tool-name">{entry.name || t('unknown')}</span>
+                            {entry.status && <span className={`chip ${toolStatusClass(entry.status)}`}>{toolStatusText(entry.status)}</span>}
+                          </div>
+                          {entry.command !== '' && <pre className="code-block small">{entry.command}</pre>}
+                          {entry.command !== '' && (
+                            <span className="hint">
+                              {typeof entry.exitCode === 'number' ? t('ai_exit_code', { code: entry.exitCode }) : t('ai_exit_unknown')}
+                            </span>
+                          )}
+                          {entry.reason !== '' && <span className="hint">{t('ai_cmd_reason')}: {entry.reason}</span>}
+                        </div>
+                      );
+                    }
+                    if (entry.kind === 'turn_end') {
+                      return (
+                        <div key={index} className="ai-turn-end">
+                          <span className="hint">{t('ai_turn_end_label')}</span>
+                          <span className={turnReasonClass(entry.reason as AITurnEndReason)}>
+                            {turnReasonText(entry.reason as AITurnEndReason)}
+                          </span>
+                          {entry.changes > 0 && <span className="hint">{t('ai_turn_changes', { n: entry.changes })}</span>}
+                        </div>
+                      );
+                    }
+                    if (entry.kind === 'tool_log') {
+                      // No .ai-message wrapper: this now sits INSIDE the assistant
+                      // bubble, and a card drawn inside a card reads as two
+                      // different things.
+                      return (
+                        <div key={index} className="ai-tool-history">
+                          <span className="ai-role">{t('ai_tool_result')}</span>
+                          <pre className="code-block small">{entry.text}</pre>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div key={index} className="ai-confirm">
+                        <div className="ai-tool-head">
+                          <strong>{t('ai_confirm_title')}</strong>
+                          {entry.risk !== '' && <span className="chip status-failed">{entry.risk}</span>}
+                        </div>
+                        {entry.name !== '' && <span className="hint mono">{entry.name}</span>}
+                        {entry.reason !== '' && <p className="hint">{t('ai_cmd_reason')}: {entry.reason}</p>}
+                        {/* The full command, never truncated: judging it is the
+                            operator's only job at this point (§12.3). */}
+                        {entry.command !== '' && <pre className="code-block small">{entry.command}</pre>}
+                        {entry.answered ? (
+                          <span className={`chip ${entry.answered === 'approved' ? 'status-ok' : ''}`}>
+                            {entry.answered === 'approved' ? t('ai_confirmed') : t('ai_rejected')}
+                          </span>
+                        ) : (
+                          <div className="row-wrap">
+                            <button
+                              type="button"
+                              className="btn primary small"
+                              disabled={busy}
+                              onClick={() => void answerConfirmation(entry, true)}
+                            >
+                              {t('ai_confirm')}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn small"
+                              disabled={busy}
+                              onClick={() => void answerConfirmation(entry, false)}
+                            >
+                              {t('ai_confirm_reject')}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {streaming && <p className="hint ai-working">{t('ai_working')}</p>}
                 </div>
               )}
             </div>
           );
         })}
-        {busy && <p className="hint">{t('ai_working')}</p>}
       </div>
 
       {/* Only abnormal endings get a banner (§12.6): a turn cut off by the
