@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -549,4 +552,160 @@ func TestBackupJobProducesOpenableSnapshot(t *testing.T) {
 		t.Fatalf("snapshot is not an openable database: %v", err)
 	}
 	snap.Close()
+}
+
+// --- audit trail (§4.4) ---
+
+// auditByAction returns the audit rows for one action, newest first.
+func auditByAction(t *testing.T, st *store.Store, action string) []store.AuditEntry {
+	t.Helper()
+	rows, err := st.ListAudit(200)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	out := []store.AuditEntry{}
+	for _, e := range rows {
+		if e.Action == action {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// A probe that goes silent past the heartbeat window is audited once: the row
+// flips to offline, so the next pass no longer sees an online node.
+func TestDetectOfflineAuditsTransitionOnce(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	// online, but last heard from 200s ago
+	if _, _, err := st.MarkNodeOnline("n1", "1.0.0", time.Now().Unix()-200); err != nil {
+		t.Fatalf("mark online: %v", err)
+	}
+	s := New(st, testLogger(), "", 7)
+
+	s.detectOffline()
+	s.detectOffline()
+
+	got := auditByAction(t, st, "node_offline")
+	if len(got) != 1 {
+		t.Fatalf("node_offline audit rows = %d, want 1 (%+v)", len(got), got)
+	}
+	if got[0].Actor != "system" || got[0].NodeID != "n1" || !strings.Contains(got[0].Command, "silent_for=") {
+		t.Fatalf("node_offline entry = %+v", got[0])
+	}
+}
+
+// Every channel that takes an alert gets its own notify_sent row, tagged with
+// the channel, alert kind and event type — payloads and credentials stay out.
+func TestDeliverAlertsAuditsSentChannels(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	tg := &fakeNotifier{name: "telegram", configured: true}
+	fs := &fakeNotifier{name: "feishu", configured: true}
+	s := New(st, testLogger(), "", 7, tg, fs)
+	if _, _, err := st.CreateAlert("node_offline", "n1", "{}", 3600); err != nil {
+		t.Fatal(err)
+	}
+	s.deliverAlerts()
+
+	got := auditByAction(t, st, "notify_sent")
+	if len(got) != 2 {
+		t.Fatalf("notify_sent rows = %d, want 2 (%+v)", len(got), got)
+	}
+	joined := got[0].Command + " " + got[1].Command
+	for _, want := range []string{"channel=telegram", "channel=feishu", "kind=node_offline", "event=alert"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("audit detail %q missing %q", joined, want)
+		}
+	}
+	for _, e := range got {
+		if e.Actor != "system" || e.NodeID != "n1" {
+			t.Fatalf("notify_sent entry = %+v", e)
+		}
+	}
+}
+
+// A recovered alert delivered before its first attempt goes out as the recovery
+// event, and the audit row says so.
+func TestDeliverAlertsAuditsRecoveryEvent(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	fake := &fakeNotifier{name: "telegram", configured: true}
+	s := New(st, testLogger(), "", 7, fake)
+	if _, _, err := st.CreateAlert("node_offline", "n1", "{}", 3600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecoverAlert("node_offline", "n1"); err != nil {
+		t.Fatal(err)
+	}
+	s.deliverAlerts()
+
+	got := auditByAction(t, st, "notify_sent")
+	if len(got) != 1 || !strings.Contains(got[0].Command, "event=recovery") {
+		t.Fatalf("recovery delivery audit = %+v", got)
+	}
+}
+
+// A failing channel is retried every pass; the trail records the first failure
+// only, and never the endpoint (the Telegram token lives in its URL).
+func TestDeliverAlertsAuditsFailureOnceWithoutCredentials(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	failing := &fakeNotifier{
+		name: "telegram", configured: true,
+		err: fmt.Errorf("telegram sendMessage: %w", &url.Error{
+			Op:  "Post",
+			URL: "https://api.telegram.org/bot123456:AAsecret/sendMessage",
+			Err: errors.New("dial tcp: connection refused"),
+		}),
+	}
+	// a healthy channel rides along: a partial failure replays the whole alert,
+	// so it must not gain a notify_sent row per retry either
+	healthy := &fakeNotifier{name: "feishu", configured: true}
+	s := New(st, testLogger(), "", 7, failing, healthy)
+	if _, _, err := st.CreateAlert("node_offline", "n1", "{}", 3600); err != nil {
+		t.Fatal(err)
+	}
+
+	s.deliverAlerts()
+	s.deliverAlerts()
+	s.deliverAlerts()
+
+	if sent := auditByAction(t, st, "notify_sent"); len(sent) != 1 {
+		t.Fatalf("notify_sent rows = %d, want 1 (replayed delivery must not re-audit)", len(sent))
+	}
+	if len(healthy.events) != 3 {
+		t.Fatalf("healthy channel deliveries = %d, want 3 (retry behaviour unchanged)", len(healthy.events))
+	}
+
+	got := auditByAction(t, st, "notify_failed")
+	if len(got) != 1 {
+		t.Fatalf("notify_failed rows = %d, want 1 (%+v)", len(got), got)
+	}
+	if strings.Contains(got[0].Command, "AAsecret") || strings.Contains(got[0].Command, "api.telegram.org") {
+		t.Fatalf("credential endpoint leaked into the audit trail: %s", got[0].Command)
+	}
+	if !strings.Contains(got[0].Command, "connection refused") {
+		t.Fatalf("notify_failed lost the cause: %s", got[0].Command)
+	}
+}
+
+// An alert no channel wants is intentionally silent, so it leaves no notify
+// audit row — recording a non-delivery would read as one.
+func TestDeliverAlertsSwitchedOffIsNotAudited(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	off := &fakeNotifier{name: "telegram", configured: true, accepts: func(notify.Event) bool { return false }}
+	s := New(st, testLogger(), "", 7, off)
+	if _, _, err := st.CreateAlert("traffic_warn", "n1", "{}", 3600); err != nil {
+		t.Fatal(err)
+	}
+	s.deliverAlerts()
+
+	if got := auditByAction(t, st, "notify_sent"); len(got) != 0 {
+		t.Fatalf("silenced alert produced audit rows: %+v", got)
+	}
+	if got := auditByAction(t, st, "notify_failed"); len(got) != 0 {
+		t.Fatalf("silenced alert produced failure rows: %+v", got)
+	}
 }

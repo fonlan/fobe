@@ -6,6 +6,7 @@ package scheduler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"strconv"
@@ -23,6 +24,14 @@ type Scheduler struct {
 	backupDir  string
 	retainDays int64
 	notifiers  []notify.Notifier
+
+	// auditedDelivery memoizes "<action>|<channel>" per alert. It is needed
+	// twice over: a failing channel keeps its alert queued and retried every
+	// minute (§15), and a partial failure re-runs the *whole* alert, so the
+	// healthy channels are called again too. Without the memo one unreachable
+	// webhook would append a row per minute per channel for as long as the
+	// outage lasts. Only the delivery loop touches it (one goroutine per job).
+	auditedDelivery map[int64]map[string]bool
 }
 
 // New builds the scheduler. notifiers are the §15 delivery channels; passing
@@ -97,6 +106,11 @@ func (s *Scheduler) detectOffline() {
 		if now-lastSeen > 90 {
 			if err := s.store.MarkNodeOffline(n.ID); err != nil {
 				s.log.Warn("mark offline", "node", n.ID, "err", err)
+			} else {
+				// §4.4: both edges of a probe's status are audited. This loop
+				// only ever sees rows still marked online, so the entry is a
+				// transition rather than a repeated verdict.
+				s.auditSystem("node_offline", n.ID, fmt.Sprintf("silent_for=%ds", now-lastSeen))
 			}
 			_, created, err := s.store.CreateAlert("node_offline", n.ID, "{}", 3600)
 			if err == nil && created {
@@ -148,7 +162,12 @@ func (s *Scheduler) deliverAlerts() {
 		if a.RecoveredAt != nil {
 			ev.Event = notify.EventRecovery
 		}
-		if s.deliverOne(targets, ev) {
+		out := s.deliverOne(targets, ev)
+		s.auditDelivery(a.ID, ev, out)
+		if len(out.failed) == 0 {
+			// Done either way (delivered, or no channel wanted it): the alert
+			// leaves the queue, so its delivery memo can go too.
+			delete(s.auditedDelivery, a.ID)
 			if err := s.store.MarkAlertDelivered(a.ID); err != nil {
 				s.log.Warn("mark alert delivered", "id", a.ID, "err", err)
 			}
@@ -156,14 +175,78 @@ func (s *Scheduler) deliverAlerts() {
 	}
 }
 
-// deliverOne sends ev to every target that accepts it. true means the alert
-// needs no further attempt: either at least one channel took it and none of
-// the accepting ones failed, or no channel wanted it at all (§15 event
-// switches). The second case matters: leaving a switched-off alert in the
+// deliveryOutcome is what one pass did for one alert: the channels that took it
+// and the ones that failed, with the error already sanitized for the audit row.
+type deliveryOutcome struct {
+	sent   []string
+	failed []string
+	errs   map[string]string
+}
+
+// auditDelivery writes the §4.4 trail for one alert's delivery attempt: one row
+// per channel that took it, and one per channel that failed. Each (alert,
+// channel, outcome) is recorded once — see auditedDelivery for why the same
+// attempt can be replayed. Command text carries the channel, kind and event type
+// plus the sanitized error; never a payload or a credential.
+func (s *Scheduler) auditDelivery(alertID int64, ev notify.Event, out deliveryOutcome) {
+	if len(out.sent) == 0 && len(out.failed) == 0 {
+		return
+	}
+	if s.auditedDelivery == nil {
+		s.auditedDelivery = map[int64]map[string]bool{}
+	}
+	seen := s.auditedDelivery[alertID]
+	if seen == nil {
+		seen = map[string]bool{}
+		s.auditedDelivery[alertID] = seen
+	}
+	for _, ch := range out.sent {
+		if seen["notify_sent|"+ch] {
+			continue
+		}
+		seen["notify_sent|"+ch] = true
+		s.auditSystem("notify_sent", ev.NodeID, deliveryDetail(ch, ev, ""))
+	}
+	for _, ch := range out.failed {
+		if seen["notify_failed|"+ch] {
+			continue
+		}
+		seen["notify_failed|"+ch] = true
+		s.auditSystem("notify_failed", ev.NodeID, deliveryDetail(ch, ev, out.errs[ch]))
+	}
+}
+
+const auditDetailMax = 200
+
+func deliveryDetail(channel string, ev notify.Event, errText string) string {
+	detail := fmt.Sprintf("channel=%s kind=%s event=%s", channel, ev.Kind, ev.Event)
+	if errText = strings.TrimSpace(errText); errText != "" {
+		if len(errText) > auditDetailMax {
+			errText = errText[:auditDetailMax] + "…"
+		}
+		detail += " error=" + errText
+	}
+	return detail
+}
+
+// auditSystem appends a system-actor entry to the §4.4 audit trail. A failure
+// only logs: telemetry must never stop the loop that raises it.
+func (s *Scheduler) auditSystem(action, nodeID, command string) {
+	if err := s.store.InsertAudit(&store.AuditEntry{
+		Actor: "system", NodeID: nodeID, Action: action, Command: command,
+	}); err != nil {
+		s.log.Warn("insert audit", "action", action, "node", nodeID, "err", err)
+	}
+}
+
+// deliverOne sends ev to every target that accepts it. An empty failed list
+// means the alert needs no further attempt: either at least one channel took it
+// and none of the accepting ones failed, or no channel wanted it at all (§15
+// event switches). The second case matters: leaving a switched-off alert in the
 // queue would replay the whole silenced period the moment the switch goes back
 // on, which is never what "don't notify me about traffic" means.
-func (s *Scheduler) deliverOne(targets []notify.Notifier, ev notify.Event) bool {
-	failed := 0
+func (s *Scheduler) deliverOne(targets []notify.Notifier, ev notify.Event) deliveryOutcome {
+	var out deliveryOutcome
 	for _, n := range targets {
 		if !n.Accepts(ev) {
 			continue // channel or event type switched off: intentional silence
@@ -171,15 +254,23 @@ func (s *Scheduler) deliverOne(targets []notify.Notifier, ev notify.Event) bool 
 		err := n.Deliver(ev)
 		switch {
 		case err == nil:
+			out.sent = append(out.sent, n.Name())
 		case errors.Is(err, notify.ErrNotConfigured):
 			// channel lost its settings mid-pass; ignore
 		default:
-			failed++
+			if out.errs == nil {
+				out.errs = map[string]string{}
+			}
+			// notify.SafeError: the delivery error embeds the endpoint URL,
+			// which is where these channels keep their credential.
+			safe := notify.SafeError(err)
+			out.failed = append(out.failed, n.Name())
+			out.errs[n.Name()] = safe
 			s.log.Warn("deliver alert", "channel", n.Name(), "kind", ev.Kind,
-				"node", ev.NodeID, "event", ev.Event, "err", err)
+				"node", ev.NodeID, "event", ev.Event, "err", safe)
 		}
 	}
-	return failed == 0
+	return out
 }
 
 func (s *Scheduler) nodeNames() map[string]string {

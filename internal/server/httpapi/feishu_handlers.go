@@ -83,7 +83,11 @@ func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "code": "notify_not_configured"})
 			return
 		}
-		detail := err.Error()
+		// notify.SafeError: delivery errors embed the endpoint URL, which is
+		// where the channel keeps its credential (the Telegram bot token is a
+		// path segment, the Feishu webhook carries a token in the query). This
+		// detail goes back to the browser and into the log, so it is scrubbed.
+		detail := notify.SafeError(err)
 		s.Log.Warn("notification test send failed", "channel", req.Channel, "err", detail)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "code": "notify_test_failed", "detail": detail})
 		return

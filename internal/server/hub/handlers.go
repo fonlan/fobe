@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -19,8 +20,13 @@ import (
 // onHello marks the node online and refreshes its static facts (§7).
 func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 	now := protocol.Now()
-	if err := h.store.TouchNode(c.nodeID, hello.Version, now); err != nil {
-		h.log.Warn("touch node", "node", c.nodeID, "err", err)
+	// §4.4: the up-edge of a probe is audited; a reconnect inside the 90s
+	// heartbeat window never left "online" and must not append a row.
+	wasOnline, silentFor, err := h.store.MarkNodeOnline(c.nodeID, hello.Version, now)
+	if err != nil {
+		h.log.Warn("mark node online", "node", c.nodeID, "err", err)
+	} else if !wasOnline {
+		h.auditSystem("node_online", c.nodeID, nodeOnlineDetail(hello.Version, silentFor))
 	}
 	if err := h.store.UpdateNodeInfo(c.nodeID, hello.OS, hello.Arch, hello.Kernel,
 		hello.DistroID, hello.DistroVersion,
@@ -44,6 +50,29 @@ func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 	h.replaceInterfaces(c.nodeID, hello.Interfaces)
 	_ = h.store.RecoverAlert("node_offline", c.nodeID)
 	h.log.Debug("node hello", "node", c.nodeID, "version", hello.Version)
+}
+
+// auditSystem appends a system-actor entry to the §4.4 audit trail. A failure
+// only logs: telemetry must never break the frame path that produced it.
+func (h *Hub) auditSystem(action, nodeID, command string) {
+	if err := h.store.InsertAudit(&store.AuditEntry{
+		Actor: "system", NodeID: nodeID, Action: action, Command: command,
+	}); err != nil {
+		h.log.Warn("insert audit", "action", action, "node", nodeID, "err", err)
+	}
+}
+
+// nodeOnlineDetail renders the audit detail of an up-edge: the version the probe
+// just reported, plus how long it had been silent (0 on a first-ever hello).
+func nodeOnlineDetail(version string, silentFor int64) string {
+	parts := make([]string, 0, 2)
+	if version != "" {
+		parts = append(parts, "agent_version="+version)
+	}
+	if silentFor > 0 {
+		parts = append(parts, fmt.Sprintf("silent_for=%ds", silentFor))
+	}
+	return strings.Join(parts, " ")
 }
 
 func agentTZ(tz string) string {

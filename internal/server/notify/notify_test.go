@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -233,5 +235,30 @@ func TestTelegramServerError(t *testing.T) {
 	tg.apiBase = srv.URL
 	if err := tg.Deliver(Event{Kind: "k", NodeID: "n"}); err == nil {
 		t.Fatal("expected error on 400")
+	}
+}
+
+// Delivery errors embed the endpoint URL, and that URL is where these channels
+// keep their credential (the Telegram bot token is a path segment). Anything
+// rendering such an error into a log line or an audit row must go through
+// SafeError first, or a live token lands in a table the panel serves over the
+// API (§4.4 invariant: credentials never reach logs or audit rows).
+func TestSafeErrorScrubsEndpointCredentials(t *testing.T) {
+	wrapped := fmt.Errorf("telegram sendMessage: %w", &url.Error{
+		Op:  "Post",
+		URL: "https://api.telegram.org/bot123456:AAHsecretTOKEN/sendMessage",
+		Err: errors.New("dial tcp: connection refused"),
+	})
+	got := SafeError(wrapped)
+	for _, leak := range []string{"123456:AAHsecretTOKEN", "api.telegram.org"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("SafeError leaked %q: %s", leak, got)
+		}
+	}
+	if !strings.Contains(got, "connection refused") {
+		t.Fatalf("SafeError dropped the cause: %s", got)
+	}
+	if got := SafeError(nil); got != "" {
+		t.Fatalf("SafeError(nil) = %q, want empty", got)
 	}
 }

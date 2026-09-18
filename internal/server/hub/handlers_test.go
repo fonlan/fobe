@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fonlan/fobe/internal/protocol"
 	"github.com/fonlan/fobe/internal/server/singbox"
@@ -582,5 +583,61 @@ func TestReconcileKeepsDeletingInboundUntilPortVanishes(t *testing.T) {
 	}
 	if len(states) != 1 || states[0].Port != 16929 || states[0].Status != "deleting" {
 		t.Fatalf("unrowed listener not marked deleting: %+v", states)
+	}
+}
+
+// auditEntries returns the audit rows for one action, newest first.
+func auditEntries(t *testing.T, st *store.Store, action string) []store.AuditEntry {
+	t.Helper()
+	rows, err := st.ListAudit(200)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	out := []store.AuditEntry{}
+	for _, e := range rows {
+		if e.Action == action {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// §4.4: a hello is the up-edge of a node's status and is audited once per
+// transition. A reconnect that never left the 90s heartbeat window is not an
+// "online" event, and a node that did go offline gets a fresh row when it
+// returns, carrying how long it had been silent.
+func TestHelloAuditsOnlineTransitionOnly(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n1") // created offline: the first hello is an up-edge
+
+	h.onHello(&Conn{nodeID: "n1"}, &protocol.Hello{Version: "1.0.0"})
+	got := auditEntries(t, h.store, "node_online")
+	if len(got) != 1 {
+		t.Fatalf("first hello audit rows = %d, want 1 (%+v)", len(got), got)
+	}
+	if got[0].Actor != "system" || got[0].NodeID != "n1" || !strings.Contains(got[0].Command, "agent_version=1.0.0") {
+		t.Fatalf("node_online entry = %+v", got[0])
+	}
+
+	// a second hello without an offline flip in between: still online
+	h.onHello(&Conn{nodeID: "n1"}, &protocol.Hello{Version: "1.0.0"})
+	if got := auditEntries(t, h.store, "node_online"); len(got) != 1 {
+		t.Fatalf("reconnect inside the heartbeat window added rows: %+v", got)
+	}
+
+	// age the row like a real outage, then let the offline detector flip it
+	if _, _, err := h.store.MarkNodeOnline("n1", "", time.Now().Unix()-200); err != nil {
+		t.Fatalf("age last_seen: %v", err)
+	}
+	if err := h.store.MarkNodeOffline("n1"); err != nil {
+		t.Fatalf("mark offline: %v", err)
+	}
+	h.onHello(&Conn{nodeID: "n1"}, &protocol.Hello{Version: "1.0.1"})
+	got = auditEntries(t, h.store, "node_online")
+	if len(got) != 2 {
+		t.Fatalf("up-edge after offline = %d rows, want 2", len(got))
+	}
+	if !strings.Contains(got[0].Command, "silent_for=") {
+		t.Fatalf("returning node lost its outage duration: %+v", got[0])
 	}
 }

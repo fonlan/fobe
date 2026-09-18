@@ -342,6 +342,42 @@ func (s *Store) MarkNodeOffline(id string) error {
 	return err
 }
 
+// MarkNodeOnline records liveness after a hello frame and reports whether this
+// hello is the up-edge of the node's status, plus how long it had been silent.
+//
+// The §4.4 audit trail wants transitions, not every reconnect: a probe that
+// reconnects inside the 90s heartbeat window never left the panel's "online"
+// state. Reading last_seen in the same transaction keeps that verdict — and the
+// outage duration — consistent with the row detectOffline reads.
+func (s *Store) MarkNodeOnline(id, version string, at int64) (wasOnline bool, silentFor int64, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, 0, err
+	}
+	defer tx.Rollback()
+
+	var status string
+	var lastSeen sql.NullInt64
+	err = tx.QueryRow(`SELECT status, last_seen FROM nodes WHERE id = ?`, id).Scan(&status, &lastSeen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, 0, ErrNotFound
+	}
+	if err != nil {
+		return false, 0, fmt.Errorf("mark node online: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE nodes SET status = 'online', last_seen = ?,
+		 agent_version = CASE WHEN ? = '' THEN agent_version ELSE ? END WHERE id = ?`,
+		at, version, version, id,
+	); err != nil {
+		return false, 0, fmt.Errorf("mark node online: %w", err)
+	}
+	if lastSeen.Valid && at > lastSeen.Int64 {
+		silentFor = at - lastSeen.Int64
+	}
+	return status == "online", silentFor, tx.Commit()
+}
+
 func (s *Store) UpdateNodeInfo(id string, os, arch, kernel, distroID, distroVersion, hostname, tz string, cpuCores int) error {
 	_, err := s.db.Exec(
 		`UPDATE nodes SET os = ?, arch = ?, kernel = ?, distro_id = ?, distro_version = ?,

@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -151,4 +152,21 @@ func Sign(body []byte, secret string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// endpointURL matches a URL anywhere in an error string (url.Error quotes it,
+// so the match stops at the quoting character).
+var endpointURL = regexp.MustCompile(`https?://[^\s"']+`)
+
+// SafeError renders an error for logs and the §4.4 audit trail with every URL
+// scrubbed. Delivery errors are the one place where the credential lives inside
+// the message rather than beside it: the Telegram bot token is a path segment
+// of the endpoint, and a webhook URL carries its secret as a query parameter, so
+// a wrapped url.Error would copy a live credential into a table the panel serves
+// back over the API (invariant: credentials never reach logs or audit rows).
+func SafeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return endpointURL.ReplaceAllString(err.Error(), "[redacted-url]")
 }
