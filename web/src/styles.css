@@ -919,7 +919,18 @@ section.card { margin-bottom: 0; }
 }
 .terminal-host .xterm { position: absolute; top: 0; right: 0; bottom: 0; left: 0; }
 .terminal-host .xterm-viewport { overflow-y: auto; }
-.ai-panel { gap: 14px; }
+/* A DEFINITE height, not just a floor: .ai-messages scrolls only when its flex
+   parent has a resolved height. With a min-height the grid row grew with the
+   transcript, and since the row is shared with the terminal column, every extra
+   bubble stretched the page — and the terminal screen with it. The value mirrors
+   the workspace's own min-height so both columns stay the same height on normal
+   viewports; min-height is the short-viewport floor (the composer must keep a
+   usable list above it). */
+.ai-panel {
+  gap: 14px;
+  height: min(720px, calc(100vh - 180px));
+  min-height: 420px;
+}
 .ai-context { display: grid; gap: 8px; padding: 12px; background: var(--panel-2); border-radius: 8px; border: 1px solid var(--border); }
 .ai-context > div { display: flex; justify-content: space-between; gap: 12px; }
 .ai-placeholder { padding: 18px; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-dim); }

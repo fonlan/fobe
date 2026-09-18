@@ -162,13 +162,11 @@ function AssistantPanel({
   const [providerId, setProviderId] = useState('');
   const [modelId, setModelId] = useState('');
   const [reasoning, setReasoning] = useState('');
-  const [isServerDefault, setIsServerDefault] = useState(false);
   // True when (default_provider_id, default_model_id) was NOT selectable and the
   // picker fell back to the first usable pair. Silent substitution would make
   // the operator believe a different model is answering than the one configured.
   const [defaultUnavailable, setDefaultUnavailable] = useState(false);
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
-  const [savingDefault, setSavingDefault] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   // Why the in-flight turn was aborted: the stop button must report itself, a
@@ -179,16 +177,42 @@ function AssistantPanel({
   // being appended above the tool card.
   const assistantOpenRef = useRef(false);
 
+  // Auto bottom-lock. A ref, not state: the value is read inside rAF callbacks
+  // and inside the scroll handler, where a render-time value would be stale —
+  // and toggling it must never re-render the transcript on every scroll frame.
+  const stickToBottomRef = useRef(true);
+
   const scrollToEnd = (force = false) => {
     const el = listRef.current;
     if (!el) return;
-    // Don't yank the viewport while the operator is reading back through the
-    // transcript: only auto-follow when already near the bottom.
-    if (!force && el.scrollHeight - el.scrollTop - el.clientHeight > 120) return;
+    if (force) stickToBottomRef.current = true;
+    if (!stickToBottomRef.current) return;
     window.requestAnimationFrame(() => {
-      el.scrollTo({ top: el.scrollHeight });
+      const node = listRef.current;
+      if (!node || !stickToBottomRef.current) return;
+      node.scrollTop = node.scrollHeight;
     });
   };
+
+  // Re-arm the lock the moment the operator scrolls back to the bottom, and
+  // release it as soon as he scrolls up to read back through the transcript —
+  // yanking the viewport away from someone reading is worse than a missed
+  // auto-follow. 48px absorbs fractional scroll positions and focus jumps.
+  const handleMessagesScroll = () => {
+    const el = listRef.current;
+    if (!el) return;
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 48;
+  };
+
+  // The single trigger for the lock. Bubbles arrive as React state, so scrolling
+  // from the stream handlers would run BEFORE the new bubble is in the DOM and
+  // measure the previous scrollHeight; an effect runs after the commit, when the
+  // list knows its real height. `busy` is a dependency because the "AI 思考中…"
+  // line is itself a bubble that appears and disappears.
+  useEffect(() => {
+    scrollToEnd();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, turnEnd, busy]);
 
   const usable = useMemo(() => usableModels(catalog), [catalog]);
 
@@ -319,7 +343,6 @@ function AssistantPanel({
 
       setProviderId(chosen?.provider.id ?? '');
       setModelId(chosen?.model.id ?? '');
-      setIsServerDefault(chosen ? pairIsDefault(cat, chosen.provider.id, chosen.model.id) : false);
       setDefaultUnavailable(!fallback ? false : !pairIsDefault(cat, fallback.provider.id, fallback.model.id));
       if (history) {
         setAiSessionId(history.session_id);
@@ -379,11 +402,9 @@ function AssistantPanel({
     },
     onTextDelta: (text: string) => {
       appendDelta('text', text);
-      scrollToEnd();
     },
     onThinkingDelta: (text: string) => {
       appendDelta('thinking', text);
-      scrollToEnd();
     },
     onToolResult: (event: AIToolResultEvent) => {
       assistantOpenRef.current = false;
@@ -398,7 +419,6 @@ function AssistantPanel({
           reason: event.reason ?? '',
         },
       ]);
-      scrollToEnd();
     },
     onNeedsConfirmation: (event: AINeedsConfirmationEvent) => {
       assistantOpenRef.current = false;
@@ -413,12 +433,10 @@ function AssistantPanel({
           risk: event.risk ?? '',
         },
       ]);
-      scrollToEnd();
     },
     onTurnEnd: (event: { reason: AITurnEndReason; changes?: number }) => {
       assistantOpenRef.current = false;
       setTurnEnd({ reason: event.reason, changes: event.changes });
-      scrollToEnd();
     },
     onError: (event: { code: string; message?: string }) => {
       setErr(errText(event.code, event.message));
@@ -594,24 +612,32 @@ function AssistantPanel({
     setProviderId(next.providerId);
     setModelId(next.modelId);
     setReasoning('');
-    setIsServerDefault(pairIsDefault(catalog, next.providerId, next.modelId));
     setDefaultUnavailable(false);
     setSessionNotice(t('ai_model_switched'));
   };
 
-  const saveDefault = async () => {
-    if (!providerId || !modelId || savingDefault) return;
-    setSavingDefault(true);
+  /**
+   * Start a brand-new conversation (§12.6): drop the transcript and forget the
+   * stored session id, so the next send mints a fresh session. The picker
+   * selection survives — "new conversation" is not "switch model".
+   *
+   * A turn still streaming is aborted first: its deltas would otherwise append
+   * to the new, empty transcript and read as the model answering a question
+   * nobody asked. `discard` keeps that abort silent (no `stopped` turn_end);
+   * the half-turn the server already committed stays in the old session, which
+   * is exactly what clearing the transcript means.
+   */
+  const startNewSession = () => {
+    if (entries.length > 0 && !window.confirm(t('ai_new_session_confirm'))) return;
+    abortIntentRef.current = 'discard';
+    abortRef.current?.abort();
+    assistantOpenRef.current = false;
+    setEntries([]);
+    setAiSessionId(null);
+    clearStoredAISession(nodeId);
     setErr(null);
-    try {
-      await api.setAIDefaults(providerId, modelId);
-      setIsServerDefault(true);
-      setDefaultUnavailable(false);
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setSavingDefault(false);
-    }
+    setTurnEnd(null);
+    setSessionNotice(null);
   };
 
   return (
@@ -621,7 +647,19 @@ function AssistantPanel({
           <h3>{t('ai_panel_title')}</h3>
           <p className="hint">{t('ai_panel_desc')}</p>
         </div>
-        <span className="chip">{aiSessionId ? t('ai_session_active') : t('ai_session_new')}</span>
+        {/* The one per-session control. The "session continuing / new session"
+            chip this replaces only reported state the transcript already shows,
+            while starting over had no button at all. */}
+        <button
+          type="button"
+          className="btn small"
+          title={t('ai_new_session')}
+          aria-label={t('ai_new_session')}
+          disabled={aiSessionId === null && entries.length === 0}
+          onClick={startNewSession}
+        >
+          +
+        </button>
       </div>
       <div className="ai-context">
         <div><span className="hint">{t('terminal_node_label')}</span><span className="mono">{nodeId}</span></div>
@@ -641,7 +679,7 @@ function AssistantPanel({
         ? catalogErr === null && <p className="hint">{t('ai_loading_models')}</p>
         : usable.length === 0 && <p className="hint">{t('ai_no_models')}</p>}
 
-      <div className="ai-messages" ref={listRef}>
+      <div className="ai-messages" ref={listRef} onScroll={handleMessagesScroll}>
         {entries.length === 0 && (
           <p className="hint">{historyLoading ? t('ai_history_loading') : t('ai_panel_empty')}</p>
         )}
@@ -827,19 +865,6 @@ function AssistantPanel({
           >
             {busy ? t('ai_stop') : t('ai_send')}
           </button>
-          {usable.length > 0 && (
-            // Last in the row on purpose: it is the only item here that can
-            // wrap onto a line of its own on a narrow panel, and it is the one
-            // that matters least while writing a message.
-            <button
-              type="button"
-              className="btn small"
-              disabled={savingDefault || isServerDefault}
-              onClick={() => void saveDefault()}
-            >
-              {savingDefault ? t('loading') : isServerDefault ? t('ai_default_is_current') : t('ai_set_default')}
-            </button>
-          )}
         </div>
       </form>
     </section>
