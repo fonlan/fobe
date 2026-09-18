@@ -36,6 +36,10 @@ interface Props {
   height?: number;
   fmtY?: (v: number) => string;
   emptyText?: string;
+  /** Legend tooltip; i18n is the caller's job, same as emptyText. */
+  legendHint?: string;
+  /** Overlay shown while every stack is toggled off. */
+  allHiddenText?: string;
 }
 
 export default function BarChart({
@@ -44,19 +48,39 @@ export default function BarChart({
   height = 220,
   fmtY = (v) => String(Math.round(v)),
   emptyText = '-',
+  legendHint,
+  allHiddenText,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<HoverInfo | null>(null);
+  // Stacks switched off by clicking their legend entry (see LineChart: keyed by
+  // name, per-instance, survives the polling refresh).
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
+
+  const visible = useMemo(() => stacks.filter((s) => !hidden.has(s.name)), [stacks, hidden]);
+  const allHidden = stacks.length > 0 && visible.length === 0;
+
+  const toggle = (name: string) =>
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
 
   const n = barLabels.length;
 
   const geom = useMemo(() => {
     const plotW = W - PAD_L - PAD_R;
     const plotH = H - PAD_T - PAD_B;
+    // The y scale follows the visible stacks (unchecking "tx" re-scales to the
+    // remaining "rx"); with everything off the bar geometry is empty anyway, so
+    // scale off the full set to keep the grid — and thus the legend — on screen.
+    const scaleStacks = allHidden ? stacks : visible;
     let top = 0;
     for (let i = 0; i < n; i++) {
       let sum = 0;
-      for (const s of stacks) sum += s.values[i] ?? 0;
+      for (const s of scaleStacks) sum += s.values[i] ?? 0;
       if (sum > top) top = sum;
     }
     const ticks = niceTicks(top);
@@ -68,7 +92,7 @@ export default function BarChart({
     const bars: { key: string; x: number; y: number; w: number; h: number; color: string }[] = [];
     for (let i = 0; i < n; i++) {
       let cum = 0;
-      for (const s of stacks) {
+      for (const s of visible) {
         const v = s.values[i] ?? 0;
         const base = cum;
         cum += v;
@@ -85,11 +109,13 @@ export default function BarChart({
       }
     }
     return { ticks, barW, sy, cx, bars };
-  }, [n, stacks]);
+  }, [n, stacks, visible, allHidden]);
 
   if (n === 0) return <div className="chart-empty">{emptyText}</div>;
 
   const onMove = (e: ReactMouseEvent<HTMLDivElement>) => {
+    // Nothing plotted → no hover: the tooltip would be a bare label with no rows.
+    if (visible.length === 0) return;
     const rect = wrapRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0) return;
     const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
@@ -110,12 +136,25 @@ export default function BarChart({
   return (
     <div className="chart">
       <div className="chart-legend">
-        {stacks.map((s) => (
-          <span key={s.name} className="chart-legend-item">
-            <span className="chart-swatch" style={{ background: s.color }} />
-            {s.name}
-          </span>
-        ))}
+        {stacks.map((s) => {
+          const off = hidden.has(s.name);
+          return (
+            <button
+              key={s.name}
+              type="button"
+              className={`chart-legend-item${off ? ' off' : ''}`}
+              aria-pressed={!off}
+              title={legendHint}
+              onClick={() => toggle(s.name)}
+            >
+              <span
+                className="chart-swatch"
+                style={off ? { background: 'transparent', boxShadow: `inset 0 0 0 2px ${s.color}` } : { background: s.color }}
+              />
+              {s.name}
+            </button>
+          );
+        })}
       </div>
       <div
         ref={wrapRef}
@@ -141,6 +180,8 @@ export default function BarChart({
           ))}
         </svg>
 
+        {allHidden && allHiddenText && <div className="chart-hidden-hint">{allHiddenText}</div>}
+
         {/* y labels as HTML so text is not stretched by the non-uniform viewBox */}
         {geom.ticks.map((tv) => (
           <span
@@ -160,7 +201,7 @@ export default function BarChart({
             />
             <div className="chart-tip" style={{ left: `${hover.leftPct}%` }}>
               <div className="chart-tip-label mono">{barLabels[hover.index]}</div>
-              {stacks.map((s) => (
+              {visible.map((s) => (
                 <div key={s.name} className="chart-tip-row">
                   <span className="chart-swatch" style={{ background: s.color }} />
                   <span>{s.name}</span>

@@ -672,7 +672,23 @@ section.card { margin-bottom: 0; }
 .chart { width: 100%; }
 
 .chart-legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 2px 0 6px; font-size: 12.5px; color: var(--text-dim); }
-.chart-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+/* Legend entries are real buttons (click = hide/show that series, design §16):
+   the reset below keeps them looking like the plain labels they replace. */
+.chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.chart-legend-item:hover { color: var(--text); }
+.chart-legend-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.chart-legend-item.off { opacity: 0.5; }
+.chart-legend-item.off:hover { opacity: 0.85; }
 .chart-swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
 
 .chart-plot { position: relative; width: 100%; }
@@ -713,6 +729,18 @@ section.card { margin-bottom: 0; }
   background: var(--text-dim);
   opacity: 0.1;
   pointer-events: none;
+}
+
+/* Every series toggled off: the axes and legend stay, this says how to get back. */
+.chart-hidden-hint {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  pointer-events: none;
+  text-align: center;
 }
 
 .chart-tip {

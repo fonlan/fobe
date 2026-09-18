@@ -175,6 +175,9 @@ export default function NodeDetail() {
   const fmtXTime = (x: number) => fmtTimeShort(x);
   const fmtYPct = (v: number) => `${Math.round(v)}%`;
   const fmtYBytes = (v: number) => fmtBytes(v);
+  // Every chart's legend toggles its series (design §16).
+  const legendHint = t('chart_legend_toggle');
+  const allHiddenText = t('chart_legend_all_hidden');
 
   return (
     <div className="stack-lg">
@@ -243,11 +246,34 @@ export default function NodeDetail() {
       <section className="card">
         <h3>{t('sec_charts')}</h3>
         <h4>{t('chart_cpu')}</h4>
-        <LineChart series={cpuSeries} yMax={100} fmtY={fmtYPct} fmtX={fmtXTime} emptyText={t('no_chart_data')} />
+        <LineChart
+          series={cpuSeries}
+          yMax={100}
+          fmtY={fmtYPct}
+          fmtX={fmtXTime}
+          emptyText={t('no_chart_data')}
+          legendHint={legendHint}
+          allHiddenText={allHiddenText}
+        />
         <h4>{t('chart_mem_disk')}</h4>
-        <LineChart series={memDiskSeries} yMax={100} fmtY={fmtYPct} fmtX={fmtXTime} emptyText={t('no_chart_data')} />
+        <LineChart
+          series={memDiskSeries}
+          yMax={100}
+          fmtY={fmtYPct}
+          fmtX={fmtXTime}
+          emptyText={t('no_chart_data')}
+          legendHint={legendHint}
+          allHiddenText={allHiddenText}
+        />
         <h4>{t('chart_net')}</h4>
-        <LineChart series={netSeries} fmtY={fmtYBytes} fmtX={fmtXTime} emptyText={t('no_chart_data')} />
+        <LineChart
+          series={netSeries}
+          fmtY={fmtYBytes}
+          fmtX={fmtXTime}
+          emptyText={t('no_chart_data')}
+          legendHint={legendHint}
+          allHiddenText={allHiddenText}
+        />
       </section>
 
       <section className="card">
@@ -260,7 +286,14 @@ export default function NodeDetail() {
             </span>
           )}
         </div>
-        <BarChart barLabels={trafficBars.barLabels} stacks={trafficBars.stacks} fmtY={fmtYBytes} emptyText={t('no_chart_data')} />
+        <BarChart
+          barLabels={trafficBars.barLabels}
+          stacks={trafficBars.stacks}
+          fmtY={fmtYBytes}
+          emptyText={t('no_chart_data')}
+          legendHint={legendHint}
+          allHiddenText={allHiddenText}
+        />
       </section>
 
       <section className="card">
@@ -364,7 +397,14 @@ function LatencyPanel({ nodeId, nodeTargets }: { nodeId: string; nodeTargets: La
           {t('loss')}: <span className="mono">{avgLoss.toFixed(2)}%</span>
         </span>
       </div>
-      <LineChart series={series} fmtY={(v) => `${Math.round(v)}ms`} fmtX={fmtTimeShort} emptyText={t('no_chart_data')} />
+      <LineChart
+        series={series}
+        fmtY={(v) => `${Math.round(v)}ms`}
+        fmtX={fmtTimeShort}
+        emptyText={t('no_chart_data')}
+        legendHint={t('chart_legend_toggle')}
+        allHiddenText={t('chart_legend_all_hidden')}
+      />
       {silentTargets.map((tg) => {
         const probing = (targetStats.get(tg.id)?.pts ?? 0) > 0;
         return (

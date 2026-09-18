@@ -71,6 +71,10 @@ interface Props {
   fmtY?: (v: number) => string;
   fmtX?: (x: number) => string;
   emptyText?: string;
+  /** Legend tooltip; i18n is the caller's job, same as emptyText. */
+  legendHint?: string;
+  /** Overlay shown while every series is toggled off. */
+  allHiddenText?: string;
 }
 
 export default function LineChart({
@@ -80,20 +84,43 @@ export default function LineChart({
   fmtY = (v) => String(Math.round(v * 10) / 10),
   fmtX = (x) => String(Math.round(x)),
   emptyText = '-',
+  legendHint,
+  allHiddenText,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<HoverInfo | null>(null);
+  // Series the operator switched off by clicking its legend entry. Keyed by the
+  // series name — the same key the legend and tooltip use — so the choice
+  // survives the 30s data refresh. Each chart instance owns its own set: hiding
+  // "rx" on the network chart must not touch the traffic bars below it.
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
 
   const prepared = useMemo(
     () => series.map((s) => ({ ...s, points: downsample(s.points) })),
     [series],
   );
 
+  const visible = useMemo(() => prepared.filter((s) => !hidden.has(s.name)), [prepared, hidden]);
+  const allHidden = prepared.length > 0 && visible.length === 0;
+
+  const toggle = (name: string) =>
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+
+  // With everything hidden the axes still come from the full series set: the
+  // empty state ("暂无数据") would swap the whole chart out, and the legend is
+  // the only control that can bring a series back — showing it beats a dead end.
+  const scaled = allHidden ? prepared : visible;
+
   const extent = useMemo(() => {
     let xMin = Infinity;
     let xMax = -Infinity;
     let yTop = yMax ?? 0;
-    for (const s of prepared) {
+    for (const s of scaled) {
       for (const p of s.points) {
         if (p.x < xMin) xMin = p.x;
         if (p.x > xMax) xMax = p.x;
@@ -104,7 +131,7 @@ export default function LineChart({
     if (xMax <= xMin) xMax = xMin + 1;
     if (yTop <= 0) yTop = 1;
     return { xMin, xMax, yTop };
-  }, [prepared, yMax]);
+  }, [scaled, yMax]);
 
   const ticks = useMemo(() => (extent ? niceTicks(extent.yTop) : []), [extent]);
 
@@ -136,7 +163,9 @@ export default function LineChart({
     const xVal = extent.xMin + frac * (extent.xMax - extent.xMin);
     const rows: HoverInfo['rows'] = [];
     let bestX: number | null = null;
-    for (const s of prepared) {
+    // Hidden series contribute no tooltip row either — the tooltip reads as
+    // "what this chart is currently showing".
+    for (const s of visible) {
       if (s.points.length === 0) continue;
       let best = s.points[0];
       for (const p of s.points) {
@@ -161,12 +190,27 @@ export default function LineChart({
   return (
     <div className="chart">
       <div className="chart-legend">
-        {prepared.map((s) => (
-          <span key={s.name} className="chart-legend-item">
-            <span className="chart-swatch" style={{ background: s.color }} />
-            {s.name}
-          </span>
-        ))}
+        {prepared.map((s) => {
+          const off = hidden.has(s.name);
+          return (
+            <button
+              key={s.name}
+              type="button"
+              className={`chart-legend-item${off ? ' off' : ''}`}
+              aria-pressed={!off}
+              title={legendHint}
+              onClick={() => toggle(s.name)}
+            >
+              <span
+                className="chart-swatch"
+                // Off = hollow ring in the series colour: the row stays
+                // identifiable, but it no longer claims to be plotted.
+                style={off ? { background: 'transparent', boxShadow: `inset 0 0 0 2px ${s.color}` } : { background: s.color }}
+              />
+              {s.name}
+            </button>
+          );
+        })}
       </div>
       <div
         ref={wrapRef}
@@ -187,14 +231,14 @@ export default function LineChart({
               vectorEffect="non-scaling-stroke"
             />
           ))}
-          {prepared.map(
+          {visible.map(
             (s) =>
               s.area &&
               s.points.length >= 2 && (
                 <path key={s.name + '-a'} d={areaFor(s.points)} fill={s.color} opacity={0.12} stroke="none" />
               ),
           )}
-          {prepared.map((s) => (
+          {visible.map((s) => (
             <path
               key={s.name}
               d={pathFor(s.points)}
@@ -207,6 +251,8 @@ export default function LineChart({
             />
           ))}
         </svg>
+
+        {allHidden && allHiddenText && <div className="chart-hidden-hint">{allHiddenText}</div>}
 
         {/* y labels as HTML so text is not stretched by the non-uniform viewBox */}
         {ticks.map((tv) => (
