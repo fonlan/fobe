@@ -398,6 +398,34 @@ function entryKey(e: SubscriptionEntry): string {
   return [e.node_id, e.relay_node_id, e.proto, e.src_port, e.iface].join('|');
 }
 
+/**
+ * One row per entry identity.
+ *
+ * The picker keys rows by identity so a name edit lands on exactly one row. If
+ * the server ever lists the same entry twice (two nftables rules can share one
+ * tuple), two rows would carry the same key: React would warn, `patch` by key
+ * would write the typed name to *both*, and the save would come back
+ * `alias_conflict` for two names the operator believes are different. The
+ * server dedupes its candidates too (2026-09-19 修正); this is the panel-side
+ * backstop, and it merges what a twin carried (a name or rule comment the
+ * surviving row was missing) instead of dropping it silently.
+ */
+function dedupeEntries(list: SubscriptionEntry[]): SubscriptionEntry[] {
+  const byKey = new Map<string, SubscriptionEntry>();
+  for (const e of list) {
+    const key = entryKey(e);
+    const kept = byKey.get(key);
+    if (!kept) {
+      byKey.set(key, e);
+      continue;
+    }
+    if (kept.alias === '' && e.alias !== '') kept.alias = e.alias;
+    if (kept.source === '' && e.source !== '') kept.source = e.source;
+    kept.selected = kept.selected || e.selected;
+  }
+  return [...byKey.values()];
+}
+
 /** §10.2 unavailable codes; anything unknown falls back to a generic line. */
 const ENTRY_REASON_KEYS: Record<string, string> = {
   not_ready: 'sub_entry_reason_not_ready',
@@ -448,7 +476,7 @@ function EntryPicker({
   const reload = useCallback(async () => {
     try {
       const r = await api.listSubscriptionEntries(sub.id);
-      setEntries(r.entries);
+      setEntries(dedupeEntries(r.entries));
       setErr(null);
     } catch (e) {
       setErr(apiErrorMessage(e, t));
@@ -503,6 +531,26 @@ function EntryPicker({
   // marks the "some but not all" state so a mixed list is never read as
   // all-on or all-off.
   const list = entries ?? [];
+  // §10.2: an explicit alias becomes the client-side tag verbatim, so two
+  // entries that will both render must not share one — the server refuses that
+  // save (`alias_conflict`) because the renderer would silently append `-2`/
+  // `#2`. The server compares the name as a string, whatever node or relay the
+  // entries belong to (two relays to one target are two entries like any other
+  // pair), and it only counts rows the operator enabled. Mirror that exactly so
+  // the offending fields are marked while typing instead of leaving the
+  // operator to hunt a bare banner for a name he believes he did not repeat.
+  const aliasCount = new Map<string, number>();
+  for (const e of list) {
+    const name = e.alias.trim();
+    if (!e.selected || name === '') continue;
+    aliasCount.set(name, (aliasCount.get(name) ?? 0) + 1);
+  }
+  const duplicateKeys = new Set<string>();
+  for (const e of list) {
+    const name = e.alias.trim();
+    if (!e.selected || name === '') continue;
+    if ((aliasCount.get(name) ?? 0) > 1) duplicateKeys.add(entryKey(e));
+  }
   const allSelected = list.length > 0 && list.every((e) => e.selected);
   const someSelected = list.some((e) => e.selected);
   const toggleAll = () =>
@@ -514,6 +562,7 @@ function EntryPicker({
   // editable things are the checkbox and the alias input.
   const row = (e: SubscriptionEntry) => {
     const key = entryKey(e);
+    const duplicate = duplicateKeys.has(key);
     const effective = e.alias.trim() || e.auto_name;
     return (
       <tr key={key} className={e.available ? '' : 'row-muted'}>
@@ -566,7 +615,7 @@ function EntryPicker({
         </td>
         <td>
           <input
-            className="mono sub-entry-alias"
+            className={'mono sub-entry-alias' + (duplicate ? ' sub-entry-alias-dup' : '')}
             value={e.alias}
             maxLength={64}
             placeholder={e.auto_name}
@@ -574,6 +623,7 @@ function EntryPicker({
             aria-label={t('sub_entry_alias')}
             onChange={(ev) => patch(key, (x) => ({ ...x, alias: ev.target.value }))}
           />
+          {duplicate && <div className="sub-entry-dup-hint">{t('sub_entry_alias_dup')}</div>}
           {/* The name the renderer will actually use, live while typing. */}
           <div className="hint sub-entry-effective" title={effective}>
             {t('sub_entry_effective', { name: effective })}

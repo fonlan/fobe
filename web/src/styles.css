@@ -1470,6 +1470,11 @@ section.card { margin-bottom: 0; }
   min-width: 0;
 }
 .sub-entry-table .sub-entry-alias:focus { outline: 2px solid var(--accent-weak); border-color: var(--accent); }
+/* A name two different nodes both claim: the server refuses that save (§10.2),
+   so point at the fields instead of leaving the operator to hunt the banner for
+   a collision he cannot see. Same-node names are legal and stay unmarked. */
+.sub-entry-table .sub-entry-alias-dup { border-color: var(--red); }
+.sub-entry-dup-hint { color: var(--red); font-size: 12px; margin-top: 2px; }
 
 /* The name the renderer derives when the alias is empty, under the input so it
    is visible while typing; ellipsis because relay auto-names get long. */

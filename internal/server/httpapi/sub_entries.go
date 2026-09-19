@@ -175,6 +175,13 @@ func (s *Server) relayCandidates(target *store.Node, sb *store.NodeSingbox) []re
 		return nil
 	}
 	out := []relayCandidate{}
+	// Two rules can share one tuple (§21: the handle is what tells them apart —
+	// an extra `ip saddr` match, a rule added twice). The *entry* they produce is
+	// the same either way, so the candidate list dedupes by identity: two
+	// identical candidates reached the picker as two rows keyed alike, editing
+	// one row's name silently wrote the other's too, and the save then failed
+	// with alias_conflict for two names the operator believed were different.
+	index := map[string]int{}
 	for _, port := range ports {
 		forwards, err := s.Store.ListForwardsToDstPort(port)
 		if err != nil {
@@ -186,10 +193,21 @@ func (s *Server) relayCandidates(target *store.Node, sb *store.NodeSingbox) []re
 			if f.NodeID == target.ID || !v4[f.Forward.DstIP] {
 				continue
 			}
-			out = append(out, relayCandidate{
+			c := relayCandidate{
 				RelayNodeID: f.NodeID, Proto: f.Forward.Proto, SrcPort: f.Forward.SrcPort,
 				Iface: f.Forward.Iface, Comment: f.Forward.Comment,
-			})
+			}
+			key := entryKey(c.entry(target.ID))
+			if i, ok := index[key]; ok {
+				// The comment is the only part that can differ, and it is the one
+				// thing the 来源 column has to say: keep the first non-empty one.
+				if out[i].Comment == "" {
+					out[i].Comment = c.Comment
+				}
+				continue
+			}
+			index[key] = len(out)
+			out = append(out, c)
 		}
 	}
 	return out
@@ -392,6 +410,9 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 		rd := s.targetReadinessOf(target, sb)
 		for _, port := range directCandidatePorts(rd.live, sb) {
 			e := store.SubscriptionEntry{NodeID: target.ID, SrcPort: port}
+			if seen[entryKey(e)] {
+				continue // one row per entry identity: never list an entry twice
+			}
 			if _, bound := boundByKey[entryKey(e)]; bound || rd.renderable {
 				views = append(views, view(target, nil, e, sb, rd, false))
 			}
@@ -408,7 +429,11 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 			if relay == nil || relay.PrimaryIP == "" {
 				continue // nothing to dial: not a usable ingress
 			}
-			v := view(target, relay, c.entry(target.ID), sb, rd, true)
+			e := c.entry(target.ID)
+			if seen[entryKey(e)] {
+				continue // relayCandidates dedupes already; this is the backstop
+			}
+			v := view(target, relay, e, sb, rd, true)
 			v.Source = c.Comment
 			views = append(views, v)
 		}

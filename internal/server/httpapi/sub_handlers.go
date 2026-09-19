@@ -441,6 +441,18 @@ func (s *Server) handleSetSubscriptionNodes(w http.ResponseWriter, r *http.Reque
 // i18n text, so "why did my save not stick" stays answerable in both languages.
 func (s *Server) validateSubEntries(in []subEntryInput) ([]store.SubscriptionEntry, string) {
 	seenIdentity := map[string]bool{}
+	// seenAlias is the explicit-name collision check. It compares the alias
+	// *string* alone: which node (or relay) an entry belongs to is irrelevant,
+	// because the renderer turns the name into the client-side tag and would
+	// silently suffix the loser with "-2"/"#2" (2026-09-17j: only explicit
+	// aliases are protected this way; automatic names have always been allowed
+	// to collide and fall back). Two entries reached through *different relays*
+	// are different entries and are checked like any other pair — nothing here
+	// looks at relay identity.
+	//
+	// Only entries the operator enabled take part: an unchecked row is a
+	// tombstone and renders nothing, so a stale name parked on it cannot collide
+	// in the output. Re-checking it later re-runs this check.
 	seenAlias := map[string]bool{}
 	out := make([]store.SubscriptionEntry, 0, len(in))
 	for _, e := range in {
@@ -469,23 +481,25 @@ func (s *Server) validateSubEntries(in []subEntryInput) ([]store.SubscriptionEnt
 		if !store.ValidAlias(e.Alias) {
 			return nil, "bad_alias"
 		}
-		if e.Alias != "" {
-			// An explicit duplicate would silently become "-2"/"#2" at render
-			// time, which is exactly what a template author cannot predict.
-			if seenAlias[e.Alias] {
-				return nil, "alias_conflict"
-			}
-			seenAlias[e.Alias] = true
-		}
 		entry := store.SubscriptionEntry{
 			NodeID: e.NodeID, RelayNodeID: e.RelayNodeID,
 			Proto: e.Proto, SrcPort: e.SrcPort, Iface: e.Iface,
 			Alias: e.Alias, Enabled: e.Selected,
 		}
-		if seenIdentity[entryKey(entry)] {
+		// Deduped *before* the alias check: the same entry twice in one payload
+		// (a duplicate candidate row, an old panel) is one entry, and letting the
+		// second copy claim an alias slot is what turned that into a conflict.
+		key := entryKey(entry)
+		if seenIdentity[key] {
 			continue
 		}
-		seenIdentity[entryKey(entry)] = true
+		seenIdentity[key] = true
+		if e.Alias != "" && entry.Enabled {
+			if seenAlias[e.Alias] {
+				return nil, "alias_conflict"
+			}
+			seenAlias[e.Alias] = true
+		}
 		out = append(out, entry)
 	}
 	return out, ""

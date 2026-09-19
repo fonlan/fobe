@@ -4,6 +4,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -982,5 +983,169 @@ func TestPortMoveCarriesSubscriptionEntries(t *testing.T) {
 	body := string(fetchSub(t, srv, token, "", "").Body)
 	if !strings.Contains(body, "fobe-东京") || !strings.Contains(body, `"server_port": 28811`) {
 		t.Errorf("the moved inbound is not rendered at its new port:\n%s", body)
+	}
+}
+
+// TestDuplicateRelayRulesAreOneEntry: two nftables rules can share one tuple
+// (§21 keeps the handle so they stay editable apart), but for the subscription
+// they describe the same ingress. The picker used to list them as two rows of
+// one identity; the panel keys rows by identity, so a name typed into one row
+// was written into the other too, and the save came back alias_conflict for two
+// names the operator believed were different (2026-09-19 修正).
+func TestDuplicateRelayRulesAreOneEntry(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"anytls","tag":"anytls-28711","listen_port":28711,"users":[{"password":"pw-a"}]}
+	]}`, map[int]string{28711: testCertPEM})
+
+	// Same source tuple, different handle and match terms: one entry.
+	status := store.NodeForwardStatus{Supported: true, Initialized: true, ReportedAt: 1700000000}
+	rows := []store.NodeForward{
+		{Handle: 10, Proto: "tcp", SrcPort: 8080, DstIP: "198.51.100.7", DstPort: 28711},
+		{Handle: 11, Proto: "tcp", SrcPort: 8080, DstIP: "198.51.100.7", DstPort: 28711, Comment: "双份规则", ExtraMatch: true},
+	}
+	if err := api.Store.ReplaceNodeForwards(aID, status, rows); err != nil {
+		t.Fatalf("seed forwards: %v", err)
+	}
+
+	subID, _ := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{{NodeID: bID, Selected: true}})
+
+	entries := listEntries(t, srv, cookie, subID)
+	counts := map[string]int{}
+	for _, e := range entries {
+		counts[identityOf(e)]++
+	}
+	for key, n := range counts {
+		if n > 1 {
+			t.Errorf("entry %s listed %d times, want once\n%+v", key, n, entries)
+		}
+	}
+	if relay := relayEntryOf(t, entries, bID); relay.Source != "双份规则" {
+		t.Errorf("relay source = %q, want the later rule's comment when the first had none", relay.Source)
+	}
+}
+
+// TestDifferentRelaysStayTwoEntries: the same target reached through two
+// *different* relays is two entries, not one. The picker keys rows by identity
+// (`node|relay|proto|src_port|iface`), so deduping candidates by identity must
+// never collapse rows whose relay differs — the operator sees "C · A:8080" and
+// "C · B:9090" and has to be able to name them apart.
+func TestDifferentRelaysStayTwoEntries(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "203.0.113.20", 20002)
+	cID := seedNodeWithIP(t, api, "C", "machine-c", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, cID, `{"inbounds":[
+		{"type":"anytls","tag":"anytls-28711","listen_port":28711,"users":[{"password":"pw-a"}]}
+	]}`, map[int]string{28711: testCertPEM})
+	seedForward(t, api, aID, "tcp", 8080, "198.51.100.7", 28711)
+	seedForward(t, api, bID, "tcp", 9090, "198.51.100.7", 28711)
+
+	subID, token := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{{NodeID: cID, Selected: true}})
+
+	relays := map[string]subEntryView{}
+	for _, e := range listEntries(t, srv, cookie, subID) {
+		if e.NodeID == cID && e.RelayNodeID != "" {
+			relays[e.RelayNodeID] = e
+		}
+	}
+	if len(relays) != 2 {
+		t.Fatalf("relay rows = %+v, want one per relay node", relays)
+	}
+	if relays[aID].AutoName != "C · A:8080" || relays[bID].AutoName != "C · B:9090" {
+		t.Errorf("auto names = %q / %q, want one per relay", relays[aID].AutoName, relays[bID].AutoName)
+	}
+
+	// Distinct names save, and both render.
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: cID, Selected: true},
+		{NodeID: cID, RelayNodeID: aID, Proto: "tcp", SrcPort: 8080, Alias: "经A", Selected: true},
+		{NodeID: cID, RelayNodeID: bID, Proto: "tcp", SrcPort: 9090, Alias: "经B", Selected: true},
+	})
+	body := string(fetchSub(t, srv, token, "", "").Body)
+	for _, want := range []string{"fobe-经A", "fobe-经B"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in the rendered config:\n%s", want, body)
+		}
+	}
+}
+
+// identityOf renders a picker row the way both sides key it.
+func identityOf(e subEntryView) string {
+	return fmt.Sprintf("%s|%s|%s|%d|%s", e.NodeID, e.RelayNodeID, e.Proto, e.SrcPort, e.Iface)
+}
+
+// TestAliasConflictScope: what the save-time duplicate-name rule covers after
+// the 2026-09-19 revision (§10.2). Only entries the operator enabled can
+// collide (a tombstone renders nothing); the name is compared as a string, so
+// the node (or relay) an entry belongs to is irrelevant — two relays to one
+// target are checked like any other pair; and the same entry listed twice in one
+// payload is one entry, not two claims on a name.
+func TestAliasConflictScope(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 0)
+	seedDiscoveredConfig(t, api, aID, `{"inbounds":[
+		{"type":"anytls","tag":"anytls-28711","listen_port":28711,"users":[{"password":"pw-a"}]}
+	]}`, map[int]string{28711: testCertPEM})
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{28711: testCertPEM, 28712: testCertPEM})
+
+	subID, _ := createSubscription(t, srv, cookie, "main")
+
+	// The name is compared as a string, whatever the node: two inbounds of one
+	// node may not share one either — the renderer would suffix the loser with
+	// "-2", which is exactly what a template author cannot predict.
+	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/subscriptions/"+subID+"/nodes", cookie,
+		map[string]any{"entries": []subEntryInput{
+			{NodeID: bID, SrcPort: 28711, Alias: "同机", Selected: true},
+			{NodeID: bID, SrcPort: 28712, Alias: "同机", Selected: true},
+		}})
+	if r.Status != http.StatusBadRequest || r.errCode(t) != "alias_conflict" {
+		t.Fatalf("same-node duplicate: %d %s, want 400 alias_conflict", r.Status, r.Body)
+	}
+
+	// Same name on two different nodes: also refused, and the entries are
+	// unrelated to each other (see TestDifferentRelaysStayTwoEntries for the
+	// relay case, where different relays are different entries by identity).
+	r = doReq(t, &http.Client{}, "PUT", srv.URL+"/api/subscriptions/"+subID+"/nodes", cookie,
+		map[string]any{"entries": []subEntryInput{
+			{NodeID: aID, SrcPort: 28711, Alias: "同机", Selected: true},
+			{NodeID: bID, SrcPort: 28711, Alias: "同机", Selected: true},
+		}})
+	if r.Status != http.StatusBadRequest || r.errCode(t) != "alias_conflict" {
+		t.Fatalf("cross-node duplicate: %d %s, want 400 alias_conflict", r.Status, r.Body)
+	}
+
+	// A name parked on an unchecked row collides with nothing.
+	r = doReq(t, &http.Client{}, "PUT", srv.URL+"/api/subscriptions/"+subID+"/nodes", cookie,
+		map[string]any{"entries": []subEntryInput{
+			{NodeID: aID, SrcPort: 28711, Alias: "同机", Selected: false},
+			{NodeID: bID, SrcPort: 28711, Alias: "同机", Selected: true},
+		}})
+	if r.Status != http.StatusOK {
+		t.Fatalf("tombstoned name: %d %s, want 200", r.Status, r.Body)
+	}
+
+	// One entry sent twice is one entry.
+	r = doReq(t, &http.Client{}, "PUT", srv.URL+"/api/subscriptions/"+subID+"/nodes", cookie,
+		map[string]any{"entries": []subEntryInput{
+			{NodeID: bID, SrcPort: 28711, Alias: "独一份", Selected: true},
+			{NodeID: bID, SrcPort: 28711, Alias: "独一份", Selected: true},
+		}})
+	if r.Status != http.StatusOK {
+		t.Fatalf("duplicate identity: %d %s, want 200", r.Status, r.Body)
+	}
+	if got := directEntriesOf(listEntries(t, srv, cookie, subID), bID); len(got) != 2 {
+		t.Errorf("direct rows after the deduped save = %+v, want the node's two inbounds", got)
 	}
 }
