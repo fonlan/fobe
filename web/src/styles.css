@@ -483,6 +483,25 @@ section.card { margin-bottom: 0; }
   outline: 2px solid var(--accent-weak);
   border-color: var(--accent);
 }
+/* Quick-command editor (2026-09-19): commands are multi-line, so the form
+   needs a textarea with the same frame the inputs wear. */
+.field textarea {
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  min-width: 0;
+}
+.field textarea:focus {
+  outline: 2px solid var(--accent-weak);
+  border-color: var(--accent);
+}
 
 .form-grid {
   display: grid;
@@ -1205,11 +1224,84 @@ section.card { margin-bottom: 0; }
    the workspace's own min-height so both columns stay the same height on normal
    viewports; min-height is the short-viewport floor (the composer must keep a
    usable list above it). */
-.ai-panel {
-  gap: 14px;
+/* 2026-09-19: the definite height moved to .terminal-side — the side column is
+   ONE card wrapping the tab bar and whichever pane is active, and the panes
+   stretch inside it. */
+.terminal-side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
   height: min(720px, calc(100vh - 180px));
   min-height: 420px;
 }
+.terminal-side .ai-panel {
+  gap: 14px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Tab bar of the side column (2026-09-19). Only rendered when both tabs are
+   available; a single available pane renders without it. */
+.side-tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+.side-tab {
+  flex: 1;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.side-tab:hover { color: var(--text); }
+.side-tab.active {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: var(--border);
+}
+/* Both side panes stay mounted while a tab flips (AssistantPanel owns the
+   transcript and the streaming turn in its own state — unmounting would kill
+   it), so visibility is the `hidden` attribute. The explicit display rule
+   would otherwise beat the UA's [hidden] default. */
+.side-pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.side-pane[hidden] { display: none; }
+
+/* 常用命令 tab (2026-09-19): name + first-line preview per command, the full
+   text rides on the title attribute. The list scrolls inside the card. */
+.qc-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.qc-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.qc-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  text-align: left;
+}
+.qc-btn-name { font-weight: 500; }
+.qc-btn-preview {
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .ai-composer { margin-top: auto; }
 .ai-composer textarea {
   width: 100%;
@@ -1229,7 +1321,7 @@ section.card { margin-bottom: 0; }
   .terminal-workspace { grid-template-columns: 1fr; min-height: 0; }
   .terminal-divider { display: none; }
   .terminal-shell { min-height: 360px; }
-  .ai-panel { min-height: 360px; }
+  .terminal-side { min-height: 360px; height: auto; }
 }
 
 

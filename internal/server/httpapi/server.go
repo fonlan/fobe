@@ -164,6 +164,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/latency-targets/{id}", s.requireSession(s.handleUpdateLatencyTarget))
 	mux.HandleFunc("DELETE /api/latency-targets/{id}", s.requireSession(s.handleDeleteLatencyTarget))
 
+	// quick commands (terminal side panel snippets, 2026-09-19)
+	mux.HandleFunc("GET /api/quick-commands", s.requireSession(s.handleListQuickCommands))
+	mux.HandleFunc("POST /api/quick-commands", s.requireSession(s.handleCreateQuickCommand))
+	mux.HandleFunc("PUT /api/quick-commands/order", s.requireSession(s.handleReorderQuickCommands))
+	mux.HandleFunc("PUT /api/quick-commands/{id}", s.requireSession(s.handleUpdateQuickCommand))
+	mux.HandleFunc("DELETE /api/quick-commands/{id}", s.requireSession(s.handleDeleteQuickCommand))
+
 	// ops surfaces
 	mux.HandleFunc("GET /api/blacklist", s.requireSession(s.handleListBlacklist))
 	mux.HandleFunc("DELETE /api/blacklist/{ip}", s.requireSession(s.handleUnblockIP))

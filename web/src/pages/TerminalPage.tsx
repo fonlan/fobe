@@ -13,7 +13,8 @@ import { Link, useParams } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
-import Terminal from '../components/Terminal';
+import Terminal, { type ConnectionState, type TerminalHandle } from '../components/Terminal';
+import QuickCommandPanel from '../components/QuickCommandPanel';
 import { Markdown } from '../components/Markdown';
 import { groupTurns, historyToEntries, type ChatEntry } from '../components/aiTranscript';
 import type {
@@ -24,6 +25,7 @@ import type {
   AISessionHistory,
   AIToolResultEvent,
   AITurnEndReason,
+  QuickCommand,
 } from '../types';
 
 /** One selectable (provider, model) pair — the unit a session is pinned to. */
@@ -642,7 +644,10 @@ function AssistantPanel({
   const turns = useMemo(() => groupTurns(entries), [entries]);
 
   return (
-    <section className="ai-panel card">
+    // The card chrome belongs to the .terminal-side wrapper now (2026-09-19):
+    // the side column is one card whose tab bar sits above whichever pane is
+    // active, so a second card border here would draw a box in a box.
+    <section className="ai-panel">
       <div className="terminal-head">
         <div>
           <h3>{t('ai_panel_title')}</h3>
@@ -926,13 +931,40 @@ export default function TerminalPage() {
   const { t } = useI18n();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [aiReady, setAiReady] = useState(false);
+  const [commands, setCommands] = useState<QuickCommand[] | null>(null);
+  const [handle, setHandle] = useState<TerminalHandle | null>(null);
+  const [termState, setTermState] = useState<ConnectionState>('connecting');
   const [ratio, setRatio] = useState<number>(loadRatio);
   const [dragging, setDragging] = useState(false);
+  // Preferred side tab; the EFFECTIVE tab is derived below from what actually
+  // exists (grill-me 定稿: only available tabs render, so with a single panel
+  // there is no tab bar at all — the preference just never shows).
+  const [tabPref, setTabPref] = useState<'ai' | 'cmds'>('ai');
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   // Mirror of `ratio` for the drag-end handlers: pointerup fires from a render
   // whose state may lag the last pointermove, and localStorage must record the
   // split the operator actually left on screen.
   const ratioRef = useRef<number>(ratio);
+
+  // The command list is panel data, edited on its own settings page — loading
+  // it once per page mount is enough (navigating back remounts this page).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listQuickCommands()
+      .then((list) => {
+        if (!cancelled) setCommands(list);
+      })
+      .catch(() => {
+        // A failed load must not wedge the column decision on "loading":
+        // treat as empty so an AI-configured panel still renders (same rule
+        // as the aiReady fetch below).
+        if (!cancelled) setCommands([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const applyRatio = (value: number) => {
     const next = clampRatio(value);
@@ -988,7 +1020,7 @@ export default function TerminalPage() {
   // The assistant only has something to talk to once base_url / api_key /
   // model are all set (§12.1); otherwise every submit would come back 503
   // ai_not_configured. The server's derived ai_configured flag decides whether
-  // the column exists at all — the in-flight window and any failure stay
+  // the AI tab exists at all — the in-flight window and any failure stay
   // hidden rather than flashing a panel that cannot send.
   useEffect(() => {
     let cancelled = false;
@@ -1014,6 +1046,15 @@ export default function TerminalPage() {
     );
   }
 
+  // Column + tab availability (grill-me 定稿 2026-09-19): the right column
+  // exists when EITHER half has something; only the available tabs render —
+  // both available → tab bar, default AI; one available → single pane, no bar;
+  // neither → the terminal takes the whole width (the old `solo` mode).
+  const hasCommands = (commands?.length ?? 0) > 0;
+  const showSide = aiReady || hasCommands;
+  const both = aiReady && hasCommands;
+  const sideTab = both ? tabPref : aiReady ? 'ai' : 'cmds';
+
   // Rounding keeps 1-0.7 from leaking float noise (0.30000000000000004fr is
   // valid CSS, just embarrassing).
   const restRatio = Math.round((1 - ratio) * 1000) / 1000;
@@ -1030,13 +1071,22 @@ export default function TerminalPage() {
           drop wholesale — a dead declaration stacks the two panes vertically. */}
       <div
         ref={workspaceRef}
-        className={`terminal-workspace${aiReady ? '' : ' solo'}${dragging ? ' dragging' : ''}`}
+        className={`terminal-workspace${showSide ? '' : ' solo'}${dragging ? ' dragging' : ''}`}
         style={{ '--tw-col': `${ratio}fr`, '--tw-rest': `${restRatio}fr` } as CSSProperties}
       >
-        <Terminal nodeId={id} onSessionChange={setSessionId} />
-        {/* keyed by node: switching targets mounts a fresh panel, so the old
+        <Terminal
+          nodeId={id}
+          onSessionChange={setSessionId}
+          onReady={setHandle}
+          onConnectionChange={setTermState}
+        />
+        {/* The tab container. Both panes stay MOUNTED while the tab flips —
+            AssistantPanel holds the transcript, the streaming SSE and the
+            session id in its own state, so unmounting on a tab switch would
+            kill an in-flight turn and blank the history. `hidden` only hides.
+            keyed by node: switching targets mounts a fresh panel, so the old
             node's transcript and session id never leak into the new one. */}
-        {aiReady && (
+        {showSide && (
           <>
             <div
               className="terminal-divider"
@@ -1049,11 +1099,40 @@ export default function TerminalPage() {
               onPointerCancel={endDrag}
               onDoubleClick={resetRatio}
             />
-            <AssistantPanel
-              key={id}
-              nodeId={id}
-              sessionId={sessionId}
-            />
+            <section className="terminal-side card">
+              {both && (
+                <div className="side-tabs" role="tablist">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={sideTab === 'ai'}
+                    className={'side-tab' + (sideTab === 'ai' ? ' active' : '')}
+                    onClick={() => setTabPref('ai')}
+                  >
+                    {t('side_tab_ai')}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={sideTab === 'cmds'}
+                    className={'side-tab' + (sideTab === 'cmds' ? ' active' : '')}
+                    onClick={() => setTabPref('cmds')}
+                  >
+                    {t('side_tab_commands')}
+                  </button>
+                </div>
+              )}
+              <div className="side-pane" hidden={sideTab !== 'ai'}>
+                <AssistantPanel key={id} nodeId={id} sessionId={sessionId} />
+              </div>
+              <div className="side-pane" hidden={sideTab !== 'cmds'}>
+                <QuickCommandPanel
+                  commands={commands ?? []}
+                  handle={handle}
+                  connected={termState === 'connected'}
+                />
+              </div>
+            </section>
           </>
         )}
       </div>

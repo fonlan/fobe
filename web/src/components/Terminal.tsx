@@ -13,7 +13,7 @@ import type {
   TerminalQueryPayload,
 } from '../types';
 
-type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'closed';
+export type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'closed';
 
 /** Agent/server terminal close reasons that get a localized message. */
 const localizedReasons: Record<string, string> = {
@@ -69,18 +69,35 @@ export interface TerminalHandle {
   write: (text: string) => void;
   /** Tear down the current session and open a fresh agent terminal. */
   reconnect: () => void;
+  /**
+   * Inject text into the PTY as if the operator typed it (quick commands,
+   * 2026-09-19). The PTY echoes it back, so the screen shows the command.
+   */
+  sendInput: (data: string) => void;
+  /** Focus the terminal, so the next keystrokes keep flowing into it. */
+  focus: () => void;
+  /**
+   * Whether the connected shell enabled bracketed paste (DECSET 2004).
+   * Read live at click time: shells flip it on after the prompt appears, and
+   * busybox ash (OpenWrt) never does — a multi-line snippet pasted there
+   * would execute line-by-line instead of waiting for Enter.
+   */
+  bracketedPaste: () => boolean;
 }
 
 export interface TerminalProps {
   nodeId: string;
   onSessionChange?: (sessionId: string | null) => void;
   onReady?: (handle: TerminalHandle | null) => void;
+  /** Connection state changes, for UI that sends input from outside the terminal. */
+  onConnectionChange?: (state: ConnectionState) => void;
 }
 
 export default function Terminal({
   nodeId,
   onSessionChange,
   onReady,
+  onConnectionChange,
 }: TerminalProps) {
   const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -88,6 +105,7 @@ export default function Terminal({
   const wsRef = useRef<WebSocket | null>(null);
   const onSessionChangeRef = useRef(onSessionChange);
   const onReadyRef = useRef(onReady);
+  const onConnectionChangeRef = useRef(onConnectionChange);
   const [state, setState] = useState<ConnectionState>('connecting');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [closeReason, setCloseReason] = useState<string | null>(null);
@@ -97,7 +115,14 @@ export default function Terminal({
   useEffect(() => {
     onSessionChangeRef.current = onSessionChange;
     onReadyRef.current = onReady;
-  }, [onSessionChange, onReady]);
+    onConnectionChangeRef.current = onConnectionChange;
+  }, [onSessionChange, onReady, onConnectionChange]);
+
+  // Mirror the connection state outward after the commit — the parent renders
+  // the quick-command buttons' disabled state from it.
+  useEffect(() => {
+    onConnectionChangeRef.current?.(state);
+  }, [state]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -132,14 +157,6 @@ export default function Terminal({
     // the ends of the buffer). See terminalTouchScroll.ts.
     const detachTouchScroll = attachTouchScroll(terminal, host);
     termRef.current = terminal;
-    onReadyRef.current?.({
-      write: (text: string) => {
-        termRef.current?.write(text);
-      },
-      reconnect: () => {
-        setEpoch((current) => current + 1);
-      },
-    });
 
     const fit = () => {
       // A hidden host (route transition, collapsed layout) would propose ~2x1
@@ -160,6 +177,24 @@ export default function Terminal({
       const socket = wsRef.current;
       if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
     };
+    // The handle must be published after `send` exists: sendInput's closure
+    // reads that binding when CALLED, but a parent that reacts to onReady by
+    // rendering input controls could otherwise race the rest of this effect.
+    onReadyRef.current?.({
+      write: (text: string) => {
+        termRef.current?.write(text);
+      },
+      reconnect: () => {
+        setEpoch((current) => current + 1);
+      },
+      sendInput: (data: string) => {
+        send(api.terminalEnvelope('terminal_input', { data }));
+      },
+      focus: () => {
+        termRef.current?.focus();
+      },
+      bracketedPaste: () => termRef.current?.modes.bracketedPasteMode ?? false,
+    });
     const sendResize = () => {
       const current = termRef.current;
       if (!current) return;

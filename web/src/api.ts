@@ -22,6 +22,7 @@ import type {
   NodeDetailData,
   NodeTrafficCycle,
   NodeView,
+  QuickCommand,
   RegTokenInfo,
   RegTokenRow,
   SessionRow,
@@ -372,6 +373,46 @@ export function updateLatencyTarget(
 
 export function deleteLatencyTarget(id: number): Promise<{ ok: boolean }> {
   return request(`/api/latency-targets/${id}`, { method: 'DELETE' });
+}
+
+// --- quick commands (terminal side panel snippets, 2026-09-19) ---------------
+
+/**
+ * Rebuilt field-by-field like every norm*: a missing key must surface as the
+ * default, not as `undefined` leaking into a controlled input or t() (AGENTS
+ * 陷阱 2026-09-19). The server emits all fields today; this keeps tomorrow's
+ * omitempty from silently blanking the panel.
+ */
+function normQuickCommand(raw: Record<string, unknown>): QuickCommand {
+  return {
+    id: typeof raw.id === 'number' ? raw.id : 0,
+    name: typeof raw.name === 'string' ? raw.name : '',
+    command: typeof raw.command === 'string' ? raw.command : '',
+    sort_order: typeof raw.sort_order === 'number' ? raw.sort_order : 0,
+    created_at: typeof raw.created_at === 'number' ? raw.created_at : 0,
+    updated_at: typeof raw.updated_at === 'number' ? raw.updated_at : 0,
+  };
+}
+
+export async function listQuickCommands(): Promise<QuickCommand[]> {
+  const r = await request<{ commands: Array<Record<string, unknown>> }>('/api/quick-commands');
+  return (r.commands ?? []).map(normQuickCommand);
+}
+
+export function createQuickCommand(name: string, command: string): Promise<{ id: number }> {
+  return request('/api/quick-commands', { method: 'POST', body: { name, command } });
+}
+
+export function updateQuickCommand(id: number, name: string, command: string): Promise<{ ok: boolean }> {
+  return request(`/api/quick-commands/${id}`, { method: 'PUT', body: { name, command } });
+}
+
+export function deleteQuickCommand(id: number): Promise<{ ok: boolean }> {
+  return request(`/api/quick-commands/${id}`, { method: 'DELETE' });
+}
+
+export function reorderQuickCommands(ids: number[]): Promise<{ ok: boolean }> {
+  return request('/api/quick-commands/order', { method: 'PUT', body: { ids } });
 }
 
 // --- security: blacklist / sessions -----------------------------------------

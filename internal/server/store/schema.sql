@@ -159,6 +159,18 @@ CREATE TABLE IF NOT EXISTS metrics_samples (
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_node_ts ON metrics_samples(node_id, ts);
 
+-- 常用命令（终端页右栏标签页, 2026-09-19）：操作员自己维护的命令片段。
+-- 纯面板数据——服务端从不执行它，只是浏览器往自己的 PTY 里注入键盘输入。
+-- command 明文（与 ai_messages 里留档的命令全文同待遇，§12.6）。
+CREATE TABLE IF NOT EXISTS quick_commands (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    command    TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS latency_targets (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,

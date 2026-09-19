@@ -189,6 +189,16 @@ export interface LatencyTarget {
   port: number;
 }
 
+/** 常用命令：终端页右栏的命令片段（2026-09-19）。 */
+export interface QuickCommand {
+  id: number;
+  name: string;
+  command: string;
+  sort_order: number;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface CommandRow {
   id: string;
   node_id: string;

@@ -143,6 +143,9 @@ export default function Settings() {
       <NavLink to="/settings/notifications" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
         {t('nav_notifications')}
       </NavLink>
+      <NavLink to="/settings/commands" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+        {t('qc_title')}
+      </NavLink>
       <NavLink to="/settings/ai" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
         {t('nav_ai')}
       </NavLink>
