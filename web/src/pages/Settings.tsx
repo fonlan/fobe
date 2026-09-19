@@ -124,126 +124,111 @@ export default function Settings() {
 
   const field = useField({ settings, draft, setDraft });
 
-  if (!isBaseSettings) {
-    return (
-      <div className="stack-lg">
-        <div className="page-head">
-          <h2>{t('settings_title')}</h2>
-        </div>
-        <nav className="settings-subnav" aria-label={t('settings_subnav_label')}>
-          <NavLink to="/settings" end className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-            {t('settings_basic')}
-          </NavLink>
-          <NavLink to="/settings/targets" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-            {t('nav_targets')}
-          </NavLink>
-          <NavLink to="/settings/servers" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-            {t('nav_servers')}
-          </NavLink>
-          <NavLink to="/settings/subscriptions" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-            {t('nav_subs')}
-          </NavLink>
-          <NavLink to="/settings/notifications" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-            {t('nav_notifications')}
-          </NavLink>
-          <NavLink to="/settings/ai" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-            {t('nav_ai')}
-          </NavLink>
-          <NavLink to="/settings/audit" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-            {t('nav_audit')}
-          </NavLink>
-        </nav>
-        <Outlet />
-      </div>
-    );
-  }
+  // Head + subnav are identical on every settings route; only the body differs
+  // (the base page renders its cards here, every other tab comes via <Outlet />).
+  const subnav = (
+    <nav className="settings-subnav" aria-label={t('settings_subnav_label')}>
+      <NavLink to="/settings" end className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+        {t('settings_basic')}
+      </NavLink>
+      <NavLink to="/settings/targets" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+        {t('nav_targets')}
+      </NavLink>
+      <NavLink to="/settings/servers" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+        {t('nav_servers')}
+      </NavLink>
+      <NavLink to="/settings/subscriptions" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+        {t('nav_subs')}
+      </NavLink>
+      <NavLink to="/settings/notifications" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+        {t('nav_notifications')}
+      </NavLink>
+      <NavLink to="/settings/ai" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+        {t('nav_ai')}
+      </NavLink>
+      <NavLink to="/settings/audit" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
+        {t('nav_audit')}
+      </NavLink>
+    </nav>
+  );
 
   return (
     <div className="stack-lg">
       <div className="page-head">
         <h2>{t('settings_title')}</h2>
       </div>
-      <nav className="settings-subnav" aria-label={t('settings_subnav_label')}>
-        <NavLink to="/settings" end className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-          {t('settings_basic')}
-        </NavLink>
-        <NavLink to="/settings/targets" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-          {t('nav_targets')}
-        </NavLink>
-        <NavLink to="/settings/servers" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-          {t('nav_servers')}
-        </NavLink>
-        <NavLink to="/settings/subscriptions" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-          {t('nav_subs')}
-        </NavLink>
-        <NavLink to="/settings/notifications" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-          {t('nav_notifications')}
-        </NavLink>
-        <NavLink to="/settings/ai" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-          {t('nav_ai')}
-        </NavLink>
-        <NavLink to="/settings/audit" className={({ isActive }) => 'settings-subnav-link' + (isActive ? ' active' : '')}>
-          {t('nav_audit')}
-        </NavLink>
-      </nav>
+      {subnav}
 
-      {err && (
-        <div className="card error-card">
-          <p>{err}</p>
-          <button type="button" className="btn" onClick={() => void load()}>
-            {t('retry')}
-          </button>
-        </div>
+      {!isBaseSettings && <Outlet />}
+
+      {isBaseSettings && (
+        <>
+          {err && (
+            <div className="card error-card">
+              <p>{err}</p>
+              <button type="button" className="btn" onClick={() => void load()}>
+                {t('retry')}
+              </button>
+            </div>
+          )}
+
+          {/*
+            §12.1 (2026-09-18): the AI card is gone from base settings entirely —
+            provider/model/key configuration now lives on the dedicated /settings/ai
+            page, and the three legacy keys (ai.base_url / ai.model / ai.api_key)
+            were removed from the server allow-list, so keeping the fields here
+            would render a form whose every save answers unknown_key.
+          */}
+
+          {/* 布局(2026-09-19):四张轻卡片两两成对排进 .settings-duo(上半页
+              田字),表格型重卡片(sing-box 版本、GeoIP、安全)保持整行——八张
+              全宽卡片竖排、每张内容只占一行,是这页显杂乱的主因。 */}
+          <div className="settings-duo">
+            <section className="card">
+              <h3>{t('sec_access')}</h3>
+              <p className="hint">{t('server_public_url_hint')}</p>
+              <div className="form-grid">
+                {field('server.public_url', t('server_public_url'), { type: 'url' })}
+              </div>
+              <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(SERVER_KEYS)} label={t('save')} />
+            </section>
+            <section className="card">
+              <h3>{t('sec_theme')}</h3>
+              <p className="hint">{t('theme_desc')}</p>
+              <div className="row-gap">
+                {(['light', 'dark', 'system'] as ThemeMode[]).map((m) => (
+                  <label key={m} className="check-chip">
+                    <input type="radio" name="theme" checked={mode === m} onChange={() => setMode(m)} />
+                    {m === 'light' ? t('theme_light') : m === 'dark' ? t('theme_dark') : t('theme_system')}
+                  </label>
+                ))}
+              </div>
+            </section>
+          </div>
+
+          <div className="settings-duo">
+            <AgentUpdateCard
+              field={field}
+              busy={busy}
+              savedMsg={savedMsg}
+              onSave={() => void saveGroup(AGENT_KEYS)}
+              saveLabel={t('save')}
+            />
+            <BackupCard />
+          </div>
+
+          <SingboxCacheCard />
+          <GeoIPCard
+            field={field}
+            busy={busy}
+            savedMsg={savedMsg}
+            onSave={() => void saveGroup(GEOIP_KEYS)}
+            saveLabel={t('save')}
+          />
+
+          <SecurityCard />
+        </>
       )}
-
-      <section className="card">
-        <h3>{t('sec_access')}</h3>
-        <p className="hint">{t('server_public_url_hint')}</p>
-        <div className="form-grid">
-          {field('server.public_url', t('server_public_url'), { type: 'url' })}
-        </div>
-        <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(SERVER_KEYS)} label={t('save')} />
-      </section>
-
-      {/*
-        §12.1 (2026-09-18): the AI card is gone from base settings entirely —
-        provider/model/key configuration now lives on the dedicated /settings/ai
-        page, and the three legacy keys (ai.base_url / ai.model / ai.api_key)
-        were removed from the server allow-list, so keeping the fields here
-        would render a form whose every save answers unknown_key.
-      */}
-
-      <SingboxCacheCard />
-      <BackupCard />
-      <GeoIPCard
-        field={field}
-        busy={busy}
-        savedMsg={savedMsg}
-        onSave={() => void saveGroup(GEOIP_KEYS)}
-        saveLabel={t('save')}
-      />
-      <AgentUpdateCard
-        field={field}
-        busy={busy}
-        savedMsg={savedMsg}
-        onSave={() => void saveGroup(AGENT_KEYS)}
-        saveLabel={t('save')}
-      />
-      <BlacklistCard />
-      <SessionsCard />
-
-      <section className="card">
-        <h3>{t('sec_theme')}</h3>
-        <p className="hint">{t('theme_desc')}</p>
-        <div className="row-gap">
-          {(['light', 'dark', 'system'] as ThemeMode[]).map((m) => (
-            <label key={m} className="check-chip">
-              <input type="radio" name="theme" checked={mode === m} onChange={() => setMode(m)} />
-              {m === 'light' ? t('theme_light') : m === 'dark' ? t('theme_dark') : t('theme_system')}
-            </label>
-          ))}
-        </div>
-      </section>
     </div>
   );
 }
@@ -1252,14 +1237,25 @@ function GeoIPCard({
   );
 }
 
-function BlacklistCard() {
+/**
+ * Security card (2026-09-19): the IP blacklist and the login sessions share one
+ * card — they answer the same question ("who has been knocking on this panel"),
+ * and as separate full-width cards each was mostly chrome around its table.
+ * Merging also removes the old BlacklistCard double heading (card title and
+ * subsection both rendered 安全).
+ */
+function SecurityCard() {
   const { t } = useI18n();
   const [entries, setEntries] = useState<BlacklistRow[] | null>(null);
+  const [sessions, setSessions] = useState<SessionRow[] | null>(null);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setEntries(await api.listBlacklist());
+      const [b, s] = await Promise.all([api.listBlacklist(), api.listSessions()]);
+      setEntries(b);
+      setSessions(s);
       setErr(null);
     } catch (e) {
       setErr(apiErrorMessage(e, t));
@@ -1279,11 +1275,26 @@ function BlacklistCard() {
     }
   };
 
+  const revokeAll = async () => {
+    setBusy(true);
+    try {
+      await api.revokeAllSessions();
+      await load();
+    } catch (e) {
+      setErr(apiErrorMessage(e, t));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="card">
       <h3>{t('sec_security')}</h3>
-      <h4>{t('sec_security')} — IP</h4>
       {err && <div className="form-error">{err}</div>}
+
+      <div className="sec-subhead">
+        <h4>{t('sec_blacklist')}</h4>
+      </div>
       {entries !== null && entries.length === 0 && <div className="hint">{t('blacklist_empty')}</div>}
       {entries !== null && entries.length > 0 && (
         <div className="table-wrap">
@@ -1321,50 +1332,13 @@ function BlacklistCard() {
           </table>
         </div>
       )}
-    </section>
-  );
-}
 
-function SessionsCard() {
-  const { t } = useI18n();
-  const [sessions, setSessions] = useState<SessionRow[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      setSessions(await api.listSessions());
-      setErr(null);
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    }
-  }, [t]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const revokeAll = async () => {
-    setBusy(true);
-    try {
-      await api.revokeAllSessions();
-      await load();
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <section className="card">
-      <div className="row-between">
-        <h3>{t('sec_sessions')}</h3>
+      <div className="sec-subhead">
+        <h4>{t('sec_sessions')}</h4>
         <button type="button" className="btn danger small" disabled={busy} onClick={() => void revokeAll()}>
           {t('session_revoke_all')}
         </button>
       </div>
-      {err && <div className="form-error">{err}</div>}
       {sessions !== null && sessions.length === 0 && <div className="hint">{t('sessions_empty')}</div>}
       {sessions !== null && sessions.length > 0 && (
         <div className="table-wrap">

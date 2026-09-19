@@ -1067,6 +1067,34 @@ section.card { margin-bottom: 0; }
 .settings-subnav-link:hover { color: var(--text); text-decoration: none; }
 .settings-subnav-link.active { background: var(--accent-weak); color: var(--accent); font-weight: 600; }
 
+/* 基础设置页(2026-09-19):只有一两个控件的轻卡片(访问配置/外观、Agent 更新/
+   备份)成对排一行——它们各自独占全宽是页面显杂乱的主因(内容窄、留白大、
+   八张卡片竖排极长)。表格型重卡片(sing-box 版本、GeoIP、安全)保持整行。
+   gap 与 .stack-lg 的 20px 对齐,折叠进单列时间距不变。 */
+.settings-duo {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  align-items: stretch;
+}
+
+@media (max-width: 960px) {
+  .settings-duo { grid-template-columns: 1fr; }
+}
+
+/* 合并后的"安全"卡片里的小节标题行(标题 + 可选动作,如"吊销全部会话")。
+   h4 全局自带 margin,放进 flex 行会让标题和按钮错位,这里把间距收归行本身。 */
+.sec-subhead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 16px 0 8px;
+}
+.sec-subhead:first-of-type { margin-top: 0; }
+.sec-subhead h4 { margin: 0; }
+
 /* --- terminal -------------------------------------------------------------- */
 
 .terminal-page { min-width: 0; }
