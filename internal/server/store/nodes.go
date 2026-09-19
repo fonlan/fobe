@@ -509,6 +509,24 @@ func (s *Store) ReplaceNodeIPs(nodeID string, ips []IPRow) error {
 	return tx.Commit()
 }
 
+// ManualPrimaryIP returns the address the operator pinned as primary, if any
+// (§14 手动主 IP). The hub checks it before an automatic re-pin so an
+// auto candidate (agent suggestion, §14 实现修订 2026-09-19 observed egress)
+// can never override the pin while it is still reported.
+func (s *Store) ManualPrimaryIP(nodeID string) (string, bool, error) {
+	var ip string
+	err := s.db.QueryRow(
+		`SELECT ip FROM node_ips WHERE node_id = ? AND manual_primary = 1 LIMIT 1`, nodeID,
+	).Scan(&ip)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return ip, true, nil
+}
+
 // SetManualPrimary pins one of the node's reported addresses as primary
 // (§14 手动主 IP). The caller must have verified the IP belongs to the node.
 // manual_primary survives later ReplaceNodeIPs rebuilds, so the agent cannot

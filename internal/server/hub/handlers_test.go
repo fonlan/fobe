@@ -3,12 +3,14 @@ package hub
 import (
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/fonlan/fobe/internal/protocol"
+	"github.com/fonlan/fobe/internal/server/security"
 	"github.com/fonlan/fobe/internal/server/singbox"
 	"github.com/fonlan/fobe/internal/server/store"
 )
@@ -354,7 +356,7 @@ func TestOnHelloDerivesCountry(t *testing.T) {
 	h.recordIPs("n1", []protocol.IPInfo{
 		{IP: "203.0.113.7", Family: 4, Scope: "public", IsPrimary: true},
 		{IP: "192.168.1.9", Family: 4, Scope: "private"},
-	})
+	}, "")
 	if primary, country := nodeCountry(t, h, "n1"); primary != "203.0.113.7" || country != "JP" {
 		t.Fatalf("after re-report: primary=%q country=%q, want 203.0.113.7/JP", primary, country)
 	}
@@ -375,7 +377,7 @@ func TestRecordIPsCountryFallback(t *testing.T) {
 		{IP: "240e:390:2c7:d0a0::1", Family: 6, Scope: "public"},
 		{IP: "192.168.123.2", Family: 4, Scope: "private", IsPrimary: true},
 	}
-	h.recordIPs("n1", lanFirst)
+	h.recordIPs("n1", lanFirst, "")
 	if primary, country := nodeCountry(t, h, "n1"); primary != "192.168.123.2" || country != "CN" {
 		t.Fatalf("fallback: primary=%q country=%q, want 192.168.123.2/CN", primary, country)
 	}
@@ -384,7 +386,7 @@ func TestRecordIPsCountryFallback(t *testing.T) {
 	if err := h.store.SetNodeCountry("n1", "HK", true); err != nil {
 		t.Fatalf("pin country: %v", err)
 	}
-	h.recordIPs("n1", lanFirst)
+	h.recordIPs("n1", lanFirst, "")
 	if _, country := nodeCountry(t, h, "n1"); country != "HK" {
 		t.Fatalf("pinned country overwritten: %q, want HK", country)
 	}
@@ -405,9 +407,173 @@ func TestRecordIPsCountryFallback(t *testing.T) {
 	// address left, and the stored code survives (a missing database must never
 	// blank the flag)
 	h.geo = stubCountry{}
-	h.recordIPs("n1", []protocol.IPInfo{{IP: "192.168.123.2", Family: 4, Scope: "private", IsPrimary: true}})
+	h.recordIPs("n1", []protocol.IPInfo{{IP: "192.168.123.2", Family: 4, Scope: "private", IsPrimary: true}}, "")
 	if primary, country := nodeCountry(t, h, "n1"); primary != "192.168.123.2" || country != "CN" {
 		t.Fatalf("miss wiped state: primary=%q country=%q, want 192.168.123.2/CN", primary, country)
+	}
+}
+
+// --- §14 实现修订 2026-09-19: observed egress address ---------------------------
+
+// TestRecordIPsAdoptsObservedEgress pins the cloud-NAT scenario: Alibaba Cloud
+// (and most clouds) map the public IP at the gateway, so the probe's only
+// source — net.Interfaces — reports just the VPC private address. The panel
+// resolves the connection's source through the trusted-proxy chain and adopts
+// it as the node's public identity: it joins node_ips, anchors the primary
+// pick (the agent's own suggestion on a public-less report can only be a LAN
+// address) and gives GeoIP something to resolve the flag from. The adoption
+// must be idempotent across reports, and the probe retires the observed row
+// the moment it reports a public address of its own.
+func TestRecordIPsAdoptsObservedEgress(t *testing.T) {
+	h := newTestHub(t)
+	h.geo = stubCountry{"203.0.113.7": "JP"}
+	mustCreateNode(t, h.store, "n1")
+
+	lan := []protocol.IPInfo{{IP: "172.17.16.3", Family: 4, Scope: "private", IsPrimary: true}}
+	h.onHello(&Conn{nodeID: "n1", srcIP: "203.0.113.7"}, &protocol.Hello{IPs: lan})
+
+	if primary, country := nodeCountry(t, h, "n1"); primary != "203.0.113.7" || country != "JP" {
+		t.Fatalf("after hello: primary=%q country=%q, want 203.0.113.7/JP", primary, country)
+	}
+	rows, err := h.store.ListNodeIPs("n1")
+	if err != nil {
+		t.Fatalf("list ips: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("after hello: %d ip rows, want 2 (private + observed): %+v", len(rows), rows)
+	}
+	for _, r := range rows {
+		if r.IP == "203.0.113.7" && (r.Scope != "public" || r.Family != 4 || !r.IsPrimary) {
+			t.Fatalf("observed row wrong: %+v", r)
+		}
+	}
+
+	// state frames repeat the same report: no duplicate row, no drift
+	h.recordIPs("n1", lan, "203.0.113.7")
+	if rows, _ = h.store.ListNodeIPs("n1"); len(rows) != 2 {
+		t.Fatalf("after re-report: %d ip rows, want 2: %+v", len(rows), rows)
+	}
+
+	// the machine gains a real public address on its NIC: its report now owns
+	// the set and the observed row retires on this very report
+	h.recordIPs("n1", []protocol.IPInfo{
+		{IP: "198.51.100.9", Family: 4, Scope: "public", IsPrimary: true},
+		{IP: "172.17.16.3", Family: 4, Scope: "private"},
+	}, "203.0.113.7")
+	rows, _ = h.store.ListNodeIPs("n1")
+	for _, r := range rows {
+		if r.IP == "203.0.113.7" {
+			t.Fatalf("observed row survived a report that carries its own public address: %+v", rows)
+		}
+	}
+	if primary, _ := nodeCountry(t, h, "n1"); primary != "198.51.100.9" {
+		t.Fatalf("primary=%q, want 198.51.100.9", primary)
+	}
+}
+
+// TestRecordIPsObservedEgressGuards covers the refusals: a private or CGNAT
+// source (LAN deployment, proxy without XFF) must not masquerade as public, a
+// public IPv6 source joins as family 6, and a probe that already reports a
+// public address is never touched — its set stays wholly its own.
+func TestRecordIPsObservedEgressGuards(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n1")
+
+	lan := []protocol.IPInfo{{IP: "10.0.0.7", Family: 4, Scope: "private", IsPrimary: true}}
+	count := func() int {
+		t.Helper()
+		rows, err := h.store.ListNodeIPs("n1")
+		if err != nil {
+			t.Fatalf("list ips: %v", err)
+		}
+		return len(rows)
+	}
+
+	h.recordIPs("n1", lan, "192.168.1.5")
+	if primary, _ := nodeCountry(t, h, "n1"); primary != "10.0.0.7" {
+		t.Fatalf("private source became primary: %q", primary)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("private source injected: %d rows", n)
+	}
+
+	h.recordIPs("n1", lan, "100.64.23.5") // CGNAT: not public either
+	if n := count(); n != 1 {
+		t.Fatalf("CGNAT source injected: %d rows", n)
+	}
+
+	h.recordIPs("n1", lan, "240e:390:2c7:d0a0::1")
+	rows, _ := h.store.ListNodeIPs("n1")
+	if len(rows) != 2 {
+		t.Fatalf("IPv6 source not adopted: %+v", rows)
+	}
+	for _, r := range rows {
+		if r.IP == "240e:390:2c7:d0a0::1" && (r.Family != 6 || r.Scope != "public") {
+			t.Fatalf("observed v6 row wrong: %+v", r)
+		}
+	}
+
+	h.recordIPs("n1", []protocol.IPInfo{
+		{IP: "198.51.100.9", Family: 4, Scope: "public", IsPrimary: true},
+	}, "203.0.113.7")
+	rows, _ = h.store.ListNodeIPs("n1")
+	if len(rows) != 1 || rows[0].IP != "198.51.100.9" {
+		t.Fatalf("reported set not owned by the probe: %+v", rows)
+	}
+}
+
+// TestRecordIPsManualPickSurvivesObservedEgress: an operator who pins a LAN
+// address as primary (the reachable one, the one they want listed) outranks
+// the observed egress — the pin lives in the reported set every time, so the
+// re-pin guard must keep seeing it as protected.
+func TestRecordIPsManualPickSurvivesObservedEgress(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n1")
+
+	lan := []protocol.IPInfo{{IP: "172.17.16.3", Family: 4, Scope: "private", IsPrimary: true}}
+	h.recordIPs("n1", lan, "203.0.113.7")
+	if primary, _ := nodeCountry(t, h, "n1"); primary != "203.0.113.7" {
+		t.Fatalf("setup: primary=%q, want the observed egress", primary)
+	}
+	if err := h.store.SetManualPrimary("n1", "172.17.16.3"); err != nil {
+		t.Fatalf("manual pick: %v", err)
+	}
+
+	h.recordIPs("n1", lan, "203.0.113.7")
+	if primary, _ := nodeCountry(t, h, "n1"); primary != "172.17.16.3" {
+		t.Fatalf("manual pick overridden by observed egress: %q", primary)
+	}
+}
+
+// TestRealClientIPTrustChain pins the address resolution behind the observed
+// egress: a direct connection is its own socket peer and any XFF it carries is
+// ignored; only a peer inside the trusted ranges may speak through XFF.
+func TestRealClientIPTrustChain(t *testing.T) {
+	h := newTestHub(t)
+	trust, err := security.NewTrustChain("")
+	if err != nil {
+		t.Fatalf("trust chain: %v", err)
+	}
+	h.trust = trust
+
+	req := httptest.NewRequest("GET", "/ws/agent", nil)
+	req.RemoteAddr = "203.0.113.7:55001"
+	req.Header.Set("X-Forwarded-For", "6.6.6.6")
+	if got := h.realClientIP(req); got != "203.0.113.7" {
+		t.Fatalf("direct: %q, want the socket peer", got)
+	}
+
+	req = httptest.NewRequest("GET", "/ws/agent", nil)
+	req.RemoteAddr = "127.0.0.1:55002"
+	req.Header.Set("X-Forwarded-For", "198.51.100.9, 10.0.0.1")
+	if got := h.realClientIP(req); got != "198.51.100.9" {
+		t.Fatalf("behind trusted proxy: %q, want the XFF leftmost", got)
+	}
+
+	req = httptest.NewRequest("GET", "/ws/agent", nil)
+	req.RemoteAddr = "127.0.0.1:55003" // proxy without an XFF setup: private, never adopted
+	if got := h.realClientIP(req); got != "127.0.0.1" {
+		t.Fatalf("trusted proxy without XFF: %q, want the socket peer", got)
 	}
 }
 

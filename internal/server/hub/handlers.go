@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -45,7 +47,7 @@ func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 		h.agentUp.Reconcile(c.nodeID)
 	}
 	if len(hello.IPs) > 0 {
-		h.recordIPs(c.nodeID, hello.IPs)
+		h.recordIPs(c.nodeID, hello.IPs, c.srcIP)
 	}
 	h.replaceInterfaces(c.nodeID, hello.Interfaces)
 	_ = h.store.RecoverAlert("node_offline", c.nodeID)
@@ -222,9 +224,9 @@ func (h *Hub) onLatency(nodeID string, b *protocol.LatencyBatch) {
 	}
 }
 
-func (h *Hub) onState(nodeID string, st *protocol.State) {
+func (h *Hub) onState(nodeID, srcIP string, st *protocol.State) {
 	if len(st.IPs) > 0 {
-		h.recordIPs(nodeID, st.IPs)
+		h.recordIPs(nodeID, st.IPs, srcIP)
 	}
 	h.replaceInterfaces(nodeID, st.Interfaces)
 	if st.Singbox != nil {
@@ -248,16 +250,33 @@ func (h *Hub) onState(nodeID string, st *protocol.State) {
 // hello copy resolved no country at all — so a probe whose primary_ip was first
 // written by its hello kept an empty flag forever, because the re-pin guard
 // skips exactly that state (the stored address is already the reported one).
-func (h *Hub) recordIPs(nodeID string, ips []protocol.IPInfo) {
-	rows := make([]store.IPRow, 0, len(ips))
+//
+// srcIP is the panel-side source address of the agent's connection (§14 实现
+// 修订 2026-09-19): when the probe reports no public address of its own — a
+// cloud NAT'd machine whose NIC only carries the VPC private address — the
+// observed egress address joins the set and anchors the primary pick. See
+// observedEgress.
+func (h *Hub) recordIPs(nodeID string, ips []protocol.IPInfo, srcIP string) {
+	rows := make([]store.IPRow, 0, len(ips)+1)
 	primary := ""
+	hasPublic := false
 	for _, ip := range ips {
 		rows = append(rows, store.IPRow{
 			IP: ip.IP, Family: ip.Family, Scope: ip.Scope, IsPrimary: ip.IsPrimary,
 		})
+		if ip.Scope == "public" {
+			hasPublic = true
+		}
 		if ip.IsPrimary && primary == "" {
 			primary = ip.IP
 		}
+	}
+	if o := observedEgress(srcIP, hasPublic, ips); o != nil {
+		rows = append(rows, *o)
+		ips = append(slices.Clone(ips), protocol.IPInfo{IP: o.IP, Family: o.Family, Scope: o.Scope})
+		// The agent's pick on a public-less report is by construction a LAN
+		// address; the observed egress is the node's only public identity.
+		primary = o.IP
 	}
 	if err := h.store.ReplaceNodeIPs(nodeID, rows); err != nil {
 		h.log.Warn("replace node ips", "node", nodeID, "err", err)
@@ -277,11 +296,21 @@ func (h *Hub) recordIPs(nodeID string, ips []protocol.IPInfo) {
 	if err != nil {
 		return
 	}
-	// Re-pin only when the stored address is gone (or was never set). A §14
-	// manual pick that is still reported must survive: unconditional re-pinning
-	// would fight the store's manual-pick sync and flip the list column back to
-	// the agent's suggestion on every report.
-	if primary != "" && (n.PrimaryIP == "" || !ipInRows(ips, n.PrimaryIP)) {
+	// Re-pin when the stored address is gone (or was never set), or when an
+	// un-pinned stored address lost to a better candidate — the observed egress
+	// arriving for a probe that used to report only LAN addresses, or a manual
+	// pick's address vanishing from the report. A §14 manual pick that is still
+	// reported must survive: unconditional re-pinning would fight the store's
+	// manual-pick sync and flip the list column back on every report.
+	_, hasManual, err := h.store.ManualPrimaryIP(nodeID)
+	if err != nil {
+		// Conservative on a read failure: assume a pin may exist and skip the
+		// automatic re-pin — a missed heal repeats on the next report, an
+		// overwritten manual pick does not self-heal.
+		hasManual = true
+	}
+	if primary != "" && (n.PrimaryIP == "" || !ipInRows(ips, n.PrimaryIP) ||
+		(n.PrimaryIP != primary && !hasManual)) {
 		code, _ := h.resolveCountry(n, ips, primary) // a miss keeps the stored code
 		if err := h.store.SetNodePrimaryIP(nodeID, primary, code); err != nil {
 			h.log.Warn("set node primary ip", "node", nodeID, "err", err)
@@ -289,6 +318,45 @@ func (h *Hub) recordIPs(nodeID string, ips []protocol.IPInfo) {
 		n.PrimaryIP, n.CountryCode = primary, code
 	}
 	h.applyCountry(n, ips, n.PrimaryIP)
+}
+
+// cgnatNet is shared address space (RFC 6598), not public: Go's IsPrivate
+// does not know it, and the agent's isPublic spells it out the same way.
+var cgnatNet = func() *net.IPNet {
+	_, n, _ := net.ParseCIDR("100.64.0.0/10")
+	return n
+}()
+
+// isPublicIP mirrors the agent's isPublic (§14): GlobalUnicast alone also
+// returns true for private ranges, so they are checked explicitly.
+func isPublicIP(ip net.IP) bool {
+	return ip != nil && ip.IsGlobalUnicast() &&
+		!ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() &&
+		!ip.IsUnspecified() && !cgnatNet.Contains(ip)
+}
+
+// observedEgress decides whether the connection's source address should join
+// the node's address set (§14 实现修订 2026-09-19). Cloud providers (Alibaba
+// Cloud included) NAT the public IP at the gateway — the NIC only carries the
+// VPC private address, so the agent's only source, net.Interfaces, can never
+// see it; the panel however observes the mapped address on the WebSocket
+// socket itself. Guards: the probe keeps full ownership of its set the moment
+// it reports a public address of its own (the observed row retires on the next
+// full report), a private source (LAN deployment, unconfigured proxy) must not
+// masquerade as public, and a duplicate must not slip in.
+func observedEgress(srcIP string, reportedHasPublic bool, ips []protocol.IPInfo) *store.IPRow {
+	if srcIP == "" || reportedHasPublic || ipInRows(ips, srcIP) {
+		return nil
+	}
+	ip := net.ParseIP(srcIP)
+	if !isPublicIP(ip) {
+		return nil
+	}
+	family := 6
+	if ip.To4() != nil {
+		family = 4
+	}
+	return &store.IPRow{IP: srcIP, Family: family, Scope: "public"}
 }
 
 // RefreshCountry re-derives nodes.country_code from the addresses the node

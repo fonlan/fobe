@@ -6,6 +6,7 @@ package hub
 import (
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -120,10 +121,15 @@ func New(st *store.Store, trust *security.TrustChain, log *slog.Logger, geo ...g
 
 type Conn struct {
 	nodeID string
-	ws     *websocket.Conn
-	send   chan protocol.Envelope
-	done   chan struct{}
-	once   sync.Once
+	// srcIP is the connection's source address as resolved through the
+	// trusted-proxy chain at upgrade time (design §14 实现修订 2026-09-19):
+	// the egress address of a NAT'd probe, which its NIC-enumeration can
+	// never see (Alibaba Cloud et al. map the public IP at the gateway).
+	srcIP string
+	ws    *websocket.Conn
+	send  chan protocol.Envelope
+	done  chan struct{}
+	once  sync.Once
 }
 
 func (c *Conn) close() {
@@ -147,6 +153,7 @@ func (h *Hub) OnlineCount() int {
 // HandleAgentWS upgrades and takes over the agent connection. The request has
 // already been authenticated: nodeID is verified against the stored secret.
 func (h *Hub) HandleAgentWS(w http.ResponseWriter, r *http.Request, nodeID string) {
+	srcIP := h.realClientIP(r)
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return // upgrader already replied
@@ -154,6 +161,7 @@ func (h *Hub) HandleAgentWS(w http.ResponseWriter, r *http.Request, nodeID strin
 
 	c := &Conn{
 		nodeID: nodeID,
+		srcIP:  srcIP,
 		ws:     ws,
 		send:   make(chan protocol.Envelope, 64),
 		done:   make(chan struct{}),
@@ -288,6 +296,21 @@ func (h *Hub) HandleAgentSelfCheck(w http.ResponseWriter, r *http.Request, nodeI
 	h.log.Info("agent self-check ok", "node", nodeID, "version", hello.Version, "target", version)
 }
 
+// realClientIP resolves the connection's source address through the trusted-
+// proxy chain (§4.3): behind nginx the socket peer is the proxy and XFF
+// carries the probe, direct connections are their own socket peer. A nil
+// chain (unit tests) reads the socket address only.
+func (h *Hub) realClientIP(r *http.Request) string {
+	if h.trust != nil {
+		return h.trust.RealIP(r)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -357,7 +380,7 @@ func (h *Hub) handleFrame(c *Conn, env protocol.Envelope) {
 	case protocol.TypeState:
 		var p protocol.State
 		if json.Unmarshal(env.Payload, &p) == nil {
-			h.onState(c.nodeID, &p)
+			h.onState(c.nodeID, c.srcIP, &p)
 		}
 	case protocol.TypeCmdResult:
 		var p protocol.CmdResult
