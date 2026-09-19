@@ -85,17 +85,46 @@ func (s *Server) handleRevokeAllSessions(w http.ResponseWriter, r *http.Request)
 
 // --- audit + alerts ---
 
+// handleListAudit serves one numbered page of the audit trail, newest first.
+// page/limit rather than a keyset cursor: the panel offers page numbers and a
+// "jump to page" box, which needs OFFSET plus the total — see the cost written
+// down in design §16.
 func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
-	limit := 200
+	limit := 20
 	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 1000 {
 		limit = v
 	}
-	entries, err := s.Store.ListAudit(limit)
+	// Same leniency as limit: a missing or junk page is page 1, not an error.
+	page := 1
+	if v, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && v > 0 {
+		page = v
+	}
+	total, err := s.Store.CountAudit()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+	pages := (total + limit - 1) / limit
+	if pages < 1 {
+		pages = 1
+	}
+	// Clamp rather than serve an empty table: the operator may still hold a
+	// page number from before the trail grew, or have typed one by hand. The
+	// response echoes the page actually served so the control can snap to it.
+	if page > pages {
+		page = pages
+	}
+	entries, err := s.Store.ListAuditPage(limit, (page-1)*limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries": entries,
+		"total":   total,
+		"page":    page,
+		"limit":   limit,
+	})
 }
 
 func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {

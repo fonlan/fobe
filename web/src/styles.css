@@ -752,6 +752,52 @@ section.card { margin-bottom: 0; }
    paint past the card edge. The wrapper owns the horizontal scroll instead. */
 .table-wrap { overflow-x: auto; }
 
+/* 审计日志分页行(§16, 2026-09-19):表格卡片下方的标准分页——左侧"共 N 条 · 第 x/y
+   页",右侧每页条数下拉、首/中/末页码按钮与"跳至第 N 页"。审计表不参与 7 天明细清理、
+   条数无上限,所以总数与页码由服务端 COUNT(*) + OFFSET 得出(代价见 design §16)。 */
+.pager {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.pager-info { color: var(--text-dim); font-size: 13px; margin-right: auto; }
+.pager-gap { color: var(--text-dim); padding: 0 2px; }
+
+.pager-size { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: 13px; }
+
+.pager-size select,
+.pager-jump input {
+  appearance: none;
+  box-sizing: border-box;
+  height: 30px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.pager-size select:focus,
+.pager-jump input:focus { outline: 2px solid var(--accent-weak); border-color: var(--accent); }
+
+/* 当前页:与其它页码按钮同尺寸,靠品牌强调色区分——不能用禁用态,否则它和两头
+   不可点的按钮长得一模一样。 */
+.pager-num { min-width: 32px; padding: 5px 6px; justify-content: center; }
+.pager-num.active {
+  background: var(--accent-weak);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pager-jump { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: 13px; }
+.pager-jump input { width: 58px; text-align: center; }
+
 /* 端口转发规则表的备注列:自由文本,不能让它把整行撑成多行——单行 + 省略号,
    完整值放在 title 里。两个按钮所在的 .row-actions 同理保持单行。 */
 .cell-ellipsis { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

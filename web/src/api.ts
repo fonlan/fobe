@@ -5,7 +5,7 @@
 import type {
   AgentUpdateStatus,
   AlertRow,
-  AuditRow,
+  AuditPage,
   BlacklistRow,
   CommandRow,
   FeishuQRStatus,
@@ -427,8 +427,12 @@ export function revokeAllSessions(): Promise<{ ok: boolean }> {
 
 // --- audit / alerts ---------------------------------------------------------
 
-export function listAudit(limit = 200): Promise<{ entries: AuditRow[] }> {
-  return request(`/api/audit?limit=${limit}`);
+/**
+ * One numbered page of the audit trail, newest first. `page` is 1-based; the
+ * server clamps an out-of-range page and echoes the one it actually served.
+ */
+export function listAudit(limit = 20, page = 1): Promise<AuditPage> {
+  return request(`/api/audit?limit=${limit}&page=${page}`);
 }
 
 export function listAlerts(limit = 200): Promise<{ alerts: AlertRow[] }> {

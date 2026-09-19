@@ -226,6 +226,8 @@ export interface SessionRow {
 }
 
 export interface AuditRow {
+  /** audit_logs primary key; used as the React key for a page of rows. */
+  id: number;
   ts: number;
   actor: string;
   node_id?: string;
@@ -235,6 +237,14 @@ export interface AuditRow {
   risk?: string;
   source_ip?: string;
   ai_session_id?: string;
+}
+
+/** `GET /api/audit`: one numbered page plus what the pager needs to render. */
+export interface AuditPage {
+  entries: AuditRow[];
+  total: number;
+  page: number;
+  limit: number;
 }
 
 export interface AlertRow {

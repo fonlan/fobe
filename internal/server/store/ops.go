@@ -274,6 +274,12 @@ func (s *Store) UndeliveredAlerts() ([]Alert, error) {
 // --- audit logs (design §4.4) ---
 
 type AuditEntry struct {
+	// ID is the audit_logs primary key (AUTOINCREMENT). It is exposed because
+	// the trail is the one table the panel reads backwards through: audit rows
+	// arrive continuously (heartbeat edges, notify retries), so LIMIT/OFFSET
+	// would let a page shift under the operator mid-read and skip or repeat
+	// rows. The panel pages with "id < last id of the previous page" instead.
+	ID     int64  `json:"id"`
 	TS     int64  `json:"ts"`
 	Actor  string `json:"actor"`
 	NodeID string `json:"node_id,omitempty"`
@@ -302,10 +308,20 @@ func (s *Store) InsertAudit(a *AuditEntry) error {
 }
 
 func (s *Store) ListAudit(limit int) ([]AuditEntry, error) {
+	return s.ListAuditPage(limit, 0)
+}
+
+// ListAuditPage returns one page of the audit trail, newest first; offset is
+// (page-1)*limit. Numbered pages and "jump to page" need OFFSET, and the panel
+// accepts what that costs (design §16): boundaries are deterministic for a
+// fixed table, but they are *not* stable against rows appended between two
+// requests — a new row sorts above everything and shifts the window by one.
+// CountAudit supplies the total the pager divides by.
+func (s *Store) ListAuditPage(limit, offset int) ([]AuditEntry, error) {
 	rows, err := s.db.Query(
-		`SELECT a.ts, a.actor, a.node_id, COALESCE(n.name, ''), a.action, a.command, a.reason, a.risk, a.source_ip, a.ai_session_id
+		`SELECT a.id, a.ts, a.actor, a.node_id, COALESCE(n.name, ''), a.action, a.command, a.reason, a.risk, a.source_ip, a.ai_session_id
 		 FROM audit_logs a LEFT JOIN nodes n ON n.id = a.node_id
-		 ORDER BY a.id DESC LIMIT ?`, limit,
+		 ORDER BY a.id DESC LIMIT ? OFFSET ?`, limit, offset,
 	)
 	if err != nil {
 		return nil, err
@@ -314,13 +330,24 @@ func (s *Store) ListAudit(limit int) ([]AuditEntry, error) {
 	out := []AuditEntry{}
 	for rows.Next() {
 		var a AuditEntry
-		if err := rows.Scan(&a.TS, &a.Actor, &a.NodeID, &a.NodeName, &a.Action, &a.Command, &a.Reason,
+		if err := rows.Scan(&a.ID, &a.TS, &a.Actor, &a.NodeID, &a.NodeName, &a.Action, &a.Command, &a.Reason,
 			&a.Risk, &a.SourceIP, &a.AISessionID); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// CountAudit is the total row count behind the numbered pager. audit_logs is
+// never pruned (design §4.4), so this is a scan of the primary-key index —
+// cheap at panel scale (one operator, a few writes per heartbeat edge), and
+// the reason the panel asks for one page at a time rather than counting per
+// row.
+func (s *Store) CountAudit() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM audit_logs`).Scan(&n)
+	return n, err
 }
 
 // --- node_singbox (design §9.1) ---
