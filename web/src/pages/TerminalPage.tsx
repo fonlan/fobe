@@ -934,6 +934,10 @@ export default function TerminalPage() {
   const [commands, setCommands] = useState<QuickCommand[] | null>(null);
   const [handle, setHandle] = useState<TerminalHandle | null>(null);
   const [termState, setTermState] = useState<ConnectionState>('connecting');
+  // Live mirror of the shell's bracketed paste mode — the multi-line buttons'
+  // disabled state must follow it as the shell flips it (after the first
+  // prompt), not as of some earlier render.
+  const [bracketedPaste, setBracketedPaste] = useState(false);
   const [ratio, setRatio] = useState<number>(loadRatio);
   const [dragging, setDragging] = useState(false);
   // Preferred side tab; the EFFECTIVE tab is derived below from what actually
@@ -1079,6 +1083,7 @@ export default function TerminalPage() {
           onSessionChange={setSessionId}
           onReady={setHandle}
           onConnectionChange={setTermState}
+          onBracketedPasteChange={setBracketedPaste}
         />
         {/* The tab container. Both panes stay MOUNTED while the tab flips —
             AssistantPanel holds the transcript, the streaming SSE and the
@@ -1130,6 +1135,7 @@ export default function TerminalPage() {
                   commands={commands ?? []}
                   handle={handle}
                   connected={termState === 'connected'}
+                  bracketedPaste={bracketedPaste}
                 />
               </div>
             </section>

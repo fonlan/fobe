@@ -19,10 +19,14 @@ export default function QuickCommandPanel({
   commands,
   handle,
   connected,
+  bracketedPaste,
 }: {
   commands: QuickCommand[];
   handle: TerminalHandle | null;
   connected: boolean;
+  /** Live mirror of the shell's DECSET 2004 state (pushed by Terminal's parser
+   * observers) — render-time reads of handle.bracketedPaste() go stale. */
+  bracketedPaste: boolean;
 }) {
   const { t } = useI18n();
 
@@ -40,7 +44,7 @@ export default function QuickCommandPanel({
 
   const disabledReason = (command: QuickCommand): string | undefined => {
     if (!connected) return t('qc_panel_disconnected');
-    if (command.command.includes('\n') && !(handle?.bracketedPaste() ?? false)) {
+    if (command.command.includes('\n') && !bracketedPaste) {
       return t('qc_paste_unavailable');
     }
     return undefined;
@@ -58,7 +62,8 @@ export default function QuickCommandPanel({
       ) : (
         <div className="qc-list">
           {commands.map((command) => {
-            const disabled = !connected || (!!handle && command.command.includes('\n') && !handle.bracketedPaste());
+            const multi = command.command.includes('\n');
+            const disabled = !connected || (multi && !bracketedPaste);
             const reason = disabledReason(command);
             return (
               <button
@@ -72,7 +77,7 @@ export default function QuickCommandPanel({
                 <span className="qc-btn-name">{command.name}</span>
                 <span className="qc-btn-preview mono">
                   {firstLine(command.command)}
-                  {command.command.includes('\n') ? ' …' : ''}
+                  {multi ? ' …' : ''}
                 </span>
               </button>
             );

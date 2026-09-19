@@ -91,6 +91,14 @@ export interface TerminalProps {
   onReady?: (handle: TerminalHandle | null) => void;
   /** Connection state changes, for UI that sends input from outside the terminal. */
   onConnectionChange?: (state: ConnectionState) => void;
+  /**
+   * Bracketed paste mode (DECSET 2004) flips as the SHELL enables it — after
+   * the first prompt is drawn, i.e. asynchronously after this component
+   * mounted. Render-time reads of handle.bracketedPaste() go stale (nothing
+   * re-renders when the mode turns on), so the parser observers below push
+   * every flip through here and the consumer keeps it in state.
+   */
+  onBracketedPasteChange?: (enabled: boolean) => void;
 }
 
 export default function Terminal({
@@ -98,6 +106,7 @@ export default function Terminal({
   onSessionChange,
   onReady,
   onConnectionChange,
+  onBracketedPasteChange,
 }: TerminalProps) {
   const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -106,6 +115,7 @@ export default function Terminal({
   const onSessionChangeRef = useRef(onSessionChange);
   const onReadyRef = useRef(onReady);
   const onConnectionChangeRef = useRef(onConnectionChange);
+  const onBracketedPasteChangeRef = useRef(onBracketedPasteChange);
   const [state, setState] = useState<ConnectionState>('connecting');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [closeReason, setCloseReason] = useState<string | null>(null);
@@ -116,7 +126,8 @@ export default function Terminal({
     onSessionChangeRef.current = onSessionChange;
     onReadyRef.current = onReady;
     onConnectionChangeRef.current = onConnectionChange;
-  }, [onSessionChange, onReady, onConnectionChange]);
+    onBracketedPasteChangeRef.current = onBracketedPasteChange;
+  }, [onSessionChange, onReady, onConnectionChange, onBracketedPasteChange]);
 
   // Mirror the connection state outward after the commit — the parent renders
   // the quick-command buttons' disabled state from it.
@@ -157,6 +168,21 @@ export default function Terminal({
     // the ends of the buffer). See terminalTouchScroll.ts.
     const detachTouchScroll = attachTouchScroll(terminal, host);
     termRef.current = terminal;
+    // Observe DECSET 2004 (bracketed paste) on/off so the side panel's
+    // multi-line buttons track the shell live instead of a mount-time
+    // snapshot — the shell enables the mode only after its first prompt.
+    // Returning false keeps xterm's own processing of the sequence intact.
+    const paramsInclude = (params: (number | number[])[], want: number): boolean =>
+      params.some((p) => (Array.isArray(p) ? p.includes(want) : p === want));
+    onBracketedPasteChangeRef.current?.(terminal.modes.bracketedPasteMode);
+    const csiSetDisposable = terminal.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => {
+      if (paramsInclude(params, 2004)) onBracketedPasteChangeRef.current?.(true);
+      return false;
+    });
+    const csiResetDisposable = terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => {
+      if (paramsInclude(params, 2004)) onBracketedPasteChangeRef.current?.(false);
+      return false;
+    });
 
     const fit = () => {
       // A hidden host (route transition, collapsed layout) would propose ~2x1
@@ -305,6 +331,8 @@ export default function Terminal({
       closed = true;
       if (resizeRAF) window.cancelAnimationFrame(resizeRAF);
       detachTouchScroll();
+      csiSetDisposable.dispose();
+      csiResetDisposable.dispose();
       observer.disconnect();
       dataDisposable.dispose();
       resizeDisposable.dispose();

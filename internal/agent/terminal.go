@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -268,8 +270,9 @@ func (t *terminalSession) requestedReason() string {
 }
 
 func startTerminal(manager *terminalManager, request protocol.TerminalOpen, cols, rows int) (*terminalSession, error) {
-	cmd := exec.Command(localShell(), "-i")
-	cmd.Env = terminalEnvironment(os.Environ())
+	shell := localShell()
+	cmd := exec.Command(shell, "-i")
+	cmd.Env = terminalEnvironment(os.Environ(), shell)
 	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
 		return nil, err
@@ -283,6 +286,12 @@ func startTerminal(manager *terminalManager, request protocol.TerminalOpen, cols
 	}, nil
 }
 
+// localShell picks the interactive shell behind the web terminal (and thus the
+// AI's terminal tools, which type into the same PTY). $SHELL first — an agent
+// started by hand inherits the operator's shell — then the login shell recorded
+// in /etc/passwd for this uid, which is the same resolution sshd does and what
+// makes the terminal behave like the machine's real shell. /bin/sh is the last
+// resort, not the default.
 func localShell() string {
 	if shell := os.Getenv("SHELL"); shell != "" {
 		if _, err := exec.LookPath(shell); err == nil {
@@ -295,17 +304,72 @@ func localShell() string {
 		}
 		return "cmd.exe"
 	}
+	if shell := passwdShell(); shell != "" {
+		return shell
+	}
 	return "/bin/sh"
 }
 
-func terminalEnvironment(environment []string) []string {
-	out := make([]string, 0, len(environment)+1)
-	for _, value := range environment {
-		if !strings.HasPrefix(value, "TERM=") {
-			out = append(out, value)
-		}
+// passwdShell resolves the current uid's login shell from /etc/passwd. Service
+// managers start the agent with a stripped environment — systemd and procd do
+// not export $SHELL — so the old flat fallback to /bin/sh ran dash (Debian/
+// Ubuntu) or busybox ash (OpenWrt) even on machines whose login shell is bash.
+// Those shells have no line editor at all, hence no bracketed paste, which is
+// what disabled the panel's multi-line quick commands on perfectly capable
+// machines. A plain file read, per the no-external-commands rule.
+func passwdShell() string {
+	data, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return ""
 	}
-	return append(out, "TERM=xterm-256color")
+	shell := passwdLoginShell(string(data), os.Getuid())
+	if shell == "" {
+		return ""
+	}
+	if _, err := exec.LookPath(shell); err != nil {
+		return ""
+	}
+	return shell
+}
+
+// passwdLoginShell extracts the shell field of the first passwd entry matching
+// uid (getpwuid semantics). A nologin/false entry returns "": that account has
+// no interactive shell — sshd refuses it too, and swapping in /bin/sh would
+// hand out a shell the login chain denies. Malformed lines, an empty shell
+// field and absent uids also return "", deferring to the caller's fallback.
+func passwdLoginShell(data string, uid int) string {
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Split(strings.TrimSpace(line), ":")
+		if len(fields) < 7 {
+			continue
+		}
+		entryUID, err := strconv.Atoi(strings.TrimSpace(fields[2]))
+		if err != nil || entryUID != uid {
+			continue
+		}
+		shell := strings.TrimSpace(fields[6])
+		base := strings.ToLower(path.Base(shell))
+		if shell == "" || base == "nologin" || base == "false" {
+			return ""
+		}
+		return shell
+	}
+	return ""
+}
+
+// terminalEnvironment builds the child shell's environment: TERM is forced to a
+// 256-color value the browser's xterm actually implements, and SHELL names the
+// shell that is actually running — sshd sets it for login sessions, and a
+// service-manager-spawned agent would otherwise leave it unset inside the PTY.
+func terminalEnvironment(environment []string, shell string) []string {
+	out := make([]string, 0, len(environment)+2)
+	for _, value := range environment {
+		if strings.HasPrefix(value, "TERM=") || strings.HasPrefix(value, "SHELL=") {
+			continue
+		}
+		out = append(out, value)
+	}
+	return append(out, "TERM=xterm-256color", "SHELL="+shell)
 }
 
 func terminalSize(cols, rows int) (int, int, bool) {

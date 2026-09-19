@@ -55,19 +55,53 @@ func TestTerminalManagerRejectsLegacySSHMode(t *testing.T) {
 	}
 }
 
-func TestTerminalEnvironmentReplacesTERM(t *testing.T) {
-	env := terminalEnvironment([]string{"PATH=/bin", "TERM=dumb", "TERM=xterm"})
-	termCount := 0
+func TestTerminalEnvironmentReplacesTERMAndSetsShell(t *testing.T) {
+	env := terminalEnvironment([]string{"PATH=/bin", "TERM=dumb", "TERM=xterm", "SHELL=/bin/stale"}, "/bin/bash")
+	termCount, shellCount := 0, 0
 	for _, value := range env {
-		if value == "TERM=xterm-256color" {
+		switch value {
+		case "TERM=xterm-256color":
 			termCount++
-		}
-		if value == "TERM=dumb" || value == "TERM=xterm" {
-			t.Fatalf("old TERM remained in environment: %q", value)
+		case "SHELL=/bin/bash":
+			shellCount++
+		case "TERM=dumb", "TERM=xterm", "SHELL=/bin/stale":
+			t.Fatalf("stale value remained in environment: %q", value)
 		}
 	}
-	if termCount != 1 {
-		t.Fatalf("TERM count = %d, want 1", termCount)
+	if termCount != 1 || shellCount != 1 {
+		t.Fatalf("TERM count = %d, SHELL count = %d, want 1 and 1", termCount, shellCount)
+	}
+}
+
+// Regression (2026-09-20): the web terminal used to fall straight to /bin/sh
+// when $SHELL was absent — which it always is under systemd/procd — so Debian
+// boxes ran dash and OpenWrt ran busybox ash even where the login shell is
+// bash. dash/ash have no line editor, hence no bracketed paste, which disabled
+// the panel's multi-line quick commands. The passwd entry is what sshd uses.
+func TestPasswdLoginShell(t *testing.T) {
+	const passwd = `root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+svc:x:2:2::/home/svc:/bin/false
+alice:x:1000:1000:Alice,,,:/home/alice:/usr/bin/zsh
+short:x:3:3:too:few
+openwrt:x:0:0:root:/root:/bin/ash
+`
+	cases := []struct {
+		name string
+		uid  int
+		want string
+	}{
+		{"first matching entry wins", 0, "/bin/bash"},
+		{"regular user", 1000, "/usr/bin/zsh"},
+		{"nologin means no interactive shell", 1, ""},
+		{"false means no interactive shell", 2, ""},
+		{"empty shell field", 3, ""},
+		{"uid absent", 2000, ""},
+	}
+	for _, tc := range cases {
+		if got := passwdLoginShell(passwd, tc.uid); got != tc.want {
+			t.Errorf("%s: passwdLoginShell(uid=%d) = %q, want %q", tc.name, tc.uid, got, tc.want)
+		}
 	}
 }
 
