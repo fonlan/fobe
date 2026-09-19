@@ -28,8 +28,13 @@ const (
 const DefaultRelayNameFormat = "{name} · {relay}:{port}"
 
 // relayNamePlaceholders are the only substitutions a format may use. Kept next
-// to the renderer so a new placeholder is one edit, not a hunt.
-var relayNamePlaceholders = []string{"{name}", "{relay}", "{host}", "{port}", "{proto}", "{iface}"}
+// to the renderer so a new placeholder is one edit, not a hunt. Order matters
+// twice: both this list and the renderer's Replacer resolve a tie at the same
+// position by argument order, so a placeholder that extends another one
+// ({relay_region}/{relay_flag} over {relay}) must come first — the shorter
+// pattern would otherwise eat its head and leave "_region" verbatim in the
+// client config.
+var relayNamePlaceholders = []string{"{relay_region}", "{relay_flag}", "{region}", "{flag}", "{name}", "{relay}", "{host}", "{port}", "{proto}", "{iface}"}
 
 // entryKey mirrors store's unexported identity rendering. The panel needs the
 // same key to correlate candidates with bound rows.
@@ -70,11 +75,17 @@ func directEntryName(base string, ports []int, port int) string {
 
 // relayAutoName expands the configured template. strings.NewReplacer does a
 // single pass, so a node literally named "{port}" cannot re-trigger expansion.
+// {region}/{flag}/{relay_region}/{relay_flag} carry the §14 country; keep the
+// extended relay placeholders ahead of {relay} — see relayNamePlaceholders.
 func relayAutoName(format string, target, relay *store.Node, e store.SubscriptionEntry) string {
 	if strings.TrimSpace(format) == "" {
 		format = DefaultRelayNameFormat
 	}
 	name := strings.NewReplacer(
+		"{relay_region}", regionCode(relay.CountryCode),
+		"{relay_flag}", flagOf(relay.CountryCode),
+		"{region}", regionCode(target.CountryCode),
+		"{flag}", flagOf(target.CountryCode),
 		"{name}", entryBaseName(target),
 		"{relay}", entryBaseName(relay),
 		"{host}", relay.PrimaryIP,
@@ -83,6 +94,35 @@ func relayAutoName(format string, target, relay *store.Node, e store.Subscriptio
 		"{iface}", e.Iface,
 	).Replace(format)
 	return strings.TrimSpace(name)
+}
+
+// regionCode renders a node's §14 country for a name placeholder. "XX" is the
+// unknown-country code the manual flag pin already accepts, and using it keeps
+// the name's shape stable: an unresolved lookup must not eat the separators
+// around the placeholder ("{region} · {name}" would render "· name"). An
+// operator who dislikes XX pins a real code on the node.
+func regionCode(cc string) string {
+	if cc == "" {
+		return "XX"
+	}
+	return cc
+}
+
+// flagOf renders the same §14 country as a flag emoji — the two regional
+// indicator symbols web's flagEmoji() builds from the same code, so the panel
+// and the client configs show the same glyph. Unknown degrades to 🇽🇽, the
+// emoji form of regionCode's XX fallback. Codes are validated uppercase A-Z on
+// write, so anything else comes back verbatim rather than half-converted
+// (lowercase letters would silently turn into digit indicators).
+func flagOf(cc string) string {
+	if cc == "" {
+		cc = "XX"
+	}
+	if len(cc) != 2 || cc[0] < 'A' || cc[0] > 'Z' || cc[1] < 'A' || cc[1] > 'Z' {
+		return cc
+	}
+	ri := func(c rune) rune { return 0x1F1E6 + c - 'A' }
+	return string([]rune{ri(rune(cc[0])), ri(rune(cc[1]))})
 }
 
 // validRelayNameFormat accepts the operator's template: it must produce a

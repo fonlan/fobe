@@ -544,6 +544,41 @@ func TestRelayNameFormatSetting(t *testing.T) {
 	}
 }
 
+// TestRelayRegionAndFlagPlaceholders: {region}/{relay_region} carry the §14
+// country code into the auto name and {flag}/{relay_flag} its emoji, XX/🇽🇽
+// when the node has none — an empty expansion would eat the separators around
+// the placeholder. The format also mixes in {relay} to pin the prefix rule:
+// the replacer must take {relay_region} whole, not expand {relay} and leave
+// "_region" verbatim.
+func TestRelayRegionAndFlagPlaceholders(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001)
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
+	seedForward(t, api, aID, "tcp", 8080, "198.51.100.7", 20002)
+	if err := api.Store.SetNodeCountry(aID, "JP", false); err != nil {
+		t.Fatalf("set A country: %v", err)
+	}
+	// B keeps no country code on purpose: XX / 🇽🇽 are the expected values.
+
+	subID, _ := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{{NodeID: bID, Selected: true}})
+
+	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/settings", cookie,
+		map[string]any{"settings": map[string]string{
+			SettingRelayNameFormat: "{relay_flag} {relay_region} -> {flag} {region} {name} via {relay} [{port}]"}})
+	if r.Status != 200 {
+		t.Fatalf("set relay format: %d %s", r.Status, r.Body)
+	}
+	relay := relayEntryOf(t, listEntries(t, srv, cookie, subID), bID)
+	// 🇯🇵 = U+1F1EF U+1F1F5 (JP); 🇽🇽 = U+1F1FD U+1F1FD (the XX fallback).
+	want := "\U0001F1EF\U0001F1F5 JP -> \U0001F1FD\U0001F1FD XX B via A [8080]"
+	if relay.AutoName != want {
+		t.Errorf("auto name = %q, want %q", relay.AutoName, want)
+	}
+}
+
 // TestRelayAutoIncludeCanBeDisabled: with the switch off, a detected relay is
 // offered but stays unbound until the operator picks it.
 func TestRelayAutoIncludeCanBeDisabled(t *testing.T) {
