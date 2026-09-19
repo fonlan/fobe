@@ -719,6 +719,13 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
     : t(statusKey) === statusKey
       ? status
       : t(statusKey);
+  // The managed status never learns "stopped": recordSingboxState matches
+  // Running=true → running, LastError → degraded, uninstall-confirm → absent —
+  // a stopped-but-healthy report hits no case and keeps the old value. The
+  // discovery half is re-scanned by the same nudge every start/stop command
+  // triggers, so local.running is the freshest answer; status is only the
+  // fallback while no discovery report has arrived.
+  const running = local ? local.running : status === 'running';
   // Discovery is a snapshot the probe refreshes on its own cadence (it reports
   // when the file changed), so the panel re-reads while a local sing-box is
   // present: an operator who edits config.json by hand sees it appear without
@@ -1122,21 +1129,18 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
         >
           {t('sb_install')}
         </button>
+        {/* One toggle, not two buttons: the action follows the observed state
+            (running → stop, else start), so there is no disabled twin to click
+            by mistake. */}
         <button
           type="button"
           className="btn"
           disabled={busy || !sb || !sb.desired_version}
-          onClick={() => void run(() => api.singboxAction(nodeId, 'start'), t('sb_action_queued'))}
+          onClick={() =>
+            void run(() => api.singboxAction(nodeId, running ? 'stop' : 'start'), t('sb_action_queued'))
+          }
         >
-          {t('sb_start')}
-        </button>
-        <button
-          type="button"
-          className="btn"
-          disabled={busy || !sb || !sb.desired_version}
-          onClick={() => void run(() => api.singboxAction(nodeId, 'stop'), t('sb_action_queued'))}
-        >
-          {t('sb_stop')}
+          {running ? t('sb_stop') : t('sb_start')}
         </button>
         <button
           type="button"
