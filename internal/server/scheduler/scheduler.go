@@ -1,6 +1,7 @@
 // Package scheduler runs the periodic server-side jobs (design.md §6/§7/§15/§17):
-// metrics retention, offline detection, command TTL expiry, alert delivery and
-// the §15 triggers (traffic thresholds, billing due reminders), daily backups.
+// retention (metrics/latency detail, audit trail), offline detection, command
+// TTL expiry, alert delivery and the §15 triggers (traffic thresholds, billing
+// due reminders), daily backups.
 package scheduler
 
 import (
@@ -45,12 +46,12 @@ func New(st *store.Store, log *slog.Logger, backupDir string, retainDays int64, 
 
 // Start launches all loops; cancel the context to stop.
 func (s *Scheduler) Start(stop <-chan struct{}) {
-	go s.loop(stop, 10*time.Minute, s.pruneSamples)  // §6: every 10 minutes
-	go s.loop(stop, 30*time.Second, s.detectOffline) // §7: 90s heartbeat window
-	go s.loop(stop, 1*time.Minute, s.expireCommands) // §19.1: 10min command TTL
-	go s.loop(stop, 1*time.Minute, s.deliverAlerts)  // §15: notification channels
-	go s.loop(stop, 5*time.Minute, s.checkTraffic)   // §15: quota thresholds
-	go s.loop(stop, 6*time.Hour, s.checkBillingDue)  // §15: 7/3/1-day reminders
+	go s.loop(stop, 10*time.Minute, s.pruneRetention) // §6: every 10 minutes
+	go s.loop(stop, 30*time.Second, s.detectOffline)  // §7: 90s heartbeat window
+	go s.loop(stop, 1*time.Minute, s.expireCommands)  // §19.1: 10min command TTL
+	go s.loop(stop, 1*time.Minute, s.deliverAlerts)   // §15: notification channels
+	go s.loop(stop, 5*time.Minute, s.checkTraffic)    // §15: quota thresholds
+	go s.loop(stop, 6*time.Hour, s.checkBillingDue)   // §15: 7/3/1-day reminders
 	if s.backupDir != "" {
 		// Snapshot once at boot, not only on the 24h tick: a panel that gets
 		// recreated often (deploy churn) never lives long enough for the
@@ -75,14 +76,31 @@ func (s *Scheduler) loop(stop <-chan struct{}, every time.Duration, job func()) 
 	}
 }
 
-func (s *Scheduler) pruneSamples() {
-	cutoff := time.Now().Unix() - s.retainDays*86400
-	for _, table := range []string{"metrics_samples", "latency_samples"} {
-		n, err := s.store.PruneOlderThan(table, cutoff)
+// auditRetentionDays is the §4.4 audit trail window (2026-09-19 revision:
+// audit_logs used to be kept forever, the reasoning being that it is the only
+// record of what AI actually ran). 30 days bounds that growth while keeping a
+// usable forensics horizon; anything older is gone for good.
+const auditRetentionDays = 30
+
+// pruneRetention enforces every retention window in one pass: detail rows
+// (§16.4) keep the shared retainDays, audit_logs rides the same job but on its
+// own longer window (§4.4) — one table, one cutoff, no cross-coupling.
+func (s *Scheduler) pruneRetention() {
+	now := time.Now().Unix()
+	tables := []struct {
+		name   string
+		cutoff int64
+	}{
+		{"metrics_samples", now - s.retainDays*86400},
+		{"latency_samples", now - s.retainDays*86400},
+		{"audit_logs", now - auditRetentionDays*86400},
+	}
+	for _, t := range tables {
+		n, err := s.store.PruneOlderThan(t.name, t.cutoff)
 		if err != nil {
-			s.log.Warn("prune", "table", table, "err", err)
+			s.log.Warn("prune", "table", t.name, "err", err)
 		} else if n > 0 {
-			s.log.Info("pruned rows", "table", table, "count", n)
+			s.log.Info("pruned rows", "table", t.name, "count", n)
 		}
 	}
 }

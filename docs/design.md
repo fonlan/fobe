@@ -27,7 +27,7 @@
 | 13 | 探针凭据 | 每个入站一份密码：服务端在创建它时现生成（16 位随机字母数字 / VLESS 用 UUID），此后跟着该入站的配置走、不轮换（**2026-09-17e 修订：取消全局共享密码**，见 §10.1） | 面板没有"一键全场轮换"；换密码只影响那一个节点 |
 | 14 | 流量重置 | 独立周期类型（无 / 按月 / 按季 / 按年，2026-09-18 增按季）+ 下次重置时间；填一次自动滚动 | 需处理月末、闰日边界、秒级时间与探针时区 |
 | 15 | 缴费周期 | 周期类型（无 / 按月 / 按季 / 按天 / 按年，2026-09-15 增按年、2026-09-18 增按季）+ 周期长度 + 下次到期日 + 费用，手动改；**周期长度单位随类型（天/月/季/年），类型只作记账口径、不参与任何**自动**到期计算**（2026-09-17 修订：唯一例外是编辑页费用输入框右侧新增的「已续费」按钮——一键按当前周期顺延下次到期日，原到期日已过或未填则从今天起算、以原到期日为基准整周期滚到未来，避免月末/闰日钳制逐次漂移；只改表单字段，保存才落库）；**无续费历史**。费用即 `node_billing.note`（2026-09-16 由「缴费备注」更名），自由文本、只展示：编辑页可填，概览卡片贴成标签 | 查不到"上期什么时候交的" |
-| 16 | 指标保留 | 明细只存 7 天；另存永久「按天流量」表 | 7 天以外的曲线不可得（月曲线靠日表） |
+| 16 | 指标保留 | 明细只存 7 天；审计日志保留 30 天（2026-09-19 修订，§4.4）；另存永久「按天流量」表 | 7 天以外的曲线不可得（月曲线靠日表）；30 天前的审计无处可查 |
 | 17 | 延迟测量 | 探针**主动**测面板配置的目标；本地测量频率由设置项 `latency.interval_seconds` 控制（默认 5s）、60s 批量上报；ICMP + TCP 握手两种 | 拿不到"用户→探针"的真实延迟 |
 | 18 | 登录加固 | 失败 3 次拉黑 IP（持久化）+ CLI 解封；**不做 2FA** | 黑名单依赖 XFF 信任链；无第二因子 |
 | 19 | 告警 | Telegram Bot + 通用 Webhook + **飞书**（2026-09-16 增：应用机器人 / 群自定义机器人） | 一条告警要么进 Telegram、要么进飞书或你自己的 Webhook——通道各自独立，配一个是一个 |
@@ -144,7 +144,7 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 - 未设置主密钥时，服务端**拒绝启动**并打印生成命令（不静默降级为明文）。**（实现修订 2026-09-15：镜像入口脚本 `deploy/docker-entrypoint.sh` 在「未设置」时先行兜底，优先级 env > `FOBE_MASTER_KEY_FILE` > 生成随机 32 字节落盘到数据卷 `/data/.master_key`（0600，重启复用）。服务端的 fail-closed 语义不变——生成失败（如 `/data` 不可写）容器直接退出，绝无明文回退；admin CLI 跳过密钥解析，逃生口永不被堵。代价是密钥与密文同卷，见 §20.12；要分开就显式设置 `FOBE_MASTER_KEY`。）**
 - **密文跟着主密钥走、不跟着机器走（2026-09-18 补）**：Cryptor 是 AES-256-GCM，密钥就是 `FOBE_MASTER_KEY` 那 32 字节本身（`ParseMasterKey` 只负责把它解码成 32 字节），**没有任何与主机 / 安装 / 数据库相关的派生量**；nonce 随密文存，密文形如 `base64(nonce‖ct)`、自包含。所以把 `/data`（含 `.master_key`）整卷搬到另一台机器、或在新机器上显式设同一个 `FOBE_MASTER_KEY`，全部密文照常解开；**只有主密钥不是同一把才会解不开**。这条在 §17 导出快照携带密文凭据之后成为操作面的硬要求：**搬迁 = 搬 key**。
 - 所有审计写 `audit_logs`：谁、何时、对哪个节点、什么动作、命令原文、来源 IP。**（2026-09-18 修订）探针状态与通知投递也计入**：`node_online` / `node_offline` 只记**跃迁**——90s 心跳窗口内的重连没有离开过 online，不记账（offline 带 `silent_for=<秒>`，online 带探针刚上报的 `agent_version`）；`notify_sent` / `notify_failed` 每条告警每渠道每种结果只记一次（投递失败会每分钟重试，且**部分失败会把整条告警重跑一遍**——不按 (告警, 渠道, 结果) 去重，一次渠道故障会灌出一整天记录）。这几类 actor 一律 `system`，正文只写渠道 / kind / event，绝不带 payload 与凭据；投递错误先经 `notify.SafeError` 脱敏——Telegram 的 bot token 就是错误里那条 URL 的路径段，Feishu webhook 的 token 在查询串里，原样入库等于把凭据抄进面板的 API 响应。
-- **保留期（2026-09-19 明确）**：`audit_logs` **不参与 §6 的 7 天明细清理**——保留策略只删 `metrics_samples` / `latency_samples`，这张表**永不过期、也没有任何自动删除路径**（唯一会失去它的是删库 / 换快照）。理由：它是 §12.3 那条"AI 敲了什么字节"的唯一归属证据，自动清理等于定期销毁证据。代价是表随节点数、心跳跃迁与投递重试单调增长，所以面板读取走 §16 的 keyset 分页，且不提供全表计数。
+- **保留期（2026-09-19 修订，推翻同日早前的"永不过期"决策）**：`audit_logs` 保留**最近 30 天**，由 §6 的 10 分钟清理任务随明细表一并删除（窗口独立于明细的 7 天）。原决策是"永不过期、无任何自动删除路径"——理由是它是 §12.3 那条"AI 敲了什么字节"的唯一归属证据，自动清理等于定期销毁证据；接受修订即接受这个代价：**超过 30 天的审计无处可查**，需要长期留证的只能按期自行导出（§19.3 的快照池同样只有 3 份、也一样滚走）。表随节点数、心跳跃迁与投递重试的增长由此被窗口封顶；面板读取仍走 §16 的 keyset 分页，且不提供全表计数。
 
 ---
 
@@ -272,7 +272,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | `templates` | id, name, format(singbox/clash), content | 完整配置模板 |
 | `node_singbox` | node_id, version, desired_version, desired_uninstall, config_hash, status, last_error, cert_pem, cert_sha256, port | sing-box 期望/实际状态；`desired_uninstall` 是面板的卸载意图（§9.2 实现修订 2026-09-16），探针回报 `absent` 后清零 |
 | `commands` | id, node_id, kind, payload, status, created_at, sent_at, finished_at, result | 指令队列 |
-| `audit_logs` | ts, actor, node_id, action, command, risk, source_ip, ai_session_id | AI 发起的动作经 `ai_session_id` 关联到 provider/model/协议（§12.6） |
+| `audit_logs` | ts, actor, node_id, action, command, risk, source_ip, ai_session_id | AI 发起的动作经 `ai_session_id` 关联到 provider/model/协议（§12.6）；保留 30 天（§4.4 2026-09-19 修订） |
 | `alerts` | id, kind, node_id, payload, created_at, delivered_at | |
 | `ai_providers` | id, name, protocol(`openai-completions`/`openai-responses`/`anthropic-messages`), base_url, api_key(密文), extra_headers(密文), models_dev_slug, enabled | **2026-09-18 新增**（§12.5）：`base_url` 是 **root 语义**，端点路径由协议拼；`api_key` 与 `extra_headers` 走 §4.4 的 Cryptor |
 | `ai_models` | id(PK), display_name, context_window, max_output_tokens, input_modalities, output_modalities, reasoning_levels, **reasoning_off_style**, overridden_fields, source, enabled | **2026-09-18 新增**（§12.5）：**模型行全局唯一**；元数据来自 models.dev `api.json` 或手填；`overridden_fields` 记哪些字段被手改过（首次匹配即冻结，刷新不再覆盖） |
@@ -281,7 +281,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 
 索引要点：`metrics_samples(node_id, ts)`、`latency_samples(node_id, target_id, ts)`、`traffic_daily(node_id, date)`。
 
-**保留策略**：定时任务每 10 分钟删除 `metrics_samples`/`latency_samples` 中超过 7 天的行，并 `PRAGMA incremental_vacuum`。
+**保留策略**：定时任务每 10 分钟删除 `metrics_samples`/`latency_samples` 中超过 7 天、`audit_logs` 中超过 30 天（§4.4 2026-09-19 修订）的行，并 `PRAGMA incremental_vacuum`。
 
 > **Schema 兼容策略（实现修订 2026-09-16，起因是宿主机重启导致主库页级损坏、settings 全丢的事故）**：
 > - **只做增量是铁律**：schema 变更只允许「新表 / 带默认值的新列 / 新索引」（`schema.sql` 的 `IF NOT EXISTS` + `migrateAdditive`，幂等）。所有查询**显式列名**，这样新表/新列对旧二进制是惰性的——旧版本直接打开新库也能服务，**降级不需要迁移**。

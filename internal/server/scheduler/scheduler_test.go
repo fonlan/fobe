@@ -709,3 +709,53 @@ func TestDeliverAlertsSwitchedOffIsNotAudited(t *testing.T) {
 		t.Fatalf("silenced alert produced failure rows: %+v", got)
 	}
 }
+
+// --- retention prune (§16.4 detail / §4.4 audit) ---
+
+// audit_logs rides the same 10-minute prune job as the detail samples but on
+// its own 30-day window (§4.4, 2026-09-19 revision): a row older than the 7-day
+// detail cutoff must survive, one beyond 30 days must go.
+func TestPruneRetentionWindows(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	s := New(st, testLogger(), "", 7)
+
+	now := time.Now().Unix()
+	rows := []struct {
+		age    int64
+		action string
+	}{
+		{31, "beyond_audit_window"},
+		{8, "beyond_detail_window_only"},
+		{1, "recent"},
+	}
+	for _, r := range rows {
+		ts := now - r.age*86400
+		if err := st.InsertAudit(&store.AuditEntry{TS: ts, Actor: "panel", Action: r.action}); err != nil {
+			t.Fatalf("insert audit %s: %v", r.action, err)
+		}
+		if err := st.InsertMetricsSample("n1", &store.MetricsSample{TS: ts}); err != nil {
+			t.Fatalf("insert metrics %s: %v", r.action, err)
+		}
+	}
+
+	s.pruneRetention()
+
+	if got := auditByAction(t, st, "beyond_audit_window"); len(got) != 0 {
+		t.Fatalf("31-day-old audit row survived the 30-day window: %+v", got)
+	}
+	if got := auditByAction(t, st, "beyond_detail_window_only"); len(got) != 1 {
+		t.Fatalf("8-day-old audit row must survive the 7-day detail cutoff, got %d", len(got))
+	}
+	if got := auditByAction(t, st, "recent"); len(got) != 1 {
+		t.Fatalf("recent audit row must survive, got %d", len(got))
+	}
+
+	left, err := st.ListMetrics("n1", now-9*86400)
+	if err != nil {
+		t.Fatalf("list metrics: %v", err)
+	}
+	if len(left) != 1 || left[0].TS != now-1*86400 {
+		t.Fatalf("detail samples must keep the 7-day window, got %+v", left)
+	}
+}

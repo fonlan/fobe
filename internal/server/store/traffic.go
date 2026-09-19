@@ -293,7 +293,9 @@ func (s *Store) LatestMetrics(nodeID string) (*MetricsSample, error) {
 // PruneOlderThan deletes retention-expired rows, returns rows removed.
 func (s *Store) PruneOlderThan(table string, cutoffTS int64) (int64, error) {
 	// table names come only from our own scheduler; still validated here.
-	allowed := map[string]bool{"metrics_samples": true, "latency_samples": true}
+	// audit_logs prunes on its own longer cutoff (§4.4, 2026-09-19 revision),
+	// passed by the caller — same job, different window.
+	allowed := map[string]bool{"metrics_samples": true, "latency_samples": true, "audit_logs": true}
 	if !allowed[table] {
 		return 0, fmt.Errorf("table %q is not prunable", table)
 	}
