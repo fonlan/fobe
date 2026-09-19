@@ -603,6 +603,7 @@ function normSubscriptionEntry(e: Partial<SubscriptionEntry>): SubscriptionEntry
     proto: e.proto ?? '',
     src_port: e.src_port ?? 0,
     iface: e.iface ?? '',
+    protocols: e.protocols ?? [],
     auto_name: e.auto_name ?? '',
     alias: e.alias ?? '',
     selected: e.selected === true,

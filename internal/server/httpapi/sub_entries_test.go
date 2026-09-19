@@ -100,6 +100,56 @@ func seedDiscoveredConfig(t *testing.T, api *Server, nodeID, configJSON string, 
 	}
 }
 
+// TestEntryProtocolsFollowTheReportedFile: the picker's protocol column is
+// read from the probe's reported config (the running config is the authority,
+// §9.3), not from the panel's managed state. A mixed anytls+vless probe lists
+// each inbound with its own protocol, a node known only through the managed
+// pair reads as anytls, and a row whose inbound is gone names nothing.
+func TestEntryProtocolsFollowTheReportedFile(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 20001) // managed pair, no file yet
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"anytls","tag":"b-in","listen_port":28711,"users":[{"password":"pw"}]},
+		{"type":"vless","tag":"b-vless","listen_port":16929,"users":[{"uuid":"b2f0a2f4-1111-2222-3333-444455556666"}]}
+	]}`, map[int]string{28711: testCertPEM})
+	seedForward(t, api, aID, "tcp", 8080, "198.51.100.7", 28711)
+
+	subID, _ := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{{NodeID: bID, Selected: true}})
+
+	entries := listEntries(t, srv, cookie, subID)
+	if got := directEntryAt(t, entries, aID, 20001).Protocols; len(got) != 1 || got[0] != "anytls" {
+		t.Errorf("managed-pair row protocols = %v, want [anytls]", got)
+	}
+	if got := directEntryAt(t, entries, bID, 28711).Protocols; len(got) != 1 || got[0] != "anytls" {
+		t.Errorf("anytls row protocols = %v, want [anytls]", got)
+	}
+	if got := directEntryAt(t, entries, bID, 16929).Protocols; len(got) != 1 || got[0] != "vless" {
+		t.Errorf("vless row protocols = %v, want [vless]", got)
+	}
+	// A relay leg terminates on the target's anytls inbound — the only protocol
+	// it can render as.
+	if got := relayEntryOf(t, entries, bID).Protocols; len(got) != 1 || got[0] != "anytls" {
+		t.Errorf("relay row protocols = %v, want [anytls]", got)
+	}
+
+	// The probe's file drops the anytls listener: that row must stop claiming
+	// a protocol — the running config no longer serves one.
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"vless","tag":"b-vless","listen_port":16929,"users":[{"uuid":"b2f0a2f4-1111-2222-3333-444455556666"}]}
+	]}`, nil)
+	gone := directEntryAt(t, listEntries(t, srv, cookie, subID), bID, 28711)
+	if gone.Available || gone.Reason != "inbound_gone" {
+		t.Fatalf("stale row = %+v, want inbound_gone", gone)
+	}
+	if len(gone.Protocols) != 0 {
+		t.Errorf("stale row protocols = %v, want empty", gone.Protocols)
+	}
+}
+
 // TestRelayEntryFromDiscoveredConfig is the one-sing.sh pairing: neither node
 // was ever installed by the panel — both sing-boxes are the script's own, so
 // the panel knows them only through discovery (reported config.json, no

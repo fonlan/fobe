@@ -239,6 +239,13 @@ type subEntryView struct {
 	// port for a relayed one. 0 = the legacy node-level direct row.
 	SrcPort int    `json:"src_port,omitempty"`
 	Iface   string `json:"iface,omitempty"`
+	// Protocols lists the wire protocols this entry renders as ("anytls",
+	// "vless", …), read from the probe's reported file — the running config is
+	// the authority (§9.3), never the panel's managed state. A relayed entry is
+	// always anytls (a relay leg can only terminate on an anytls inbound).
+	// Empty means unknown right now: nothing reported yet, or the entry's
+	// inbound is gone from the file.
+	Protocols []string `json:"protocols,omitempty"`
 	// AutoName is what the renderer will use when Alias is empty.
 	AutoName string `json:"auto_name"`
 	Alias    string `json:"alias"`
@@ -321,6 +328,17 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 		}
 		if relay != nil {
 			v.RelayName = relay.Name
+		}
+		// The protocol column follows the same source as availability: the
+		// reported file when there is one, the managed anytls pair before the
+		// first report. A stale row (inbound_gone) names no protocol at all —
+		// that is the honest answer while the running config disagrees.
+		if direct {
+			v.Protocols = entryProtocols(rd.live, e.SrcPort, sb)
+		} else if rd.relayable {
+			// A relay leg terminates on the target's anytls inbound, so anytls
+			// is the only protocol it can render as.
+			v.Protocols = []string{singbox.ProtoAnytls}
 		}
 		switch {
 		case direct:
@@ -409,6 +427,35 @@ func (s *Server) subscriptionEntryViews(sub *store.Subscription) ([]subEntryView
 		views = append(views, view(target, byID[e.RelayNodeID], e, sb, s.targetReadinessOf(target, sb), false))
 	}
 	return views, nil
+}
+
+// entryProtocols names the protocols a direct entry renders as, in the
+// reported file's order. `port` > 0 narrows to one inbound; 0 (the legacy
+// node-level row) means every inbound of the node, deduplicated. The fallback
+// mirrors nodeIngressPorts: before the first report the managed pair stands in
+// for the file, and that pair is always the anytls inbound fobe generated.
+// Once a file exists it is the truth, so a port it no longer declares yields
+// no protocol — exactly the rows the picker marks inbound_gone.
+func entryProtocols(live []singbox.ProxyNode, port int, sb *store.NodeSingbox) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, n := range live {
+		if port > 0 && n.Port != port {
+			continue
+		}
+		p := n.Protocol
+		if p == "" {
+			p = singbox.ProtoAnytls // the fobe-generated inbound leaves it empty
+		}
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 && len(live) == 0 && sb != nil && sb.Port > 0 && sb.CertPEM != "" {
+		return []string{singbox.ProtoAnytls}
+	}
+	return out
 }
 
 // directCandidatePorts is what the picker offers for one node: one row per

@@ -346,6 +346,13 @@ export interface SubscriptionEntry {
    */
   src_port: number;
   iface: string;
+  /**
+   * The wire protocols this entry renders as (anytls / vless / …), read from
+   * the probe's reported config — the running config is the authority. Empty
+   * = unknown right now (nothing reported yet, or the inbound is gone); the
+   * normalizer fills the missing key.
+   */
+  protocols: string[];
   /** The name the renderer derives when `alias` is empty. */
   auto_name: string;
   /** Operator override; '' = use auto_name. */

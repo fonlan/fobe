@@ -547,6 +547,17 @@ function EntryPicker({
           )}
         </td>
         <td>
+          {/* The wire protocol(s) this entry renders as, from the probe's
+              reported config. Empty = the running config doesn't declare one
+              right now (nothing reported / inbound gone) — say so instead of
+              guessing. */}
+          {e.protocols.length ? (
+            <span className="mono nowrap">{e.protocols.join(' / ')}</span>
+          ) : (
+            '-'
+          )}
+        </td>
+        <td>
           {e.source !== '' ? (
             <div className="hint cell-ellipsis" title={e.source}>
               {t('sub_entry_source', { comment: e.source })}
@@ -605,6 +616,7 @@ function EntryPicker({
                 </th>
                 <th>{t('sub_entry_col_node')}</th>
                 <th>{t('sub_entry_col_ingress')}</th>
+                <th>{t('sub_entry_col_proto')}</th>
                 <th>{t('sub_entry_col_source')}</th>
                 <th>{t('sub_entry_alias')}</th>
                 <th>{t('sub_entry_col_status')}</th>
