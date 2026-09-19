@@ -886,7 +886,6 @@ const zh = {
   sb_uninstall_queued: '卸载已下发,等待探针删除并回报。',
   sb_uninstalling: '正在卸载,等待探针删除并回报…',
   sb_uninstalling_offline: '探针当前离线,卸载已记录,重连后会自动删除并回报。',
-  sb_anytls_port: 'AnyTLS 端口',
   sb_not_installed: '尚未安装 sing-box。',
   // §9.3 实现修订 2026-09-17：探针上已有的 sing-box（one-sing.sh 装的也在内）
   sb_local_title: '本机已有的 sing-box',
@@ -905,6 +904,7 @@ const zh = {
   sb_col_port: '端口',
   sb_col_status: '状态',
   sb_col_tag: 'tag',
+  sb_inbounds_title: 'sing-box 入站',
   sb_col_cred: '凭据',
   sb_cred_keep: '留空 = 保持不变',
   sb_cred_password: '留空 = 服务端生成',
@@ -1895,7 +1895,6 @@ const en: Record<DictKey, string> = {
   sb_uninstall_queued: 'Uninstall pushed; waiting for the probe to remove it and report back.',
   sb_uninstalling: 'Uninstalling; waiting for the probe to remove it and report back…',
   sb_uninstalling_offline: 'Probe is offline; the uninstall is recorded and will run once it reconnects.',
-  sb_anytls_port: 'AnyTLS port',
   sb_not_installed: 'sing-box is not installed yet.',
   // §9.3 revisions 2026-09-17/17b/17g: the sing-box already on the probe.
   // The panel reads and edits it in place; every listener is an equal entry and
@@ -1916,6 +1915,7 @@ const en: Record<DictKey, string> = {
   sb_col_port: 'Port',
   sb_col_status: 'Status',
   sb_col_tag: 'tag',
+  sb_inbounds_title: 'sing-box Inbounds',
   sb_col_cred: 'Credential',
   sb_cred_keep: 'blank = keep',
   sb_cred_password: 'blank = server-generated',

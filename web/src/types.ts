@@ -131,11 +131,21 @@ export interface NodeDetailData {
   ips: NodeIP[];
   online_now: boolean;
   singbox?: SingboxInfo | null;
+  /** All listeners the probe saw in config.json (§17g), no credentials. */
+  singbox_inbounds?: SingboxInboundRow[];
   network?: NodeNetwork | null;
   traffic_cycle?: NodeTrafficCycle | null;
   interfaces?: NodeInterface[];
   billing?: NodeBilling | null;
   latency_targets?: LatencyTarget[];
+}
+
+/** Row of node_singbox_inbounds: one listener lifecycle record. */
+export interface SingboxInboundRow {
+  port: number;
+  type: string;
+  tag: string;
+  status: string; // pending | running | deleting
 }
 
 export interface MetricsSample {

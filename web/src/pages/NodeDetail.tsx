@@ -7,6 +7,7 @@ import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtTime, fmtTimeShort, fmtDate 
 import type { LatencySample, LatencyTarget, MetricsSample, NodeDetailData, TrafficResp } from '../types';
 import Flag from '../components/Flag';
 import DistroLogo, { distroName } from '../components/DistroLogo';
+import { PencilIcon } from '../components/Icons';
 import LineChart, { type ChartPoint, type ChartSeries } from '../components/LineChart';
 import BarChart from '../components/BarChart';
 import ProgressBar from '../components/ProgressBar';
@@ -28,6 +29,14 @@ const LATENCY_PALETTE = ['var(--accent)', 'var(--green)', 'var(--amber)', 'var(-
 function distroLabel(id: string, version?: string): string {
   const name = distroName(id);
   return version ? `${name} ${version}` : name;
+}
+
+// Listener lifecycle wording, shared with the EditServer inbound editor's
+// status column (sb_inbound_running/pending/deleting). Unknown statuses from a
+// newer server fall back to the raw string.
+function sbInboundStatusText(t: (k: string) => string, status: string): string {
+  const key = 'sb_inbound_' + status;
+  return t(key) === key ? status : t(key);
 }
 
 /**
@@ -171,6 +180,11 @@ export default function NodeDetail() {
 
   const memPct = node.mem_total > 0 ? (node.mem_used / node.mem_total) * 100 : 0;
   const diskPct = node.disk_total > 0 ? (node.disk_used / node.disk_total) * 100 : 0;
+  // Same wording as the EditServer status tile (sb_status_*); an unknown
+  // status string from a newer server falls back to the raw value.
+  const sbStatus = sb?.status || 'absent';
+  const sbStatusKey = 'sb_status_' + sbStatus;
+  const sbStatusText = t(sbStatusKey) === sbStatusKey ? sbStatus : t(sbStatusKey);
   const last = metrics.length > 0 ? metrics[metrics.length - 1] : null;
   const fmtXTime = (x: number) => fmtTimeShort(x);
   const fmtYPct = (v: number) => `${Math.round(v)}%`;
@@ -193,6 +207,9 @@ export default function NodeDetail() {
           </h2>
         </div>
         <div className="row-gap">
+          <Link to={`/settings/servers/${encodeURIComponent(id)}`} className="btn">
+            <PencilIcon /> {t('edit')}
+          </Link>
           <Link to={`/nodes/${encodeURIComponent(id)}/terminal`} className="btn primary">
             {t('web_terminal')}
           </Link>
@@ -223,12 +240,21 @@ export default function NodeDetail() {
             }
           />
           <Tile label={t('uptime')} value={last ? fmtDuration(last.uptime) : '-'} sub={t('last_seen', { time: fmtTime(node.last_seen) })} />
-          {/* AnyTLS inbound port: only while the node is under sing-box
+          {/* sing-box run state: only while the node is under sing-box
               management (§9 — desired_version empty means the operator
-              uninstalled it or never enabled it, and the reported port then
-              belongs to nothing). */}
+              uninstalled it or never enabled it). Status wording reuses the
+              EditServer tile's sb_status_* keys so both pages read the same.
+              The old standalone "AnyTLS 端口" tile is gone — the inbound
+              table at the bottom of this page lists every listener. */}
           {sb?.desired_version ? (
-            <Tile label={t('sb_anytls_port')} value={sb.port ? ':' + sb.port : '-'} sub={sb.version || '-'} />
+            // Version rides the status card (single sub line — .tile-sub is
+            // nowrap+ellipsis, so the error, when present, is appended after
+            // it and truncates rather than wrapping).
+            <Tile
+              label={t('singbox')}
+              value={sbStatusText}
+              sub={[sb.version, sb.last_error].filter(Boolean).join(' · ') || undefined}
+            />
           ) : null}
         </div>
         {node.quota_bytes != null && (
@@ -242,6 +268,16 @@ export default function NodeDetail() {
           </div>
         )}
       </section>
+
+      {/* Latency sits above the 7-day metrics on purpose (operators reach for
+          it first) and only renders when the node actually measures latency —
+          an unmeasuring node gets no empty card. */}
+      {(data.latency_targets?.length ?? 0) > 0 && (
+        <section className="card">
+          <h3>{t('sec_latency')}</h3>
+          <LatencyPanel nodeId={id} nodeTargets={data.latency_targets ?? []} />
+        </section>
+      )}
 
       <section className="card">
         <h3>{t('sec_charts')}</h3>
@@ -296,10 +332,38 @@ export default function NodeDetail() {
         />
       </section>
 
-      <section className="card">
-        <h3>{t('sec_latency')}</h3>
-        <LatencyPanel nodeId={id} nodeTargets={data.latency_targets ?? []} />
-      </section>
+      {/* §17g: every listener the probe saw — mixed anytls/vless/socks alike.
+          Read-only: editing lives in Settings → Servers → Edit. Empty is
+          ordinary (old agent, or sing-box never reported) and renders no card
+          at all. Sits at the bottom of the page: it is reference material, not
+          something the operator checks at a glance. */}
+      {data.singbox_inbounds && data.singbox_inbounds.length > 0 && (
+        <section className="card">
+          <h3>{t('sb_inbounds_title')}</h3>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>{t('sb_col_type')}</th>
+                  <th>{t('sb_col_port')}</th>
+                  <th>{t('sb_col_tag')}</th>
+                  <th>{t('sb_col_status')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.singbox_inbounds.map((ib) => (
+                  <tr key={ib.port}>
+                    <td>{ib.type}</td>
+                    <td className="mono">:{ib.port}</td>
+                    <td className="mono">{ib.tag || '-'}</td>
+                    <td>{sbInboundStatusText(t, ib.status)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
     </div>
   );
 }

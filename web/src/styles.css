@@ -636,7 +636,13 @@ section.card { margin-bottom: 0; }
 
 .node-card-head { display: flex; align-items: center; gap: 8px; }
 .node-card-name { font-weight: 600; font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.node-card-ip { color: var(--text-dim); font-size: 13px; margin-bottom: 4px; }
+/* Flex + align-items:center so the copy button sits exactly on the IP's
+   vertical midline — vertical-align:middle on the inline button aligned it
+   against the text baseline (half the x-height), which reads as floated up.
+   The address itself is .ip-text: overflow:hidden drops the flex min-width,
+   so a long IPv6 ellipsizes instead of pushing the button out of the card. */
+.node-card-ip { color: var(--text-dim); font-size: 13px; margin-bottom: 4px; display: flex; align-items: center; }
+.node-card-ip .ip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .node-card-today { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--text-dim); flex-wrap: wrap; }
 .node-card-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
 

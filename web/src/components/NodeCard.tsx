@@ -1,16 +1,31 @@
 import { Link } from 'react-router-dom';
 import { useI18n } from '../i18n';
-import { fmtBytes, fmtPct } from '../format';
+import { fmtBytes, fmtPct, copyText } from '../format';
 import type { NodeView } from '../types';
+import { CopyIcon } from './Icons';
+import { useToast } from './Toast';
 import DistroLogo, { distroName } from './DistroLogo';
 import Flag from './Flag';
 import ProgressBar from './ProgressBar';
 
 export default function NodeCard({ node }: { node: NodeView }) {
   const { t } = useI18n();
+  const { show: showToast, node: toastNode } = useToast();
   const memPct = node.mem_total > 0 ? (node.mem_used / node.mem_total) * 100 : 0;
   const diskPct = node.disk_total > 0 ? (node.disk_used / node.disk_total) * 100 : 0;
   const hasQuota = node.period_pct >= 0 && node.quota_bytes != null;
+  // Const local so the copy button's onClick keeps the non-null narrowing
+  // (TS does not carry `node.primary_ip` narrowing into closures).
+  const primaryIP = node.primary_ip;
+
+  const doCopyIP = async (ip: string) => {
+    if (await copyText(ip)) {
+      showToast(t('ip_copied'));
+    } else {
+      // Non-HTTPS origins have no clipboard: say so instead of failing silently.
+      showToast(t('copy_manual'), 'error');
+    }
+  };
 
   // 费用 (§16): the operator's free-text cost label, shown as a tag in the head,
   // immediately left of the distro badge ("what this box costs" belongs next to
@@ -39,62 +54,86 @@ export default function NodeCard({ node }: { node: NodeView }) {
   })();
 
   return (
-    // Connectivity is carried by the card itself (.offline: red border +
-    // hazard stripes); the head's right slot shows the distro badge instead.
-    <Link
-      className={'card node-card' + (node.online ? '' : ' offline')}
-      to={`/nodes/${encodeURIComponent(node.id)}`}
-      title={t(node.online ? 'online' : 'offline')}
-    >
-      <div className="node-card-head">
-        <Flag cc={node.country_code} />
-        <span className="node-card-name">{node.name || node.hostname || node.id}</span>
-        {costChip}
-        <DistroLogo
-          id={node.distro_id}
-          size={18}
-          title={node.distro_id ? distroName(node.distro_id) : undefined}
-        />
-      </div>
-      <div className="node-card-ip mono">{node.primary_ip || t('unknown')}</div>
-
-      <ProgressBar label={t('cpu')} pct={node.cpu} text={fmtPct(node.cpu)} />
-      <ProgressBar
-        label={t('memory')}
-        pct={memPct}
-        text={`${fmtBytes(node.mem_used)} / ${fmtBytes(node.mem_total)}`}
-      />
-      <ProgressBar
-        label={t('disk')}
-        pct={diskPct}
-        text={`${fmtBytes(node.disk_used)} / ${fmtBytes(node.disk_total)}`}
-      />
-
-      {hasQuota ? (
-        <ProgressBar
-          label={t('quota_label')}
-          pct={node.period_pct}
-          text={t('quota_used_of', {
-            used: fmtBytes(node.period_used),
-            quota: fmtBytes(node.quota_bytes ?? 0),
-          })}
-        />
-      ) : (
-        <div className="node-card-today">
-          <span>
-            {t('today_rx')} <span className="mono">{fmtBytes(node.today_rx)}</span>
-          </span>
-          <span>
-            {t('today_tx')} <span className="mono">{fmtBytes(node.today_tx)}</span>
-          </span>
+    <>
+      {/* Connectivity is carried by the card itself (.offline: red border +
+          hazard stripes); the head's right slot shows the distro badge instead. */}
+      <Link
+        className={'card node-card' + (node.online ? '' : ' offline')}
+        to={`/nodes/${encodeURIComponent(node.id)}`}
+        title={t(node.online ? 'online' : 'offline')}
+      >
+        <div className="node-card-head">
+          <Flag cc={node.country_code} />
+          <span className="node-card-name">{node.name || node.hostname || node.id}</span>
+          {costChip}
+          <DistroLogo
+            id={node.distro_id}
+            size={18}
+            title={node.distro_id ? distroName(node.distro_id) : undefined}
+          />
         </div>
-      )}
+        <div className="node-card-ip mono">
+          <span className="ip-text">{primaryIP || t('unknown')}</span>
+          {/* Same always-visible copy button as the servers list (§16): the
+              card is a <Link>, so the click must not navigate. */}
+          {primaryIP && (
+            <button
+              type="button"
+              className="icon-btn ip-copy-btn"
+              title={t('copy_ip')}
+              aria-label={t('copy_ip')}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void doCopyIP(primaryIP);
+              }}
+            >
+              <CopyIcon />
+            </button>
+          )}
+        </div>
 
-      <div className="node-card-foot">
-        <span>{t('cores', { n: node.cpu_cores })}</span>
-        <span>{t('agent_v', { v: node.agent_version || '?' })}</span>
-        {dueChip}
-      </div>
-    </Link>
+        <ProgressBar label={t('cpu')} pct={node.cpu} text={fmtPct(node.cpu)} />
+        <ProgressBar
+          label={t('memory')}
+          pct={memPct}
+          text={`${fmtBytes(node.mem_used)} / ${fmtBytes(node.mem_total)}`}
+        />
+        <ProgressBar
+          label={t('disk')}
+          pct={diskPct}
+          text={`${fmtBytes(node.disk_used)} / ${fmtBytes(node.disk_total)}`}
+        />
+
+        {hasQuota ? (
+          <ProgressBar
+            label={t('quota_label')}
+            pct={node.period_pct}
+            text={t('quota_used_of', {
+              used: fmtBytes(node.period_used),
+              quota: fmtBytes(node.quota_bytes ?? 0),
+            })}
+          />
+        ) : (
+          <div className="node-card-today">
+            <span>
+              {t('today_rx')} <span className="mono">{fmtBytes(node.today_rx)}</span>
+            </span>
+            <span>
+              {t('today_tx')} <span className="mono">{fmtBytes(node.today_tx)}</span>
+            </span>
+          </div>
+        )}
+
+        <div className="node-card-foot">
+          <span>{t('cores', { n: node.cpu_cores })}</span>
+          <span>{t('agent_v', { v: node.agent_version || '?' })}</span>
+          {dueChip}
+        </div>
+      </Link>
+      {/* Toast lives outside the <Link>: it is position:fixed, but nesting an
+          interactive node inside an anchor is still worth avoiding. */}
+      {toastNode}
+    </>
   );
 }

@@ -246,6 +246,18 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 			"cert_sha256": sb.CertSHA256, "cert_not_after": sb.CertNotAfter,
 		}
 	}
+	// Every listener the probe saw in its config.json (§17g: all inbounds are
+	// equal — panel-managed and one-sing.sh adopted alike, discovered-only
+	// nodes included). Port/type/tag/status only: no credentials here.
+	if inbounds, err := s.Store.ListNodeSingboxInbounds(id); err == nil {
+		ibs := make([]map[string]any, 0, len(inbounds))
+		for _, ib := range inbounds {
+			ibs = append(ibs, map[string]any{
+				"port": ib.Port, "type": ib.Type, "tag": ib.Tag, "status": ib.Status,
+			})
+		}
+		resp["singbox_inbounds"] = ibs
+	}
 	if net, err := s.Store.GetNodeNetwork(id); err == nil {
 		resp["network"] = net
 		resp["traffic_cycle"] = trafficCycleView(net, time.Now())
