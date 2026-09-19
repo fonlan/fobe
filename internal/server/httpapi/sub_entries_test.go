@@ -136,19 +136,6 @@ func TestEntryProtocolsFollowTheReportedFile(t *testing.T) {
 	if got := relayEntryOf(t, entries, bID).Protocols; len(got) != 1 || got[0] != "anytls" {
 		t.Errorf("relay row protocols = %v, want [anytls]", got)
 	}
-
-	// The probe's file drops the anytls listener: that row must stop claiming
-	// a protocol — the running config no longer serves one.
-	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
-		{"type":"vless","tag":"b-vless","listen_port":16929,"users":[{"uuid":"b2f0a2f4-1111-2222-3333-444455556666"}]}
-	]}`, nil)
-	gone := directEntryAt(t, listEntries(t, srv, cookie, subID), bID, 28711)
-	if gone.Available || gone.Reason != "inbound_gone" {
-		t.Fatalf("stale row = %+v, want inbound_gone", gone)
-	}
-	if len(gone.Protocols) != 0 {
-		t.Errorf("stale row protocols = %v, want empty", gone.Protocols)
-	}
 }
 
 // TestRelayEntryFromDiscoveredConfig is the one-sing.sh pairing: neither node
@@ -880,10 +867,12 @@ func TestSingleInboundKeepsThePlainName(t *testing.T) {
 	}
 }
 
-// TestBoundEntryWhoseInboundDisappeared: the probe's file is the truth, so a
-// bound row naming a listener that is no longer declared is listed, marked and
-// renders nothing — the operator keeps the binding visible and can drop it.
-func TestBoundEntryWhoseInboundDisappeared(t *testing.T) {
+// TestGoneInboundRowsArePruned: the probe's file is the truth, so a row naming
+// a listener that is no longer declared is *deleted* by the reconciler (§10.2
+// 实现修订 2026-09-19) instead of parking a permanent 暂不可渲染 line in the
+// picker. Tombstones go the same way: a direct row has no auto-enrolment to
+// hold back, so there is nothing left for it to guard.
+func TestGoneInboundRowsArePruned(t *testing.T) {
 	srv, api := newTestServer(t)
 	cookie := panelCookie(t, srv)
 
@@ -892,37 +881,470 @@ func TestBoundEntryWhoseInboundDisappeared(t *testing.T) {
 		28711: testCertPEM, 28712: testCertPEM,
 	})
 	subID, token := createSubscription(t, srv, cookie, "main")
+	// 28711 bound with a name, 28712 bound and then unbound: a tombstone.
 	bindEntries(t, srv, cookie, subID, []subEntryInput{
-		{NodeID: bID, SrcPort: 28711, Selected: true},
+		{NodeID: bID, SrcPort: 28711, Alias: "东京", Selected: true},
 		{NodeID: bID, SrcPort: 28712, Selected: true},
 	})
-	if got := outboundCount(t, srv, token); got != 2 {
-		t.Fatalf("precondition: outbound count = %d, want 2", got)
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28711, Alias: "东京", Selected: true},
+		{NodeID: bID, SrcPort: 28712, Selected: false},
+	})
+	if got := outboundCount(t, srv, token); got != 1 {
+		t.Fatalf("precondition: outbound count = %d, want 1", got)
 	}
 
-	// The probe loses one listener (hand-edited file, a `jq` rewrite).
+	// The probe loses the bound listener (hand-edited file, a `jq` rewrite).
 	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
-		{"type":"anytls","tag":"anytls-28711","listen_port":28711,"users":[{"password":"pw-a"}]}
-	]}`, map[int]string{28711: testCertPEM})
+		{"type":"anytls","tag":"anytls-28712","listen_port":28712,"users":[{"password":"pw-b"}]}
+	]}`, map[int]string{28712: testCertPEM})
 
 	rows := directEntriesOf(listEntries(t, srv, cookie, subID), bID)
-	if len(rows) != 2 {
-		t.Fatalf("bound rows = %+v, want both kept on screen", rows)
+	if len(rows) != 1 || rows[0].SrcPort != 28712 {
+		t.Fatalf("rows after the inbound disappeared = %+v, want only 28712", rows)
 	}
-	gone := directEntryAt(t, listEntries(t, srv, cookie, subID), bID, 28712)
-	if gone.Available || gone.Reason != "inbound_gone" {
-		t.Errorf("stale row = %+v, want available=false reason=inbound_gone", gone)
+	// The prune is a deletion, not a hidden row: the store no longer carries the
+	// dead one, while the tombstone for the listener the probe still serves
+	// stays where it is — that row is a live decision, not a stale binding.
+	stored, err := api.Store.SubscriptionEntries(subID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !gone.Selected {
-		t.Errorf("the binding was dropped instead of reported: %+v", gone)
+	sawTombstone := false
+	for _, e := range stored {
+		if e.SrcPort == 28711 {
+			t.Errorf("pruned row is still in the store: %+v", e)
+		}
+		if e.SrcPort == 28712 {
+			sawTombstone = !e.Enabled
+		}
 	}
-	// The surviving inbound is still served, and the gone one is not: one
-	// outbound, at the port the probe actually declares.
-	if got := outboundCount(t, srv, token); got != 1 {
-		t.Fatalf("outbound count = %d, want 1", got)
+	if !sawTombstone {
+		t.Errorf("the tombstone at 28712 did not survive the prune: %+v", stored)
 	}
-	if body := string(fetchSub(t, srv, token, "", "").Body); !strings.Contains(body, `"server_port": 28711`) {
-		t.Errorf("the wrong inbound survived:\n%s", body)
+	// An audit line records the deletion: "when" is the only way to tell the
+	// probe stopped serving that port from the panel losing it.
+	audits, err := api.Store.ListAudit(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pruned := false
+	for _, a := range audits {
+		if a.Action == "subscription_entry_pruned" && a.NodeID == bID {
+			pruned = true
+		}
+	}
+	if !pruned {
+		t.Errorf("no subscription_entry_pruned audit line for %s", bID)
+	}
+}
+
+// TestPruneSparesRowsWithoutAReportedFile is the guard that keeps the prune
+// honest: with no file (or nothing renderable in it) the panel cannot tell
+// "the listener is gone" from "the probe has not applied it yet", so every row
+// stays exactly where it is — the picker reads `not_ready` in that state, never
+// `inbound_gone`.
+func TestPruneSparesRowsWithoutAReportedFile(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	// Managed pair only: a port and a certificate, no reported file.
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 20002)
+	subID, _ := createSubscription(t, srv, cookie, "main")
+	// A per-port row for a port the managed pair does not name — written
+	// directly, because the picker only ever offers ports that render.
+	if err := api.Store.SetSubscriptionEntries(subID, []store.SubscriptionEntry{{
+		NodeID: bID, SrcPort: 28711, Enabled: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := api.ReconcileSubscriptionEntries(); n != 0 {
+		t.Fatalf("reconcile additions = %d, want 0", n)
+	}
+	stored, err := api.Store.SubscriptionEntries(subID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].SrcPort != 28711 {
+		t.Fatalf("rows = %+v, want the unverified row kept until a file says otherwise", stored)
+	}
+}
+
+// TestRelayRowIsPrunedWhenTheLandingNodeLosesAnytls: a relay leg terminates on
+// the target's anytls inbound, so with no anytls listener left there the leg
+// can never be dialled — the enabled row is pruned like a dead direct one
+// (§10.2 实现修订 2026-09-19b). The direct binding on another port is untouched,
+// which is what tells the two branches apart.
+// TestRelayRowIsPrunedWhenTheLandingNodeLosesAnytls: a relay leg terminates on
+// the target's anytls inbound, so with no anytls listener left there the leg
+// can never be dialled — the enabled row is pruned like a dead direct one
+// (§10.2 实现修订 2026-09-19b).
+func TestRelayRowIsPrunedWhenTheLandingNodeLosesAnytls(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 0)
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{
+		28711: testCertPEM, 28712: testCertPEM,
+	})
+	seedForward(t, api, aID, "tcp", 8080, "198.51.100.7", 28711)
+
+	subID, _ := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28712, Selected: true},
+	})
+	if relay := relayEntryOf(t, listEntries(t, srv, cookie, subID), bID); !relay.Selected {
+		t.Fatalf("precondition: relay not auto-enrolled: %+v", relay)
+	}
+
+	// The probe's file keeps serving — but no anytls at all: nothing is left
+	// for a relay leg to terminate on, and the direct rows die with the ports.
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"vless","tag":"b-vless","listen_port":16929,"users":[{"uuid":"b2f0a2f4-1111-2222-3333-444455556666"}]}
+	]}`, nil)
+
+	for _, e := range listEntries(t, srv, cookie, subID) {
+		if e.RelayNodeID != "" {
+			t.Errorf("relay row survived a landing node with no anytls inbound: %+v", e)
+		}
+	}
+	stored, err := api.Store.SubscriptionEntries(subID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range stored {
+		if e.RelayNodeID != "" {
+			t.Errorf("pruned relay row is still in the store: %+v", e)
+		}
+		if e.SrcPort == 28712 {
+			t.Errorf("the direct row for the gone listener survived: %+v", e)
+		}
+	}
+	// The audit says which half was removed and why.
+	audits, err := api.Store.ListAudit(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawRelayPrune := false
+	for _, a := range audits {
+		if a.Action == "subscription_entry_pruned" && strings.HasPrefix(a.Command, "relay ") {
+			sawRelayPrune = true
+		}
+	}
+	if !sawRelayPrune {
+		t.Errorf("no relay-shaped subscription_entry_pruned audit line")
+	}
+}
+
+// TestRelayRowIsPrunedWhenTheRuleLandsOnADeadPort: the rule is still there but
+// the listener it lands on is gone, so the ingress forwards to a closed port —
+// the leg cannot work, the picker already reads relay_gone, and the row is
+// pruned with it (2026-09-19b). Re-pointing the rule at a live listener enrols
+// a fresh entry.
+func TestRelayRowIsPrunedWhenTheRuleLandsOnADeadPort(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 0)
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{
+		28711: testCertPEM, 28712: testCertPEM,
+	})
+	seedForward(t, api, aID, "tcp", 8080, "198.51.100.7", 28711)
+
+	subID, _ := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28712, Selected: true},
+	})
+	if relay := relayEntryOf(t, listEntries(t, srv, cookie, subID), bID); !relay.Selected {
+		t.Fatalf("precondition: relay not auto-enrolled: %+v", relay)
+	}
+
+	// Only the rule's destination listener disappears; 28712 keeps serving, so
+	// the landing node is fine — but no rule reaches it any more.
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"anytls","tag":"anytls-28712","listen_port":28712,"users":[{"password":"pw-b"}]}
+	]}`, map[int]string{28712: testCertPEM})
+	listEntries(t, srv, cookie, subID) // reconcile, prune included
+
+	stored, err := api.Store.SubscriptionEntries(subID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range stored {
+		if e.RelayNodeID != "" {
+			t.Errorf("relay row survived a rule that lands on a dead port: %+v", e)
+		}
+	}
+}
+
+// TestRelayTombstoneIsPrunedOnceTheLegIsGone: tombstones are pruned too, for
+// both halves of "the leg is gone" — a landing node with no anytls listener,
+// and a forward rule that no longer exists. Nothing is lost by that: a
+// tombstone only matters while the entry could come back by itself, and this is
+// about the states where it cannot.
+func TestRelayTombstoneIsPrunedOnceTheLegIsGone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		drop   func(t *testing.T, api *Server, aID, bID string)
+		reason string
+	}{
+		{
+			name: "landing anytls gone",
+			drop: func(t *testing.T, api *Server, aID, bID string) {
+				seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+					{"type":"vless","tag":"b-vless","listen_port":16929,"users":[{"uuid":"b2f0a2f4-1111-2222-3333-444455556666"}]}
+				]}`, nil)
+			},
+			reason: "landing node has no anytls inbound",
+		},
+		{
+			name: "forward rule gone",
+			drop: func(t *testing.T, api *Server, aID, bID string) {
+				// The probe re-reports a trustworthy snapshot without the rule.
+				if err := api.Store.ReplaceNodeForwards(aID, store.NodeForwardStatus{
+					Supported: true, Initialized: true, ReportedAt: 1700000001,
+				}, nil); err != nil {
+					t.Fatal(err)
+				}
+			},
+			reason: "forward rule gone",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, api := newTestServer(t)
+			cookie := panelCookie(t, srv)
+
+			aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 0)
+			bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+			seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{
+				28711: testCertPEM, 28712: testCertPEM,
+			})
+			seedForward(t, api, aID, "tcp", 8080, "198.51.100.7", 28711)
+
+			subID, _ := createSubscription(t, srv, cookie, "main")
+			bindEntries(t, srv, cookie, subID, []subEntryInput{
+				{NodeID: bID, SrcPort: 28712, Selected: true},
+			})
+			// Read once so the leg enrols, then opt out of it: a tombstone.
+			if relay := relayEntryOf(t, listEntries(t, srv, cookie, subID), bID); !relay.Selected {
+				t.Fatalf("precondition: relay not auto-enrolled: %+v", relay)
+			}
+			bindEntries(t, srv, cookie, subID, []subEntryInput{
+				{NodeID: bID, SrcPort: 28712, Selected: true},
+				{NodeID: bID, RelayNodeID: aID, Proto: "tcp", SrcPort: 8080, Selected: false},
+			})
+
+			tc.drop(t, api, aID, bID)
+			listEntries(t, srv, cookie, subID) // reconcile, prune included
+
+			stored, err := api.Store.SubscriptionEntries(subID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range stored {
+				if e.RelayNodeID == aID && e.SrcPort == 8080 {
+					t.Fatalf("the tombstone survived a dead leg: %+v", e)
+				}
+			}
+			// The audit names which half died.
+			audits, err := api.Store.ListAudit(20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := false
+			for _, a := range audits {
+				if a.Action == "subscription_entry_pruned" && strings.Contains(a.Command, tc.reason) {
+					seen = true
+				}
+			}
+			if !seen {
+				t.Errorf("no prune audit line mentioning %q", tc.reason)
+			}
+		})
+	}
+}
+
+// TestRelayTombstoneStaysWhileTheLegIsDerivable is the line the prune must not
+// cross: as long as the rule and the landing anytls listener are both there,
+// the entry can be enrolled again at any reconcile, so the tombstone is the
+// operator's live opt-out — deleting it would silently hand the entry back to
+// auto-enrolment (enabled, in every client's config).
+func TestRelayTombstoneStaysWhileTheLegIsDerivable(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 0)
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{
+		28711: testCertPEM, 28712: testCertPEM,
+	})
+	seedForward(t, api, aID, "tcp", 8080, "198.51.100.7", 28711)
+
+	subID, _ := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28712, Selected: true},
+	})
+	if relay := relayEntryOf(t, listEntries(t, srv, cookie, subID), bID); !relay.Selected {
+		t.Fatalf("precondition: relay not auto-enrolled: %+v", relay)
+	}
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28712, Selected: true},
+		{NodeID: bID, RelayNodeID: aID, Proto: "tcp", SrcPort: 8080, Selected: false},
+	})
+
+	listEntries(t, srv, cookie, subID) // reconcile, prune included
+
+	stored, err := api.Store.SubscriptionEntries(subID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range stored {
+		if e.RelayNodeID == aID && e.SrcPort == 8080 {
+			if e.Enabled {
+				t.Errorf("the opt-out turned into an enrolment: %+v", e)
+			}
+			return
+		}
+	}
+	t.Fatalf("a live opt-out was pruned: %+v", stored)
+}
+
+// TestRelayRowSurvivesAnUntrustworthyForwardsSnapshot: an empty rule list only
+// means "deleted" when the probe can actually read its ruleset. An agent that
+// cannot (nft missing, no root, older than §21) reports Supported=false, and
+// deleting on that would cost the operator every relay leg of that node.
+func TestRelayRowSurvivesAnUntrustworthyForwardsSnapshot(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 0)
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{
+		28711: testCertPEM, 28712: testCertPEM,
+	})
+	seedForward(t, api, aID, "tcp", 8080, "198.51.100.7", 28711)
+
+	subID, _ := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28712, Selected: true},
+	})
+	if relay := relayEntryOf(t, listEntries(t, srv, cookie, subID), bID); !relay.Selected {
+		t.Fatalf("precondition: relay not auto-enrolled: %+v", relay)
+	}
+
+	// The agent loses the ability to read nftables: the ruleset vanishes from
+	// the snapshot, but that is "unknown", not "deleted".
+	if err := api.Store.ReplaceNodeForwards(aID, store.NodeForwardStatus{
+		Supported: false, Code: "nft_missing", ReportedAt: 1700000002,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	listEntries(t, srv, cookie, subID) // reconcile, prune included
+
+	stored, err := api.Store.SubscriptionEntries(subID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range stored {
+		if e.RelayNodeID == aID && e.SrcPort == 8080 {
+			return
+		}
+	}
+	t.Fatalf("a relay row was pruned on an unreadable ruleset: %+v", stored)
+}
+
+// TestRelayRowSurvivesWithoutAReportedFile: the same guard the direct branch
+// has. With no file the landing node reads `not_ready`, which cannot be told
+// apart from "exactly mid-reinstall", so the row is left alone.
+func TestRelayRowSurvivesWithoutAReportedFile(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	aID := seedNodeWithIP(t, api, "A", "machine-a", "203.0.113.10", 0)
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, `{"inbounds":[
+		{"type":"anytls","tag":"b-in","listen_port":28711,"users":[{"password":"pw"}]}
+	]}`, map[int]string{28711: testCertPEM})
+	seedForward(t, api, aID, "tcp", 8080, "198.51.100.7", 28711)
+
+	subID, _ := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{{NodeID: bID, Selected: true}})
+	if relay := relayEntryOf(t, listEntries(t, srv, cookie, subID), bID); !relay.Selected {
+		t.Fatalf("precondition: relay not auto-enrolled: %+v", relay)
+	}
+
+	// The probe stops reporting a file at all (uninstalled, or the agent lost
+	// the path): the snapshot is empty, so nothing is a verdict.
+	if err := api.Store.SetNodeSingboxLocal(bID, store.NodeSingboxLocal{
+		LocalPresent: false, LocalRunning: false,
+	}, api.Crypt); err != nil {
+		t.Fatal(err)
+	}
+	listEntries(t, srv, cookie, subID) // reconcile, prune included
+
+	stored, err := api.Store.SubscriptionEntries(subID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range stored {
+		if e.RelayNodeID == aID && e.SrcPort == 8080 {
+			return
+		}
+	}
+	t.Fatalf("the relay row was pruned without a reported file: %+v", stored)
+}
+
+// TestPortMoveWindowKeepsTheMovedRow: the prune must never race the panel's own
+// change. A moved listener's row follows the move immediately, while the probe
+// still serves the old port — the new port reads inbound_gone for that window,
+// and the pending lifecycle row is what tells that window apart from a dead
+// binding. Without the gate every port move would delete the binding it was
+// carrying.
+func TestPortMoveWindowKeepsTheMovedRow(t *testing.T) {
+	srv, api := newTestServer(t)
+	cookie := panelCookie(t, srv)
+
+	bID := seedNodeWithIP(t, api, "B", "machine-b", "198.51.100.7", 0)
+	seedDiscoveredConfig(t, api, bID, twoInboundConfig, map[int]string{
+		28711: testCertPEM, 28712: testCertPEM,
+	})
+	subID, _ := createSubscription(t, srv, cookie, "main")
+	bindEntries(t, srv, cookie, subID, []subEntryInput{
+		{NodeID: bID, SrcPort: 28711, Alias: "东京", Selected: true},
+	})
+	r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/nodes/"+bID+"/singbox/config", cookie,
+		map[string]any{
+			"reported_hash": "hash-" + bID,
+			"update": []map[string]any{
+				{"number": 0, "type": "anytls", "tag": "anytls-28711", "port": 28811},
+			},
+		})
+	if r.Status != http.StatusOK {
+		t.Fatalf("port move: %d %s", r.Status, r.Body)
+	}
+
+	// Reading the picker runs the reconcile, prune included: the moved row must
+	// still be there, binding and name intact.
+	var moved subEntryView
+	found := false
+	for _, row := range directEntriesOf(listEntries(t, srv, cookie, subID), bID) {
+		if row.SrcPort == 28811 {
+			moved, found = row, true
+		}
+	}
+	if !found || !moved.Selected || moved.Alias != "东京" {
+		t.Fatalf("moved row = %+v (found=%v), want it kept across the apply window", moved, found)
+	}
+	if moved.Reason != "inbound_gone" {
+		t.Errorf("row before the report = %+v, want available=false reason=inbound_gone", moved)
+	}
+	// The window is exactly the case where a shown row carries no protocol: the
+	// running config does not declare that port yet.
+	if len(moved.Protocols) != 0 {
+		t.Errorf("row protocols during the window = %v, want empty", moved.Protocols)
 	}
 }
 

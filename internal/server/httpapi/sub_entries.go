@@ -506,6 +506,188 @@ func containsPort(ports []int, port int) bool {
 	return false
 }
 
+// relayKey is a relayed entry's identity minus the landing node — what ties it
+// to one forward rule: (relay node, proto, source port, interface).
+func relayKey(relayNodeID, proto string, srcPort int, iface string) string {
+	return fmt.Sprintf("%s|%s|%d|%s", relayNodeID, proto, srcPort, iface)
+}
+
+// pruneStaleEntries deletes §10.2 rows that can never render again
+// (2026-09-19 实现修订). Two shapes qualify:
+//
+//   - a **direct row whose port the probe's reported file no longer
+//     declares** — bound or tombstone. The binding names a port and the
+//     running config is the truth (§9.3), so once the file drops that port the
+//     row renders nothing, clients never saw it, and all it does is park a
+//     permanent 暂不可渲染 line in the entry list. A direct tombstone has no
+//     auto-enrolment to hold back (nothing writes direct rows on its own), so
+//     it goes with the bound row; if the port returns, the picker offers it as
+//     a fresh unchecked candidate.
+//   - a **relay row whose leg is gone** — bound or tombstone. A relay leg needs
+//     both halves, and it is *derived* from them: a tcp forward rule on the
+//     relay whose destination is one of the landing node's anytls listeners.
+//     Lose either half and the candidate stops existing, so the row can never
+//     render again (the ingress either forwards to a closed port or terminates
+//     on a listener that is not there). Tombstones go too: keeping one would
+//     only matter if the entry could come back by itself, and when the topology
+//     *does* come back the reconciler enrols it again — which is the designed
+//     default the operator opted out of, not a surprise (§10.2).
+//
+// Three guards keep this from eating live bindings:
+//
+//   - only when a reported file actually renders something (rd.live non-empty).
+//     A node whose file is missing or unparseable reads `not_ready`, never
+//     `inbound_gone`, and its rows are left exactly as they are — the panel
+//     cannot tell "mid-install" from "the listener is gone" without a file;
+//   - for direct rows, only when the port is absent from `nodeIngressPorts`,
+//     the same list the renderer and the picker's availability check use, so
+//     "what is shown" and "what is pruned" cannot drift apart;
+//   - for the rule half of a relay row, only when the relay's forwards snapshot
+//     is *trustworthy* (`Supported`): an agent that cannot read nftables, or
+//     one older than §21, reports an empty rule list that means "unknown", not
+//     "deleted" — deleting on that would drop every relay leg of the node.
+//
+// Plus the in-flight gate: a direct row is never pruned while a lifecycle row
+// for its port is `pending` or `deleting` — that is the panel's own change
+// still in flight (a port it added or moved before the probe applied the
+// document), where the port's absence is a window, not a verdict. Deleting on
+// that signal would destroy the binding on every port move (§9.3/§10.2 实现
+// 修订 2026-09-18b rewrote those rows to follow the move on purpose). A relay
+// row needs no such gate: the panel moving or retiring a listener leaves the
+// old port in the file until the probe applies, so the leg stays derivable for
+// the whole window.
+func (s *Server) pruneStaleEntries(sub *store.Subscription) int {
+	entries, err := s.Store.SubscriptionEntries(sub.ID)
+	if err != nil {
+		return 0
+	}
+	// One read per node, not per row: every entry of a node asks the same
+	// questions about the same reported file.
+	type nodeView struct {
+		renderable bool
+		landable   bool
+		ports      []int
+		live       bool
+		inFlight   map[int]bool
+		// derived is the set of relay identities this landing node still
+		// produces — the same list the reconciler enrols from and the picker
+		// calls `discovered`.
+		derived map[string]bool
+	}
+	views := map[string]nodeView{}
+	nodeState := func(nodeID string) (nodeView, bool) {
+		if v, ok := views[nodeID]; ok {
+			return v, true
+		}
+		target, err := s.Store.GetNode(nodeID)
+		if err != nil {
+			return nodeView{}, false
+		}
+		sb, err := s.Store.GetNodeSingbox(nodeID)
+		if err != nil {
+			sb = nil
+		}
+		rd := s.targetReadinessOf(target, sb)
+		v := nodeView{
+			renderable: rd.renderable,
+			// landable is the file's own answer, from the same helper the
+			// renderer's relay leg uses — not rd.relayable, which folds in the
+			// managed port/certificate pair. With a file on the probe that pair
+			// is not the truth (§9.3).
+			landable: relayableInbound(rd.live) != nil,
+			ports:    nodeIngressPorts(rd.live, sb),
+			live:     len(rd.live) > 0,
+			inFlight: map[int]bool{},
+			derived:  map[string]bool{},
+		}
+		for _, c := range s.relayCandidates(target, sb) {
+			v.derived[relayKey(c.RelayNodeID, c.Proto, c.SrcPort, c.Iface)] = true
+		}
+		if states, err := s.Store.ListNodeSingboxInbounds(nodeID); err == nil {
+			for _, st := range states {
+				if st.Status == "pending" || st.Status == "deleting" {
+					v.inFlight[st.Port] = true
+				}
+			}
+		}
+		views[nodeID] = v
+		return v, true
+	}
+
+	gone := []store.SubscriptionEntry{}
+	reasons := map[string]string{}
+	for _, e := range entries {
+		if e.RelayNodeID == "" {
+			// The legacy node-level row (port 0) has no port to be gone, and the
+			// split owns it.
+			if e.SrcPort <= 0 {
+				continue
+			}
+			v, ok := nodeState(e.NodeID)
+			if !ok || !v.renderable || !v.live {
+				continue
+			}
+			if containsPort(v.ports, e.SrcPort) || v.inFlight[e.SrcPort] {
+				continue
+			}
+			gone = append(gone, e)
+			reasons[entryKey(e)] = fmt.Sprintf("direct %d (inbound gone)", e.SrcPort)
+			continue
+		}
+		// Relay rows (tombstones included): the leg is gone when either half
+		// is — no pinnable anytls listener left to terminate on, or no rule
+		// that still lands on one. Both are "not derivable", which is the same
+		// predicate the picker shows as relay_gone and the reconciler enrols
+		// from, so the row cannot come back by itself. A tombstone whose leg is
+		// still derivable is left alone: there it is the opt-out, and deleting
+		// it would hand the entry straight back to auto-enrolment.
+		v, ok := nodeState(e.NodeID)
+		if !ok || !v.renderable || !v.live {
+			continue // no file on the landing node: unknown, not gone
+		}
+		if !v.landable {
+			gone = append(gone, e)
+			reasons[entryKey(e)] = fmt.Sprintf("relay %s:%d (landing node has no anytls inbound)",
+				e.RelayNodeID, e.SrcPort)
+			continue
+		}
+		if v.derived[relayKey(e.RelayNodeID, e.Proto, e.SrcPort, e.Iface)] {
+			continue
+		}
+		st, err := s.Store.GetNodeForwardStatus(e.RelayNodeID)
+		if err != nil || !st.Supported {
+			// The rule list is "unknown", not "empty": an agent that cannot read
+			// nftables (or predates §21) must not cost the operator a leg.
+			continue
+		}
+		gone = append(gone, e)
+		reasons[entryKey(e)] = fmt.Sprintf("relay %s:%d (forward rule gone)",
+			e.RelayNodeID, e.SrcPort)
+	}
+	if len(gone) == 0 {
+		return 0
+	}
+	deleted, err := s.Store.DeleteSubscriptionEntries(sub.ID, gone)
+	if err != nil {
+		s.Log.Warn("prune stale subscription entries", "subscription", sub.ID, "err", err)
+		return 0
+	}
+	if deleted == 0 {
+		return 0
+	}
+	for _, e := range gone {
+		// Audited because it is client-visible intent: the operator's binding
+		// (alias included) is gone, and knowing when it went is the only way to
+		// tell "the probe stopped serving it" from "the panel lost it".
+		s.Store.InsertAudit(&store.AuditEntry{
+			Actor: "server", NodeID: e.NodeID, Action: "subscription_entry_pruned",
+			Command: reasons[entryKey(e)],
+		})
+	}
+	s.publishEvent("subscriptions_changed", sub.ID)
+	return deleted
+}
+
 // splitNodeLevelDirectEntries rewrites this subscription's legacy node-level
 // direct rows (src_port=0, "every inbound of this node") into one row per
 // inbound port (§9.3/§10.2 实现修订 2026-09-18). Without it an upgraded panel
@@ -576,10 +758,14 @@ func portsList(ports []int) string {
 	return strings.Join(out, ",")
 }
 
-// ReconcileSubscriptionEntries auto-enrols §10.2 relay entries across every
-// subscription. Idempotent and cheap (a handful of indexed reads); called at
-// startup, whenever a probe reports new forwards, and before the panel reads
-// the candidate list. Returns how many entries were created.
+// ReconcileSubscriptionEntries keeps §10.2 rows in step with the fleet: it
+// prunes rows that can never render again (a direct row whose port left the
+// probe's file, an enabled relay row whose landing node lost its anytls
+// inbounds), splits legacy node-level rows, and auto-enrols relay entries.
+// Idempotent and cheap (a handful of indexed reads); called at startup,
+// whenever a probe reports new forwards, and before the panel reads the
+// candidate list. Returns how many entries were created (pruning and splitting
+// are migrations of rows the operator already owns, not enrolments).
 func (s *Server) ReconcileSubscriptionEntries() int {
 	subs, err := s.Store.ListSubscriptions()
 	if err != nil {
@@ -599,9 +785,10 @@ func (s *Server) ReconcileSubscriptionEntries() int {
 // itself, so auto-enrolment can only extend a decision the operator made.
 func (s *Server) reconcileSubscriptionEntries(sub *store.Subscription) int {
 	// Not behind sub.relay_auto_include, and not part of the returned count:
-	// that switch is about relays, while this is a migration of rows the
-	// operator already bound — leaving half of them node-level would make the
-	// picker offer the same node twice.
+	// that switch is about relays, while these two are about rows the operator
+	// already bound — a dead row would otherwise sit in the picker forever, and
+	// half-migrated legacy rows would make it offer the same node twice.
+	s.pruneStaleEntries(sub)
 	s.splitNodeLevelDirectEntries(sub)
 	// The switch is checked here rather than in the callers: every path that
 	// could enrol an entry (startup, a forwards report, opening the picker) goes

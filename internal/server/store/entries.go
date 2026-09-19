@@ -281,6 +281,46 @@ func (s *Store) SplitSubscriptionDirectEntry(subID, nodeID, alias string, enable
 	return true, nil
 }
 
+// DeleteSubscriptionEntries removes rows by identity (§10.2 实现修订
+// 2026-09-19). It is the prune half of the reconciler, not a picker operation:
+// a row whose inbound left the probe's reported file can never render again,
+// and the panel deletes it instead of parking a permanent 暂不可渲染 line in
+// the entry list. Identity is the whole primary key, so a concurrent writer's
+// row is never matched by accident.
+//
+// The legacy projection is re-mirrored in the same transaction: a pruned row
+// that was enabled must stop appearing in subscription_nodes too.
+func (s *Store) DeleteSubscriptionEntries(subID string, entries []SubscriptionEntry) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	deleted := 0
+	for _, e := range entries {
+		res, err := tx.Exec(`DELETE FROM subscription_entries
+			WHERE subscription_id = ? AND node_id = ? AND relay_node_id = ?
+				AND proto = ? AND src_port = ? AND iface = ?`,
+			subID, e.NodeID, e.RelayNodeID, e.Proto, e.SrcPort, e.Iface)
+		if err != nil {
+			return 0, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			deleted += int(n)
+		}
+	}
+	if err := mirrorDirectNodes(tx, subID); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
 // MoveSubscriptionDirectEntryPorts follows one inbound's port change across
 // every subscription: bound direct rows of nodeID at `from` are rewritten to
 // `to`, alias and enabled state included. Returns how many rows moved.
