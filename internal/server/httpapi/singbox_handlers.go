@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
@@ -334,7 +335,21 @@ func (s *Server) inboundPortFor(nodeID string, sb *store.NodeSingbox, requested 
 // one-sing.sh already serves keeps that listener's password, so no client is
 // cut off — and only a node with no inbound at all gets a fresh 16-char alnum
 // one. Changing a port runs through here too, and must not rotate.
-func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, version string, port int, status string) error {
+//
+// §9.3 实现修订 2026-09-19: the config itself is merged onto the file the
+// probe last reported (buildInstallConfig) instead of regenerated from the
+// template — an install or a version update must not erase the inbounds the
+// operator added.
+func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, version string, port int, status string) (err error) {
+	// A port another listener in the probe's own file serves is refused before
+	// anything else: the merge would catch it too, but only after the
+	// credential step below may have minted a password — an audit line for a
+	// credential an install then refused to persist.
+	if base, ok := s.liveConfig(nodeID); ok {
+		if err := singbox.CheckPanelPortFree([]byte(base), port); err != nil {
+			return err
+		}
+	}
 	// The credential is looked up at the port the listener is being built on,
 	// falling back to the port the node was managed on before: a port change
 	// names a port that has no credential yet, and the one to keep sits in the
@@ -344,17 +359,37 @@ func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, versi
 	if err != nil {
 		return err
 	}
-	// Adopted inbounds ride along on every regeneration: the operator took them
-	// over from the probe's own config.json, and rewriting the file without
-	// them would silently delete his VLESS/SS/Socks services (§9.3 实现修订
-	// 2026-09-17).
-	extras := s.loadExtraInbounds(nodeID)
-	config, err := singbox.BuildNodeConfigWithInbounds(port, password, extras)
+	config, inserted, operatorContent, err := s.buildInstallConfig(nodeID, port, password)
 	if err != nil {
 		return err
 	}
+	// A listener the panel just created gets its 添加中 row before the push,
+	// the same way an editor add does: an online agent may apply and report
+	// within this call, and the report's reconcile would then be overwritten
+	// by a row written afterwards.
+	if inserted {
+		if err := s.Store.SetNodeSingboxInboundPending(nodeID, store.NodeSingboxInbound{
+			Port: port, Type: singbox.ProtoAnytls, Tag: "anytls-in",
+		}); err != nil {
+			return err
+		}
+		// A write that never leaves the server must not leave the panel claiming
+		// a listener was added (§9.3 实现修订 2026-09-18, the editor's same rule).
+		defer func() {
+			if err != nil {
+				s.Store.DeleteNodeSingboxInbound(nodeID, port)
+			}
+		}()
+	}
 	if err := s.Store.SetSetting("singbox_config:"+nodeID, string(config), false); err != nil {
 		return err
+	}
+	// The document carries the operator's own content: from here on the startup
+	// template sync must treat this file as theirs. Written only once the
+	// config is stored, so a failed install leaves no marker without a
+	// document to protect.
+	if operatorContent {
+		s.markConfigEdited(nodeID)
 	}
 
 	// preserve what the agent reported (version/cert/rollback) — only the
@@ -378,6 +413,73 @@ func (s *Server) applySingboxDesired(nodeID string, sb *store.NodeSingbox, versi
 	s.pushDesired(nodeID)
 	s.publishEvent("node_updated", nodeID)
 	return nil
+}
+
+// buildInstallConfig produces the config an install/update pushes (§9.3 实现
+// 修订 2026-09-19): the file the probe last reported is the base when there is
+// one — everything it declares survives — and the template plus the legacy
+// adopted inbounds otherwise (an agent too old to report a file, or one the
+// panel cannot parse: install is the recovery path for a broken config too).
+//
+// inserted reports whether the panel's own inbound had to be appended, and
+// operatorContent whether the result carries the operator's own bytes — the
+// condition the `singbox_edited` marker (and with it the startup template
+// sync) hangs on. An unparseable base and a port another inbound serves are
+// the two refusals/fallbacks; both keep the probe's service out of the decision.
+func (s *Server) buildInstallConfig(nodeID string, port int, password string) (config []byte, inserted, operatorContent bool, err error) {
+	extras := s.loadExtraInbounds(nodeID)
+	base, ok := s.liveConfig(nodeID)
+	if !ok {
+		config, err = singbox.BuildNodeConfigWithInbounds(port, password, extras)
+		return config, false, false, err
+	}
+	merged, fileInserted, merr := singbox.MergePanelInboundIntoDoc([]byte(base), port, password)
+	if errors.Is(merr, singbox.ErrInboundPortTaken) {
+		return nil, false, false, merr
+	}
+	if merr != nil {
+		s.Log.Warn("singbox install: unreadable local config, falling back to template", "node", nodeID, "err", merr)
+		config, err = singbox.BuildNodeConfigWithInbounds(port, password, extras)
+		return config, false, false, err
+	}
+	if !templateEquivalent(merged, port, password, extras) {
+		return merged, fileInserted, true, nil
+	}
+	// The file says exactly what the template says: store the generator's own
+	// bytes so the stored config stays byte-identical to what the startup sync
+	// derives — a re-serialization of the same content would differ in key
+	// order, churn the hash and teach sync nothing.
+	config, err = singbox.BuildNodeConfigWithInbounds(port, password, extras)
+	return config, fileInserted, false, err
+}
+
+// templateEquivalent reports whether the merged document says exactly what the
+// generator would produce for the same port, credential and adopted inbounds.
+// Both sides go through a decode/encode round-trip so key order and indentation
+// cannot decide the answer — the probe's file is compared by content, not by
+// formatting. False is the safe side: it marks the file as the operator's and
+// keeps the startup template sync away from it.
+func templateEquivalent(doc []byte, port int, password string, extras []singbox.ExtraInbound) bool {
+	fallback, err := singbox.BuildNodeConfigWithInbounds(port, password, extras)
+	if err != nil {
+		return false
+	}
+	return canonicalJSON(doc) == canonicalJSON(fallback)
+}
+
+// canonicalJSON renders a JSON document as content: map keys sorted, array
+// order kept, formatting gone. Unparseable input never compares equal to a
+// parseable one.
+func canonicalJSON(raw []byte) string {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "\x00" + string(raw)
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return "\x00" + string(raw)
+	}
+	return string(out)
 }
 
 // SyncSingboxConfigs regenerates the stored config of every managed node whose
@@ -516,9 +618,16 @@ func (s *Server) pushDesired(nodeID string) bool {
 }
 
 // singboxWriteErr maps a desired-state write failure onto an API error code.
-// Every remaining cause is a storage or generator failure, so there is exactly
-// one answer: internal. The old `anytls_password_unset` 400 died with
-// operator-supplied passwords (§10.1 实现修订 2026-09-16).
+// A port the probe's own file already serves with another listener is an
+// operator-visible refusal — the old full rewrite silently dropped that
+// listener instead (§9.3 实现修订 2026-09-19). Every remaining cause is a
+// storage or generator failure, so there is exactly one answer: internal. The
+// old `anytls_password_unset` 400 died with operator-supplied passwords
+// (§10.1 实现修订 2026-09-16).
 func singboxWriteErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, singbox.ErrInboundPortTaken) {
+		writeErr(w, http.StatusBadRequest, "duplicate_port")
+		return
+	}
 	writeErr(w, http.StatusInternalServerError, "internal")
 }

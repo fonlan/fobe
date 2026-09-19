@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 )
@@ -187,6 +188,26 @@ type nodeConfig struct {
 	Outbounds []directOutbound `json:"outbounds"`
 }
 
+// panelAnytlsInbound is the panel's own anytls inbound — the one object both a
+// generated document (BuildNodeConfig) and a merged one (PanelInboundDoc)
+// embed, so the two cannot drift apart (§9.3 实现修订 2026-09-19).
+func panelAnytlsInbound(port int, password string) anytlsInbound {
+	return anytlsInbound{
+		Type:          "anytls",
+		Tag:           "anytls-in",
+		Listen:        "::",
+		ListenPort:    port,
+		Users:         []anytlsUser{{Name: "default", Password: password}},
+		PaddingScheme: AnytlsPaddingScheme,
+		TLS: inboundTLS{
+			Enabled:         true,
+			ServerName:      ServerName,
+			CertificatePath: CertDir + "/" + CertFile,
+			KeyPath:         CertDir + "/" + KeyFile,
+		},
+	}
+}
+
 // BuildNodeConfig renders the complete sing-box config.json for one probe:
 // anytls inbound (shared global password, §10.1) + log + dns + direct egress.
 // The output is byte-stable for identical inputs so config_hash dedupes
@@ -200,20 +221,7 @@ func BuildNodeConfig(port int, password string) ([]byte, error) {
 		DNS: dnsSection{Servers: []dnsServer{
 			{Type: "local", Tag: "local-dns"},
 		}},
-		Inbounds: []anytlsInbound{{
-			Type:          "anytls",
-			Tag:           "anytls-in",
-			Listen:        "::",
-			ListenPort:    port,
-			Users:         []anytlsUser{{Name: "default", Password: password}},
-			PaddingScheme: AnytlsPaddingScheme,
-			TLS: inboundTLS{
-				Enabled:         true,
-				ServerName:      ServerName,
-				CertificatePath: CertDir + "/" + CertFile,
-				KeyPath:         CertDir + "/" + KeyFile,
-			},
-		}},
+		Inbounds:  []anytlsInbound{panelAnytlsInbound(port, password)},
 		Outbounds: []directOutbound{{Type: "direct", Tag: "direct"}},
 	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
@@ -430,6 +438,101 @@ func BuildNodeConfigWithInbounds(port int, password string, extras []ExtraInboun
 		return nil, fmt.Errorf("marshal sing-box config: %w", err)
 	}
 	return out, nil
+}
+
+// PanelInboundDoc is the panel's own anytls inbound as a generic config object:
+// the exact object a generated document embeds, in the shape a merged document
+// needs (§9.3 实现修订 2026-09-19).
+func PanelInboundDoc(port int, password string) (map[string]any, error) {
+	if !ValidPort(port) {
+		return nil, fmt.Errorf("port %d outside %d-%d", port, MinPort, MaxPort)
+	}
+	raw, err := json.Marshal(panelAnytlsInbound(port, password))
+	if err != nil {
+		return nil, fmt.Errorf("render panel inbound: %w", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("re-read panel inbound: %w", err)
+	}
+	return m, nil
+}
+
+// ErrInboundPortTaken reports that the port the panel's own inbound is asked to
+// serve is already declared by another listener in the base document. Install
+// refuses instead of pushing a config that cannot bind — gate ② would fail the
+// whole apply and roll the node back, with nothing on the panel explaining why.
+var ErrInboundPortTaken = errors.New("listen_port already served by another inbound")
+
+// CheckPanelPortFree is the refusal of ErrInboundPortTaken as a check: a port
+// another listener already serves is refused, an anytls listener there is fine
+// (the merge keeps the file's inbound), and an unparseable document is nobody's
+// business yet. It exists so a caller can validate before it mints a
+// credential — an install that refuses afterwards would leave an audit line
+// for a password it never persisted.
+func CheckPanelPortFree(base []byte, port int) error {
+	var doc map[string]any
+	if err := json.Unmarshal(base, &doc); err != nil {
+		return nil
+	}
+	inbounds, _ := doc["inbounds"].([]any)
+	for _, raw := range inbounds {
+		m, _ := raw.(map[string]any)
+		if m == nil || intField(m["listen_port"]) != port {
+			continue
+		}
+		if typ, _ := m["type"].(string); typ != ProtoAnytls {
+			return ErrInboundPortTaken
+		}
+		return nil
+	}
+	return nil
+}
+
+// MergePanelInboundIntoDoc is the install/update half of the editor model
+// (§9.3 实现修订 2026-09-19): the probe's own config.json is the base, and
+// everything it declares is kept exactly as written — the VLESS and socks
+// inbounds, the route/dns/outbounds sections, the hand-edited fields on the
+// panel listener. The one thing an install may contribute is the panel's own
+// anytls inbound when the document does not already serve one on `port`.
+//
+// An anytls listener already on `port` is left untouched on purpose: the
+// credential on it is the one the caller just read back, and re-asserting cert
+// paths or padding over the operator's file would undo their edits. inserted
+// tells the caller the document gained a listener (the lifecycle table should
+// show 添加中 before the next report).
+func MergePanelInboundIntoDoc(base []byte, port int, password string) (out []byte, inserted bool, err error) {
+	if err := CheckPanelPortFree(base, port); err != nil {
+		return nil, false, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(base, &doc); err != nil {
+		return nil, false, fmt.Errorf("re-read probe config: %w", err)
+	}
+	inbounds, _ := doc["inbounds"].([]any)
+	for _, raw := range inbounds {
+		m, _ := raw.(map[string]any)
+		if m == nil || intField(m["listen_port"]) != port {
+			continue
+		}
+		// Already there (and anytls — CheckPanelPortFree cleared the rest): the
+		// file's inbound wins.
+		out, err = json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return nil, false, fmt.Errorf("marshal sing-box config: %w", err)
+		}
+		return out, false, nil
+	}
+	ib, err := PanelInboundDoc(port, password)
+	if err != nil {
+		return nil, false, err
+	}
+	doc["inbounds"] = append(inbounds, ib)
+	out, err = json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal sing-box config: %w", err)
+	}
+	return out, true, nil
 }
 
 // ConfigHash is the fingerprint stored in node_singbox.config_hash (§9.1:
