@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/fonlan/fobe/internal/server/agentupdate"
+	"github.com/fonlan/fobe/internal/server/notify"
 )
 
 // Settings groups (design §4.4 / §12.1 / §13 / §14 / §15 / §16):
@@ -16,6 +17,8 @@ import (
 //   notify.feishu_app_id / app_secret (encrypted) / receive_id / bot_name /
 //   domain / webhook_url (encrypted) / webhook_secret (encrypted) (§15,
 //   2026-09-16 修订: the QR flow itself writes these via feishureg.Save)
+//   notify.language (en-US|zh-CN), notify.timezone (IANA name) — the copy
+//   language and clock of the pushed text (§15, 2026-09-19 修订)
 //   retention.metrics_days
 //   geoip.auto_update, geoip.max_age_days, geoip.url (§14.1; the MMDB itself
 //   arrives via the upload/download endpoints, and geoip.status is server-owned)
@@ -65,6 +68,9 @@ var allowedKeys = func() map[string]bool {
 		"notify.telegram_enabled", "notify.webhook_enabled", "notify.feishu_enabled",
 		"notify.event.node_status", "notify.event.traffic", "notify.event.billing",
 		"notify.event.singbox", "notify.event.updates", "notify.event.counter_reset",
+		// §15 copy language and timestamp zone of the pushed text (2026-09-19
+		// 修订). Unset keeps the pre-setting behaviour: English copy, UTC clock.
+		notify.KeyLanguage, notify.KeyTimezone,
 		"retention.metrics_days", "retention.latency_days",
 		"latency.interval_seconds",
 		"alert.traffic_warn_pct", "alert.traffic_crit_pct",
@@ -164,6 +170,17 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		// §15 飞书 host selector; anything but the two known brands is refused.
 		if key == "notify.feishu_domain" && value != "feishu" && value != "lark" {
 			writeErr(w, http.StatusBadRequest, "bad_feishu_domain")
+			return
+		}
+		// §15 text settings (2026-09-19 修订): only the two canonical language
+		// tags, and only a zone the image's tzdata can actually resolve — a
+		// silently swallowed "Mars/Olympus" would look like a working setting.
+		if key == notify.KeyLanguage && !notify.ValidLanguage(value) {
+			writeErr(w, http.StatusBadRequest, "bad_notify_language")
+			return
+		}
+		if key == notify.KeyTimezone && !notify.ValidTimezone(value) {
+			writeErr(w, http.StatusBadRequest, "bad_timezone")
 			return
 		}
 		// §15 switches: like the §5.5 switch, an unparsable truthy value would

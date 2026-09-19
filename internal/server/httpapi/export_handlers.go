@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/fonlan/fobe/internal/server/notify"
 	"github.com/fonlan/fobe/internal/server/security"
 	"github.com/fonlan/fobe/internal/server/store"
 )
@@ -921,6 +922,15 @@ func (s *Server) importSettings(settings map[string]string, stats *importStats) 
 		// A hand-edited snapshot must not install a §14.1 policy the API would
 		// have rejected (a nonsense threshold or a non-URL source).
 		if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {
+			continue
+		}
+		// Same rule for the §15 text settings (2026-09-19 修订): an unknown
+		// language tag or a zone this image cannot resolve is dropped rather
+		// than stored and silently ignored at delivery time.
+		if key == notify.KeyLanguage && !notify.ValidLanguage(value) {
+			continue
+		}
+		if key == notify.KeyTimezone && !notify.ValidTimezone(value) {
 			continue
 		}
 		if err := s.Store.SetSetting(key, value, false); err != nil {

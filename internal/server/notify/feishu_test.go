@@ -70,7 +70,7 @@ func TestFeishuAppModeSendsMessage(t *testing.T) {
 	}
 	// The content field is itself JSON-encoded, so the newline inside the text
 	// arrives escaped — build the expectation the same way the sender does.
-	mt := MessageText(Event{Kind: "node_offline", NodeName: "n1", Event: EventAlert, CreatedAt: 1700000000})
+	mt := MessageText(Event{Kind: "node_offline", NodeName: "n1", Event: EventAlert, CreatedAt: 1700000000}, TextOptionsFor(f.Decrypt))
 	wantContent, _ := json.Marshal(map[string]string{"text": mt})
 	if sent.Content != string(wantContent) {
 		t.Fatalf("content = %q, want %q", sent.Content, string(wantContent))
@@ -199,8 +199,8 @@ func TestFeishuWebhookUpstreamErrorSurfaces(t *testing.T) {
 }
 
 func TestFeishuMessageTextTestEvent(t *testing.T) {
-	got := MessageText(Event{Event: EventTest, CreatedAt: time.Now().Unix()})
-	if want := "[fobe] TEST "; len(got) < len(want) || got[:len(want)] != want {
+	got := MessageText(Event{Event: EventTest, CreatedAt: time.Now().Unix()}, TextOptions{Lang: LangEnglish})
+	if want := "🔔 fobe · Test notification"; !strings.HasPrefix(got, want) {
 		t.Fatalf("MessageText(test) = %q", got)
 	}
 }

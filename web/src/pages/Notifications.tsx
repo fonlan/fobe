@@ -25,6 +25,8 @@ const WEBHOOK_KEYS = ['notify.webhook_url', 'notify.webhook_secret'] as const;
 const FEISHU_APP_KEYS = ['notify.feishu_app_id', 'notify.feishu_app_secret', 'notify.feishu_receive_id', 'notify.feishu_domain'] as const;
 const FEISHU_WEBHOOK_KEYS = ['notify.feishu_webhook_url', 'notify.feishu_webhook_secret'] as const;
 const TRAFFIC_KEYS = ['alert.traffic_warn_pct', 'alert.traffic_crit_pct'] as const;
+/** §15 copy language + timestamp zone of the pushed text (2026-09-19 修订). */
+const TEXT_KEYS = ['notify.language', 'notify.timezone'] as const;
 
 /** Event groups, mirroring notify.EventGroups on the server. */
 const EVENT_GROUPS = ['node_status', 'traffic', 'billing', 'singbox', 'updates', 'counter_reset'] as const;
@@ -181,6 +183,25 @@ export default function Notifications() {
           {field('notify.webhook_secret', t('webhook_secret'), { password: true })}
         </div>
       </ChannelCard>
+
+      <section className="card">
+        <h3>{t('sec_notify_text')}</h3>
+        <p className="hint">{t('notify_text_hint')}</p>
+        <div className="form-grid">
+          {/* Language names stay literal in both dictionaries: 中文 / English are
+              self-describing, and a translated language name is the one place
+              where a mistranslation is actively confusing. */}
+          {field('notify.language', t('notify_language'), {
+            select: [
+              { value: 'en-US', label: 'English' },
+              { value: 'zh-CN', label: '中文' },
+            ],
+          })}
+          {field('notify.timezone', t('notify_timezone'), { defaultValue: 'UTC' })}
+        </div>
+        <p className="hint">{t('notify_timezone_hint')}</p>
+        <SaveRow busy={busy} savedMsg={savedMsg} onSave={() => void saveGroup(TEXT_KEYS)} label={t('save')} />
+      </section>
 
       <section className="card">
         <h3>{t('sec_notify_events')}</h3>

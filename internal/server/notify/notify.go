@@ -39,6 +39,12 @@ const (
 	KeyTelegramEnabled = "notify.telegram_enabled"
 	KeyWebhookEnabled  = "notify.webhook_enabled"
 	KeyFeishuEnabled   = "notify.feishu_enabled"
+
+	// Copy language and timestamp zone of the pushed text (2026-09-19 修订,
+	// see i18n.go). Unset means "the behaviour before the settings existed":
+	// English copy on the UTC clock.
+	KeyLanguage = "notify.language" // en-US | zh-CN
+	KeyTimezone = "notify.timezone" // IANA name; unset or UTC means UTC
 )
 
 // EventSwitchPrefix + group is the per-event-type switch key. Groups are

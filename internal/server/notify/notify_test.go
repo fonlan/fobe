@@ -198,7 +198,9 @@ func TestTelegramDeliverPostsForm(t *testing.T) {
 	if gotChat != "42" {
 		t.Fatalf("chat_id = %q", gotChat)
 	}
-	for _, want := range []string{"[fobe] ALERT node_offline - edge-1", "node_offline", `{"x":1}`} {
+	// The text channel gets the human rendering (§15), not the raw payload:
+	// the unknown "x" still shows up, but as a labelled line, not as JSON.
+	for _, want := range []string{"🔴 fobe · Probe offline", "Node: edge-1 (n1)", "Time: 2024-10-27 03:33:20 UTC", "x: 1"} {
 		if !strings.Contains(gotText, want) {
 			t.Fatalf("text %q missing %q", gotText, want)
 		}
@@ -206,8 +208,9 @@ func TestTelegramDeliverPostsForm(t *testing.T) {
 }
 
 func TestTelegramRecoveryText(t *testing.T) {
-	text := MessageText(Event{Kind: "node_offline", NodeID: "n1", NodeName: "edge-1", CreatedAt: 1730000000, Event: EventRecovery})
-	if !strings.Contains(text, "RECOVERED node_offline") {
+	text := MessageText(Event{Kind: "node_offline", NodeID: "n1", NodeName: "edge-1", CreatedAt: 1730000000, Event: EventRecovery},
+		TextOptions{Lang: LangEnglish})
+	if !strings.Contains(text, "✅ fobe · Probe offline (recovered)") {
 		t.Fatalf("text = %q", text)
 	}
 }

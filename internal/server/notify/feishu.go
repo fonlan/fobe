@@ -110,7 +110,7 @@ func (f *Feishu) Deliver(ev Event) error {
 	if !f.Configured() {
 		return ErrNotConfigured
 	}
-	return f.SendText(MessageText(ev))
+	return f.SendText(MessageText(ev, TextOptionsFor(f.Decrypt)))
 }
 
 // apiErr is the common shape of Feishu open-API responses: HTTP 200 with a

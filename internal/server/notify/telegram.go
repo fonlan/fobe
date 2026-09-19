@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
 const defaultTelegramAPI = "https://api.telegram.org"
@@ -56,7 +55,7 @@ func (t *Telegram) Deliver(ev Event) error {
 	endpoint := fmt.Sprintf("%s/bot%s/sendMessage", t.apiBase, token)
 	resp, err := t.HTTP.PostForm(endpoint, url.Values{
 		"chat_id": {chatID},
-		"text":    {MessageText(ev)},
+		"text":    {MessageText(ev, TextOptionsFor(t.Decrypt))},
 	})
 	if err != nil {
 		return fmt.Errorf("telegram sendMessage: %w", err)
@@ -67,37 +66,6 @@ func (t *Telegram) Deliver(ev Event) error {
 		return fmt.Errorf("telegram sendMessage: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
-}
-
-// MessageText renders a plain-text notification; the Bot API takes no markup
-// by default, so this stays readable on any client.
-func MessageText(ev Event) string {
-	var b strings.Builder
-	b.WriteString("[fobe] ")
-	switch ev.Event {
-	case EventRecovery:
-		b.WriteString("RECOVERED ")
-	case EventTest:
-		b.WriteString("TEST ")
-	default:
-		b.WriteString("ALERT ")
-	}
-	b.WriteString(ev.Kind)
-	subject := ev.NodeName
-	if subject == "" {
-		subject = ev.NodeID
-	}
-	if subject != "" {
-		b.WriteString(" - ")
-		b.WriteString(subject)
-	}
-	b.WriteString("\n")
-	b.WriteString(time.Unix(ev.CreatedAt, 0).UTC().Format(time.RFC3339))
-	if payload := strings.TrimSpace(ev.Payload); payload != "" && payload != "{}" {
-		b.WriteString("\n")
-		b.WriteString(payload)
-	}
-	return b.String()
 }
 
 // rawJSON normalizes the stored payload string into a JSON value for the

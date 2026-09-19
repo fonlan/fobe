@@ -226,9 +226,13 @@ func runServer() {
 				}
 			}
 			_ = st.InsertAudit(&store.AuditEntry{Actor: "panel", Action: "feishu_qr_saved", Command: botName})
-			// Same shape the real alerts will have (MessageText), so this is
-			// also a sample of what the user signed up for.
-			if err := feishu.SendText("[fobe] TEST notification\nFeishu notification channel connected."); err != nil {
+			// Rendered by the same function the real alerts use, so the
+			// welcome is also a sample of what the user signed up for.
+			welcome := notify.MessageText(
+				notify.Event{Event: notify.EventTest, CreatedAt: time.Now().Unix()},
+				notify.TextOptionsFor(decryptSetting),
+			)
+			if err := feishu.SendText(welcome + "\nFeishu notification channel connected."); err != nil {
 				log.Warn("feishu welcome send", "err", err)
 			}
 			return nil

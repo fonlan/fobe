@@ -995,9 +995,13 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 - **投递留痕（2026-09-18 修订）**：告警成功投递到哪个渠道都写 `audit_logs`（`notify_sent`，带 channel / kind / event）；失败写 `notify_failed`。两者都按 (告警, 渠道, 结果) 去重：失败的告警留在队列里每分钟重试，部分失败还会把整条告警重跑一遍（§4.4）。被事件开关拦下的告警**不写审计**：那是有意的静默，不是一次投递。
 
+- **文本消息版面（2026-09-19 修订）**：Telegram 与飞书共用 `notify.MessageText`，从「一行 kind slug + RFC3339 + 原始 JSON」改成「emoji 严重度 + 人类可读标题」起头，下面接 `Node:` / `Time:` 与逐条人读字段：kind 映射成标题（`node_offline` → `🔴 fobe · Probe offline`），恢复态走 `✅ … (recovered)`，测试消息走 `🔔 fobe · Test notification`；载荷字段按 kind 转成带单位/时区的行（字节 → KB/MB/GB、`due_at`/`deadline`/`checked_at` → `YYYY-MM-DD HH:MM:SS <时区>`、`mode`/`direction` → Inbound/Outbound、集群告警的 `nodes` 列表最多列 8 台后收成 `+N more`），未知 kind 与未知字段仍原样列出（新告警类型不会静默消失）。时间按 `notify.timezone` 渲染并写明时区缩写（缺省 UTC，见下一条）；单值截断 300 字符、整条截断 3800 字符（Telegram 上限 4096）。**通用 Webhook 的 JSON 线格式与 `alerts.payload` 的存法都不变**——那是给机器读的契约；面板告警页仍按 `kind_*` 文案显示。
+
+- **文案语言与时间时区（2026-09-19 修订）**：`notify.language`（`zh-CN` / `en-US`，缺省 `en-US`）与 `notify.timezone`（IANA 名，缺省 / `UTC` = 世界时）是**服务端设置**，在「设置 → 通知」里切换。为什么不是跟随面板语言：面板界面语言存在浏览器 localStorage 里（§16），而告警落在群里、没有语言可跟随，所以这两件事必须分开。两者都经渠道的 `DecryptFunc` **每次投递惰性读取**（与凭据同一套契约），改完下一条告警即生效、不重启。写入路径严格校验：未知语言标签 → `bad_notify_language`，镜像 tzdata 解析不了的时区 → `bad_timezone`；§17 的导入同样丢弃这两类值——静默存下一个解不开的时区，看上去就像「已经设置好了」。投递侧读不出来时回落到 UTC，绝不因为一个时区值挡住告警。时区依赖镜像自带 `tzdata`（deploy/Dockerfile.server 已装）。
+
 ### 15.0 渠道与事件开关（2026-09-16 修订：通知独立成页）
 
-设置里**通知不再是基础设置页上的一张卡片**，而是与「服务器」同级的一个子页（`/settings/notifications`，§16）：页面自上而下是**渠道**（Telegram / 飞书 / 通用 Webhook，同级并列，各自带开关、配置与"发送测试消息"）→ **事件开关** → **流量阈值**。
+设置里**通知不再是基础设置页上的一张卡片**，而是与「服务器」同级的一个子页（`/settings/notifications`，§16）：页面自上而下是**渠道**（Telegram / 飞书 / 通用 Webhook，同级并列，各自带开关、配置与"发送测试消息"）→ **文案与时间**（推送语言 + 时区）→ **事件开关** → **流量阈值**。
 
 - **渠道开关**：`notify.telegram_enabled` / `notify.webhook_enabled` / `notify.feishu_enabled`。关掉只停推送、**不清空配置**（重新打开不用重填凭据），也不影响"发送测试消息"——测试走 `Deliver`，开关只管调度。`Configured()` 语义保持"有配置"，与开关正交。
 - **事件开关**：`notify.event.<组>`，组是按操作者心智划分的（不是按 kind 一一对应）：`node_status`（探针上线下线，含恢复）、`traffic`（流量阈值：warn/crit）、`billing`（缴费到期：7/3/1 天与逾期）、`singbox`（sing-box 异常：退出/回滚）、`updates`（sing-box 批量更新未收敛、探针自更新失败/落后）、`counter_reset`（计数器重置）。未知 kind 归入 `updates`，保证新告警类型天然可关。
