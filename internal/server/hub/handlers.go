@@ -24,12 +24,7 @@ func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 	now := protocol.Now()
 	// §4.4: the up-edge of a probe is audited; a reconnect inside the 90s
 	// heartbeat window never left "online" and must not append a row.
-	wasOnline, silentFor, err := h.store.MarkNodeOnline(c.nodeID, hello.Version, now)
-	if err != nil {
-		h.log.Warn("mark node online", "node", c.nodeID, "err", err)
-	} else if !wasOnline {
-		h.auditSystem("node_online", c.nodeID, nodeOnlineDetail(hello.Version, silentFor))
-	}
+	h.markOnlineAudited(c.nodeID, hello.Version, now)
 	if err := h.store.UpdateNodeInfo(c.nodeID, hello.OS, hello.Arch, hello.Kernel,
 		hello.DistroID, hello.DistroVersion,
 		hello.Hostname, agentTZ(hello.TZ), hello.CPUCores); err != nil {
@@ -61,6 +56,26 @@ func (h *Hub) auditSystem(action, nodeID, command string) {
 		Actor: "system", NodeID: nodeID, Action: action, Command: command,
 	}); err != nil {
 		h.log.Warn("insert audit", "action", action, "node", nodeID, "err", err)
+	}
+}
+
+// markOnlineAudited records liveness and audits the §4.4 up-edge. Both frame
+// paths funnel through here so neither can miss an edge: hello is the edge of
+// a reconnect, but a bare ping can be one too — a link that silently black-
+// holed and healed never disconnects (no read deadline server-side, ping
+// writes only queue in the agent's kernel buffer), so the first surviving
+// ping is what flips a node detectOffline had marked offline back to online.
+// Skipping the audit there is what left "node_offline without a matching
+// node_online" rows in the trail.
+
+func (h *Hub) markOnlineAudited(nodeID, version string, at int64) {
+	wasOnline, silentFor, err := h.store.MarkNodeOnline(nodeID, version, at)
+	if err != nil {
+		h.log.Warn("mark node online", "node", nodeID, "err", err)
+		return
+	}
+	if !wasOnline {
+		h.auditSystem("node_online", nodeID, nodeOnlineDetail(version, silentFor))
 	}
 }
 

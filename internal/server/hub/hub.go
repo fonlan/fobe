@@ -247,9 +247,9 @@ func (h *Hub) PushLatencyTargets(nodeID string) bool {
 // HandleAgentSelfCheck serves the §5.5 bypass handshake of a downloaded binary.
 //
 // It must not behave like a normal connection: registering would close the live
-// socket (HandleAgentWS replaces a node's existing connection) and TouchNode
-// would write the *self-checking* build's version into the panel — claiming an
-// update that has not been committed. So: upgrade, read one hello, answer with
+// socket (HandleAgentWS replaces a node's existing connection) and a liveness
+// write would stamp the *self-checking* build's version into the panel —
+// claiming an update that has not been committed. So: upgrade, read one hello, answer with
 // the target, close. Nothing is persisted.
 func (h *Hub) HandleAgentSelfCheck(w http.ResponseWriter, r *http.Request, nodeID string) {
 	ws, err := upgrader.Upgrade(w, r, nil)
@@ -353,8 +353,11 @@ func (h *Hub) handleFrame(c *Conn, env protocol.Envelope) {
 	}
 	switch env.Type {
 	case protocol.TypePing:
-		// heartbeat: liveness only; DB last_seen drives offline detection
-		h.store.TouchNode(c.nodeID, "", protocol.Now())
+		// heartbeat refreshes liveness like a hello does (§4.4 修订 2026-09-19):
+		// markOnlineAudited watches the status edge, so a ping that revives a
+		// node detectOffline had marked offline gets its node_online row even
+		// though no reconnect — and no hello — ever happens.
+		h.markOnlineAudited(c.nodeID, "", protocol.Now())
 		// mirror back as pong-ish ack so the agent learns the link is alive
 		h.sendEnvelope(c, protocol.Envelope{V: protocol.Version, Type: "pong", ID: env.ID, TS: protocol.Now()})
 	case protocol.TypeHello:

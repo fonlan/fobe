@@ -327,23 +327,17 @@ func (s *Store) GetNodeSecretHash(id string) (string, error) {
 	return h, err
 }
 
-// TouchNode updates liveness after a frame; empty version keeps the current one.
-func (s *Store) TouchNode(id string, version string, at int64) error {
-	_, err := s.db.Exec(
-		`UPDATE nodes SET status = 'online', last_seen = ?,
-		 agent_version = CASE WHEN ? = '' THEN agent_version ELSE ? END WHERE id = ?`,
-		at, version, version, id,
-	)
-	return err
-}
-
 func (s *Store) MarkNodeOffline(id string) error {
 	_, err := s.db.Exec(`UPDATE nodes SET status = 'offline' WHERE id = ?`, id)
 	return err
 }
 
-// MarkNodeOnline records liveness after a hello frame and reports whether this
-// hello is the up-edge of the node's status, plus how long it had been silent.
+// MarkNodeOnline records liveness after a hello or heartbeat frame and reports
+// whether this frame is the up-edge of the node's status, plus how long it had
+// been silent. It is the only liveness writer: hello (reconnect) and bare ping
+// (§4.4 修订 2026-09-19) both come through here so an edge can never be missed
+// on either path. An empty version keeps the current one (heartbeat frames
+// carry none).
 //
 // The §4.4 audit trail wants transitions, not every reconnect: a probe that
 // reconnects inside the 90s heartbeat window never left the panel's "online"

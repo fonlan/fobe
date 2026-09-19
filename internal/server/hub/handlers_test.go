@@ -807,3 +807,40 @@ func TestHelloAuditsOnlineTransitionOnly(t *testing.T) {
 		t.Fatalf("returning node lost its outage duration: %+v", got[0])
 	}
 }
+
+// §4.4 修订 2026-09-19: a bare ping can be the up-edge too. A link that
+// silently black-holed and healed never reconnects, so no hello follows — the
+// first surviving ping flips the row detectOffline marked offline back to
+// online, and the trail must show that edge or "node_offline without a
+// matching node_online" rows accumulate.
+func TestPingRevivesOfflineNodeAuditsUpEdge(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n1")
+
+	// bring the node online via hello, then age + flip it like detectOffline
+	h.onHello(&Conn{nodeID: "n1"}, &protocol.Hello{Version: "1.0.0"})
+	if _, _, err := h.store.MarkNodeOnline("n1", "", time.Now().Unix()-200); err != nil {
+		t.Fatalf("age last_seen: %v", err)
+	}
+	if err := h.store.MarkNodeOffline("n1"); err != nil {
+		t.Fatalf("mark offline: %v", err)
+	}
+
+	// the first ping after the outage is the up-edge: audited, and since the
+	// heartbeat carries no version, the detail holds only the outage duration
+	ping := protocol.Envelope{V: protocol.Version, Type: protocol.TypePing, TS: protocol.Now()}
+	h.handleFrame(&Conn{nodeID: "n1"}, ping)
+	got := auditEntries(t, h.store, "node_online")
+	if len(got) != 2 {
+		t.Fatalf("ping after outage audit rows = %d, want 2 (%+v)", len(got), got)
+	}
+	if cmd := got[0].Command; !strings.Contains(cmd, "silent_for=") || strings.Contains(cmd, "agent_version=") {
+		t.Fatalf("ping up-edge detail = %q, want silent_for without agent_version", cmd)
+	}
+
+	// steady-state pings are not edges: no more rows
+	h.handleFrame(&Conn{nodeID: "n1"}, ping)
+	if got := auditEntries(t, h.store, "node_online"); len(got) != 2 {
+		t.Fatalf("steady-state ping added rows: %+v", got)
+	}
+}

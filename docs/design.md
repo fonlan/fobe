@@ -143,7 +143,7 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 - 主密钥 `FOBE_MASTER_KEY`（32 字节，环境变量 / Docker secret）。用它 AES-GCM 加密：AI API Key、Telegram Bot Token、全局 anytls 密码（§10.1）、订阅模板中的敏感段。（2026-09-15：不再加密任何 SSH 凭据——Web 终端已改走 agent 本地 PTY，见 §11。）
 - 未设置主密钥时，服务端**拒绝启动**并打印生成命令（不静默降级为明文）。**（实现修订 2026-09-15：镜像入口脚本 `deploy/docker-entrypoint.sh` 在「未设置」时先行兜底，优先级 env > `FOBE_MASTER_KEY_FILE` > 生成随机 32 字节落盘到数据卷 `/data/.master_key`（0600，重启复用）。服务端的 fail-closed 语义不变——生成失败（如 `/data` 不可写）容器直接退出，绝无明文回退；admin CLI 跳过密钥解析，逃生口永不被堵。代价是密钥与密文同卷，见 §20.12；要分开就显式设置 `FOBE_MASTER_KEY`。）**
 - **密文跟着主密钥走、不跟着机器走（2026-09-18 补）**：Cryptor 是 AES-256-GCM，密钥就是 `FOBE_MASTER_KEY` 那 32 字节本身（`ParseMasterKey` 只负责把它解码成 32 字节），**没有任何与主机 / 安装 / 数据库相关的派生量**；nonce 随密文存，密文形如 `base64(nonce‖ct)`、自包含。所以把 `/data`（含 `.master_key`）整卷搬到另一台机器、或在新机器上显式设同一个 `FOBE_MASTER_KEY`，全部密文照常解开；**只有主密钥不是同一把才会解不开**。这条在 §17 导出快照携带密文凭据之后成为操作面的硬要求：**搬迁 = 搬 key**。
-- 所有审计写 `audit_logs`：谁、何时、对哪个节点、什么动作、命令原文、来源 IP。**（2026-09-18 修订）探针状态与通知投递也计入**：`node_online` / `node_offline` 只记**跃迁**——90s 心跳窗口内的重连没有离开过 online，不记账（offline 带 `silent_for=<秒>`，online 带探针刚上报的 `agent_version`）；`notify_sent` / `notify_failed` 每条告警每渠道每种结果只记一次（投递失败会每分钟重试，且**部分失败会把整条告警重跑一遍**——不按 (告警, 渠道, 结果) 去重，一次渠道故障会灌出一整天记录）。这几类 actor 一律 `system`，正文只写渠道 / kind / event，绝不带 payload 与凭据；投递错误先经 `notify.SafeError` 脱敏——Telegram 的 bot token 就是错误里那条 URL 的路径段，Feishu webhook 的 token 在查询串里，原样入库等于把凭据抄进面板的 API 响应。
+- 所有审计写 `audit_logs`：谁、何时、对哪个节点、什么动作、命令原文、来源 IP。**（2026-09-18 修订）探针状态与通知投递也计入**：`node_online` / `node_offline` 只记**跃迁**——90s 心跳窗口内的重连没有离开过 online，不记账（offline 带 `silent_for=<秒>`，online 带探针刚上报的 `agent_version`）；**（2026-09-19 修订）ping 复活同样是上线跃迁**：链路黑洞后自愈的 TCP 连接两端都无感——服务端读无超时、agent 的 ping 只写进内核缓冲，连接不会断开重连，也就没有 hello；第一条存活 ping 把 detectOffline 已标 offline 的节点翻回 online 时同样记 `node_online`（心跳不带版本，正文只有 `silent_for=<秒>`）。此前这类恢复不留痕，审计里积累"有下线、无上线"的悬空行，与概览显示的"在线"对不上；`notify_sent` / `notify_failed` 每条告警每渠道每种结果只记一次（投递失败会每分钟重试，且**部分失败会把整条告警重跑一遍**——不按 (告警, 渠道, 结果) 去重，一次渠道故障会灌出一整天记录）。这几类 actor 一律 `system`，正文只写渠道 / kind / event，绝不带 payload 与凭据；投递错误先经 `notify.SafeError` 脱敏——Telegram 的 bot token 就是错误里那条 URL 的路径段，Feishu webhook 的 token 在查询串里，原样入库等于把凭据抄进面板的 API 响应。
 - **保留期（2026-09-19 修订，推翻同日早前的"永不过期"决策）**：`audit_logs` 保留**最近 30 天**，由 §6 的 10 分钟清理任务随明细表一并删除（窗口独立于明细的 7 天）。原决策是"永不过期、无任何自动删除路径"——理由是它是 §12.3 那条"AI 敲了什么字节"的唯一归属证据，自动清理等于定期销毁证据；接受修订即接受这个代价：**超过 30 天的审计无处可查**，需要长期留证的只能按期自行导出（§19.3 的快照池同样只有 3 份、也一样滚走）。表随节点数、心跳跃迁与投递重试的增长由此被窗口封顶；面板读取仍走 §16 的 keyset 分页，且不提供全表计数。
 
 ---
@@ -320,7 +320,7 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 | | `probe_metrics` | 请求临时高频指标采集 5s |
 | | `latency_config` | 立即更新本地延迟测量频率（全局设置变更时广播）；带 `targets` 数组时替换该节点的测量目标（面板编辑/删除延迟测量后即时下发，§13 实现修订 2026-09-17k） |
 
-- 心跳：agent 每 15s 一次 `ping`（或空帧），服务端 90s 无心跳判定离线、写审计（`node_offline`，§4.4）并告警；探针重新 `hello` 是上线跃迁（`node_online`），同一窗口内的重连不记账。
+- 心跳：agent 每 15s 一次 `ping`（或空帧），服务端 90s 无心跳判定离线、写审计（`node_offline`，§4.4）并告警；探针重新 `hello`、或把已标 offline 的节点翻回 online 的第一条 `ping`（链路静默自愈、连接从未断开的场景，§4.4 修订 2026-09-19），都是上线跃迁（`node_online`），同一窗口内的重连不记账。
 - 重连：指数退避 + 抖动（1s → 5min 上限）。
 - 离线指令：入队 `commands`，重连后下发；TTL 10 分钟，超时标记 `timeout` 并在面板显示（避免你三小时前点的"重启"突然生效）。
 - 所有指令带 `id`，agent 幂等执行（同 id 重复下达只执行一次）。
