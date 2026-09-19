@@ -1114,7 +1114,10 @@ section.card { margin-bottom: 0; }
   min-height: 0;
 }
 .terminal-host .xterm { position: absolute; top: 0; right: 0; bottom: 0; left: 0; }
-.terminal-host .xterm-viewport { overflow-y: auto; }
+/* No overflow rule for .xterm-viewport on purpose: xterm 6 renders it as an
+   EMPTY box and scrolls in JS (VS Code's SmoothScrollableElement, itself
+   overflow: visible), so there is nothing here for the browser to scroll — a
+   touch drag has to be translated by components/terminalTouchScroll.ts. */
 /* A DEFINITE height, not just a floor: .ai-messages scrolls only when its flex
    parent has a resolved height. With a min-height the grid row grew with the
    transcript, and since the row is shared with the terminal column, every extra

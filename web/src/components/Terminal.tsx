@@ -4,6 +4,7 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import * as api from '../api';
 import { useI18n } from '../i18n';
+import { attachTouchScroll } from './terminalTouchScroll';
 import type {
   TerminalBufferPayload,
   TerminalClosedPayload,
@@ -125,6 +126,11 @@ export default function Terminal({
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(host);
+    // xterm 6 has no natively scrollable viewport any more, so a phone's drag
+    // over the screen would scroll the page instead of the scrollback; the
+    // module owns that translation (and hands the gesture back to the page at
+    // the ends of the buffer). See terminalTouchScroll.ts.
+    const detachTouchScroll = attachTouchScroll(terminal, host);
     termRef.current = terminal;
     onReadyRef.current?.({
       write: (text: string) => {
@@ -263,6 +269,7 @@ export default function Terminal({
     return () => {
       closed = true;
       if (resizeRAF) window.cancelAnimationFrame(resizeRAF);
+      detachTouchScroll();
       observer.disconnect();
       dataDisposable.dispose();
       resizeDisposable.dispose();

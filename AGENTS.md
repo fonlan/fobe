@@ -93,7 +93,7 @@ docker compose exec server fobe-server admin unblock <ip|all> | reset-password |
 - `pages/` 一页一文件，`components/` 放复用件，路由在 `App.tsx`。
 - 文案全部经 `useI18n()` 的 `t('key')`；后端错误码的映射用 `err_<code>` 约定。
 - 颜色/间距走 `styles.css` 的 CSS 变量 + `data-theme`，不要写死颜色。
-- **xterm 终端**（`components/Terminal.tsx`）：严禁在 `onResize` 回调里调 `fit()`（fit 会再触发 resize，同步死循环冻死渲染进程）；fit 只由 rAF 防抖的 `ResizeObserver` 触发；**padding/border 只能挂在外层 `.terminal-shell`，`.terminal-host` 是纯 flex 尺寸的空盒子、`.xterm` 用 `position:absolute` 填满它**——FitAddon 量的是宿主元素的 border-box 高度（且只减 xterm 元素自身的 padding），宿主一旦被终端内容撑高，每次 fit 都会把自己的 24px padding + 2px border 重新折算成行数（> 一行 15px），现象是终端每帧长高一行、无限拉长；`fontFamily` 不能用 CSS 变量（canvas 不解析）；`main.tsx` 刻意不包 `StrictMode`（双挂载会交错 WS open/close 帧顶掉活 PTY 会话），别加回来；**`scrollback` 必须显式配大（10000 行）**——AI 的 `read_terminal` / `run_shell` 的观察结果**全部取自这块浏览器缓冲区**（服务端一点终端状态都不留，design §12.7.1），默认 1000 行会让长输出的前半截直接掉出可读范围。
+- **xterm 终端**（`components/Terminal.tsx`）：严禁在 `onResize` 回调里调 `fit()`（fit 会再触发 resize，同步死循环冻死渲染进程）；fit 只由 rAF 防抖的 `ResizeObserver` 触发；**padding/border 只能挂在外层 `.terminal-shell`，`.terminal-host` 是纯 flex 尺寸的空盒子、`.xterm` 用 `position:absolute` 填满它**——FitAddon 量的是宿主元素的 border-box 高度（且只减 xterm 元素自身的 padding），宿主一旦被终端内容撑高，每次 fit 都会把自己的 24px padding + 2px border 重新折算成行数（> 一行 15px），现象是终端每帧长高一行、无限拉长；`fontFamily` 不能用 CSS 变量（canvas 不解析）；`main.tsx` 刻意不包 `StrictMode`（双挂载会交错 WS open/close 帧顶掉活 PTY 会话），别加回来；**`scrollback` 必须显式配大（10000 行）**——AI 的 `read_terminal` / `run_shell` 的观察结果**全部取自这块浏览器缓冲区**（服务端一点终端状态都不留，design §12.7.1），默认 1000 行会让长输出的前半截直接掉出可读范围；**xterm 6 的滚动是 JS 做的（`.xterm-viewport` 已是空盒子、没有原生溢出），手机上的手指拖动必须由 `components/terminalTouchScroll.ts` 翻译成 `scrollLines()`**——否则拖动只滚整个页面、历史回不去（design §11 实现修订 2026-09-19）。
 
 ## 变更流程
 

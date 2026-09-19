@@ -708,6 +708,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - `.terminal-host` 高度**必须由卡片所在的网格行决定、不能被 xterm 内容撑高**：宿主 `flex: 1 1 auto`（不写内容高度）、内部 `.xterm` 绝对定位填满，否则每次 fit 都会把外框的 padding+border 折成行数加回去，现象是终端每帧长高一行；fit 只由 rAF 防抖的 `ResizeObserver` 触发（`onResize` 里调 fit 会同步递归），宿主不可见（宽高 ≤0）时跳过 fit，避免把活着的 PTY 缩成 2×1。
 - v1 不做 PTY 全量录制（体积与隐私成本高），但保留 `session_id`，便于后续开启录制。
 - **`scrollback` 必须显式配大（2026-09-18，当前 10000 行）**：AI 的 `read_terminal` 与 `run_shell` 的观察结果都取自浏览器这块缓冲区（§12.7.1）——服务端不留任何终端状态，所以**缓冲区就是屏幕的唯一真相**。默认 1000 行会让长输出的前半截直接掉出可读范围。代价是浏览器内存（每行一份），10k 行量级可接受。
+- **手机的触摸滚动必须自己翻译（2026-09-19 修订）**：xterm 6 起不再有可原生滚动的视口——`.xterm-viewport` 成了**空盒子**，滚动由 VS Code 的 `SmoothScrollableElement` 在 JS 里做（它自身 `overflow: visible`），只认滚轮与滚动条上的鼠标拖拽。于是手机上**没有任何可被浏览器 pan 的滚动盒**：手指在终端上拖动落到最近的可滚动祖先（页面），表现为"一拖就整页翻、历史永远回不去"。修法是把单指竖直拖动按实测行高换算成 `scrollLines()`（松手带衰减惯性），且**只在缓冲区该方向真能滚时才接管手势**（两端把拖动还给页面，否则手机再也够不到终端下面的内容）；实现见 `web/src/components/terminalTouchScroll.ts`，只认单指，双指与横向拖动一律不管（不许用 `touch-action: none` 一刀切，那会连页面一起锁死）。
 - **agent 侧只有一个 active PTY**：收到新的 `terminal_open` 会先把旧的 `closeCurrent("replaced by new terminal")`。⇒ 开第二个终端标签会杀掉第一个的 shell（AI 的键也会因 `m.session(id)` 不匹配而被**静默丢弃**），§12.7.5 依赖这一点。
 
 ---
