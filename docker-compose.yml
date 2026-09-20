@@ -7,6 +7,19 @@ services:
       args:
         VERSION: ${FOBE_VERSION:-compose}
     restart: unless-stopped
+    # The entrypoint starts as root only long enough to take ownership of
+    # /data, then drops to the unprivileged fobe user, so these are the only
+    # capabilities it needs. The server itself binds 8080 and needs none.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
     ports:
       - "8080:8080"
     volumes:

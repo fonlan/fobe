@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strconv"
 
@@ -49,6 +51,16 @@ func (s *Server) handleUnblockIP(w http.ResponseWriter, r *http.Request) {
 
 // --- sessions (design §4.1: view + revoke all) ---
 
+// sessionLabel is the short, non-reversible label the panel shows for a
+// session. The raw id is the cookie value — the bearer credential itself — and
+// this endpoint offers no per-id action, so echoing it would hand any
+// same-origin script a stealable, long-lived credential and defeat HttpOnly
+// (§4.1 实现修订 2026-09-20).
+func sessionLabel(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	activeOnly := r.URL.Query().Get("all") != "1"
 	sessions, err := s.Store.ListSessions(activeOnly)
@@ -57,7 +69,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type sessionView struct {
-		ID        string `json:"id"`
+		IDShort   string `json:"id_short"`
 		CreatedAt int64  `json:"created_at"`
 		LastSeen  int64  `json:"last_seen"`
 		UA        string `json:"ua"`
@@ -67,7 +79,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	out := make([]sessionView, 0, len(sessions))
 	for _, sess := range sessions {
 		out = append(out, sessionView{
-			ID: sess.ID, CreatedAt: sess.CreatedAt, LastSeen: sess.LastSeen,
+			IDShort: sessionLabel(sess.ID), CreatedAt: sess.CreatedAt, LastSeen: sess.LastSeen,
 			UA: sess.UA, IP: sess.IP, Revoked: sess.Revoked,
 		})
 	}
@@ -79,6 +91,10 @@ func (s *Server) handleRevokeAllSessions(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// A WebSocket only authenticates at its handshake, so without this the
+	// revoked sessions would keep streaming panel events and driving terminals
+	// (§4.1 实现修订 2026-09-20).
+	s.wsReg.closeExcept("")
 	s.audit("revoke_all_sessions", "", s.Trust.RealIP(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

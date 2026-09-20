@@ -118,10 +118,23 @@ func (s *Store) NextPendingCommand(nodeID string) (*Command, error) {
 	return c, tx.Commit()
 }
 
-func (s *Store) FinishCommand(id, status, result string) error {
-	_, err := s.db.Exec(`UPDATE commands SET status = ?, result = ?, finished_at = ? WHERE id = ?`,
-		status, result, now(), id)
-	return err
+// FinishCommand records a probe's answer for one command and reports whether it
+// matched. nodeID is part of the WHERE clause: without it, any authenticated
+// probe could finish — and thereby suppress — another node's queued command by
+// presenting its id, and the panel would display attacker-chosen output
+// (§7 实现修订 2026-09-20). The status guard keeps a duplicate answer from
+// rewriting an already-finished row.
+func (s *Store) FinishCommand(nodeID, id, status, result string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE commands SET status = ?, result = ?, finished_at = ?
+		 WHERE id = ? AND node_id = ? AND status IN ('pending','sent')`,
+		status, result, now(), id, nodeID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // TimeoutStaleCommands expires pending commands past their TTL (design §7).

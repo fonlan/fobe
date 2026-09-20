@@ -60,6 +60,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer ws.Close()
+	s.wsReg.add(ws, wsConnInfo{sessionID: sessionIDFromRequest(r)})
+	defer s.wsReg.remove(ws)
 
 	ch := make(chan []byte, 32)
 	s.evMu.Lock()

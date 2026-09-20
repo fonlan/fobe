@@ -565,9 +565,19 @@ func TestRealClientIPTrustChain(t *testing.T) {
 
 	req = httptest.NewRequest("GET", "/ws/agent", nil)
 	req.RemoteAddr = "127.0.0.1:55002"
-	req.Header.Set("X-Forwarded-For", "198.51.100.9, 10.0.0.1")
-	if got := h.realClientIP(req); got != "198.51.100.9" {
-		t.Fatalf("behind trusted proxy: %q, want the XFF leftmost", got)
+	req.Header.Set("X-Forwarded-For", "198.51.100.9, 203.0.113.7")
+	if got := h.realClientIP(req); got != "203.0.113.7" {
+		t.Fatalf("behind trusted proxy: %q, want the rightmost untrusted hop", got)
+	}
+
+	// The header a proxy appends with $proxy_add_x_forwarded_for is the LAST
+	// one, so a client-supplied prefix must never win — not even when it claims
+	// a private address that §4.3 exempts from the login blacklist.
+	req = httptest.NewRequest("GET", "/ws/agent", nil)
+	req.RemoteAddr = "127.0.0.1:55004"
+	req.Header.Set("X-Forwarded-For", "10.0.0.1, 203.0.113.7")
+	if got := h.realClientIP(req); got != "203.0.113.7" {
+		t.Fatalf("spoofed prefix: %q, want the address the proxy appended", got)
 	}
 
 	req = httptest.NewRequest("GET", "/ws/agent", nil)

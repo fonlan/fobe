@@ -237,7 +237,8 @@ export interface BlacklistRow {
 }
 
 export interface SessionRow {
-  id: string;
+  /** Short fingerprint, not the session id: that id is the cookie value. */
+  id_short: string;
   created_at: number;
   last_seen: number;
   ua: string;

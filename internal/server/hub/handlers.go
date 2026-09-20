@@ -666,8 +666,13 @@ func (h *Hub) onCmdResult(nodeID string, r *protocol.CmdResult) {
 		status = "failed"
 	}
 	result, _ := json.Marshal(r)
-	if err := h.store.FinishCommand(r.ID, status, string(result)); err != nil {
+	matched, err := h.store.FinishCommand(nodeID, r.ID, status, string(result))
+	if err != nil {
 		h.log.Warn("finish command", "node", nodeID, "id", r.ID, "err", err)
+	} else if !matched {
+		// Either a duplicate answer, or a probe answering a command that is not
+		// its own (§7 实现修订 2026-09-20). The audit row below still records it.
+		h.log.Warn("cmd_result for an unknown or foreign command", "node", nodeID, "id", r.ID)
 	}
 	_ = h.store.InsertAudit(&store.AuditEntry{
 		Actor: "agent", NodeID: nodeID, Action: "cmd_result:" + status, Command: truncate(r.Stdout+"\n"+r.Stderr, 2000),

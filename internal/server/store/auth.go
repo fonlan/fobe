@@ -105,6 +105,29 @@ func (s *Store) RevokeSession(id string) error {
 	return err
 }
 
+// RevokeOtherSessions revokes every session except keep (the caller's own).
+// Changing the panel password must terminate access for anyone holding an older
+// cookie (§4.1 实现修订 2026-09-20) without logging the operator out of the
+// browser they are typing in.
+func (s *Store) RevokeOtherSessions(keep string) (int64, error) {
+	res, err := s.db.Exec(`UPDATE sessions SET revoked = 1 WHERE revoked = 0 AND id <> ?`, keep)
+	if err != nil {
+		return 0, fmt.Errorf("revoke other sessions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PruneExpiredSessions drops sessions past their absolute lifetime. The TTL is
+// also enforced on read (requireSession); this only stops the table growing.
+func (s *Store) PruneExpiredSessions(cutoff int64) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM sessions WHERE created_at < ?`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("prune sessions: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) RevokeAllSessions() (int64, error) {
 	res, err := s.db.Exec(`UPDATE sessions SET revoked = 1 WHERE revoked = 0`)
 	if err != nil {
@@ -172,7 +195,10 @@ func (s *Store) IsBlacklisted(ip string) (*BlacklistEntry, error) {
 func (s *Store) RecordLoginFail(ip, reason string, maxFails int, blockSeconds int64) (int, error) {
 	nowTs := now()
 	var count int
-	err := s.db.QueryRow(`SELECT fail_count FROM ip_blacklist WHERE ip = ?`, ip).Scan(&count)
+	var expiresAt int64
+	err := s.db.QueryRow(
+		`SELECT fail_count, COALESCE(expires_at, 0) FROM ip_blacklist WHERE ip = ?`, ip,
+	).Scan(&count, &expiresAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		_, err = s.db.Exec(
@@ -183,8 +209,15 @@ func (s *Store) RecordLoginFail(ip, reason string, maxFails int, blockSeconds in
 	case err != nil:
 		return 0, fmt.Errorf("record login fail: %w", err)
 	default:
+		// A previous block that has already served its time is history, not a
+		// running streak: without this reset, the stored counter stayed >= max
+		// forever and a single typo after the block expired re-blocked the IP
+		// for another 30 minutes (§4.3 实现修订 2026-09-20).
+		if expiresAt != 0 && expiresAt <= nowTs {
+			count = 0
+		}
 		count++
-		_, err = s.db.Exec(`UPDATE ip_blacklist SET fail_count = ?, reason = ? WHERE ip = ?`, count, reason, ip)
+		_, err = s.db.Exec(`UPDATE ip_blacklist SET fail_count = ?, reason = ?, expires_at = CASE WHEN expires_at <= ? THEN 0 ELSE expires_at END WHERE ip = ?`, count, reason, nowTs, ip)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("record login fail: %w", err)
@@ -197,8 +230,14 @@ func (s *Store) RecordLoginFail(ip, reason string, maxFails int, blockSeconds in
 	return count, nil
 }
 
+// ClearLoginFails forgets an IP's failure streak after a successful login.
+//
+// It deletes the row unconditionally. It used to keep rows whose expires_at was
+// non-zero ("still blacklisted"), but an expired block is not a live block —
+// IsBlacklisted ignores it — so the only thing it preserved was a fail_count
+// that re-blocked the IP on the next single mistake (§4.3 实现修订 2026-09-20).
 func (s *Store) ClearLoginFails(ip string) {
-	s.db.Exec(`DELETE FROM ip_blacklist WHERE ip = ? AND expires_at = 0`, ip)
+	s.db.Exec(`DELETE FROM ip_blacklist WHERE ip = ?`, ip)
 }
 
 func (s *Store) UnblockIP(ip string) error {

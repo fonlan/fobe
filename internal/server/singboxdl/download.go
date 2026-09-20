@@ -373,7 +373,11 @@ func extractBinary(archive, dst string) error {
 		return err
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	// The compressed stream is capped upstream, but tar.Next() walks every
+	// member and decompresses the ones this loop skips, so a small archive with
+	// many members still burns CPU. Cap the DECOMPRESSED total as well (§9.2
+	// 实现修订 2026-09-20).
+	tr := tar.NewReader(&cappedReader{r: gz, max: maxArchiveDecompressedBytes})
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -404,6 +408,33 @@ func extractBinary(archive, dst string) error {
 
 // maxBinaryExtractBytes caps the unpacked binary size (zip-bomb guard).
 const maxBinaryExtractBytes = 256 << 20
+
+// maxArchiveDecompressedBytes caps the TOTAL decompressed bytes read from an
+// archive, which is what a gzip bomb actually costs (§9.2 实现修订 2026-09-20).
+const maxArchiveDecompressedBytes = 512 << 20
+
+var errArchiveTooLarge = errors.New("archive expands beyond the allowed size")
+
+// cappedReader fails the read once max bytes have been produced, so the limit
+// surfaces through tar.Next()/io.Copy as an error instead of an endless
+// decompression.
+type cappedReader struct {
+	r   io.Reader
+	n   int64
+	max int64
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.n >= c.max {
+		return 0, errArchiveTooLarge
+	}
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	if c.n > c.max {
+		return n, errArchiveTooLarge
+	}
+	return n, err
+}
 
 // CleanTemps removes leftover in-progress directories (crash recovery on
 // startup). It never touches published versions.

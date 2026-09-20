@@ -17,6 +17,18 @@
 
 set -eu
 
+# Run unprivileged. The only step that needs root is taking ownership of the
+# data volume: compose bind-mounts the host's ./data, which the host may own as
+# root (and any image built before this change wrote it that way), so it cannot
+# be settled at build time. Everything below this line — including the server
+# process that faces the network — runs as the fobe user (§17 实现修订
+# 2026-09-20). `docker compose exec` bypasses this script on purpose, so the
+# admin escape hatch still runs as root.
+if [ "$(id -u)" = "0" ]; then
+    chown -R fobe:fobe /data 2>/dev/null || true
+    exec su-exec fobe "$0" "$@"
+fi
+
 if [ "${1:-}" = "fobe-server" ]; then
     shift
 fi

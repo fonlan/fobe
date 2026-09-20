@@ -452,7 +452,9 @@ export async function listSessions(): Promise<SessionRow[]> {
       return undefined;
     };
     return {
-      id: String(g('id', 'ID') ?? ''),
+      // The server sends a short fingerprint, never the raw session id — that id
+      // is the cookie value, so echoing it would defeat HttpOnly.
+      id_short: String(g('id_short', 'idShort', 'IDShort') ?? ''),
       created_at: Number(g('created_at', 'CreatedAt') ?? 0),
       last_seen: Number(g('last_seen', 'LastSeen') ?? 0),
       ua: String(g('ua', 'UA') ?? ''),
@@ -490,6 +492,12 @@ export function listAlerts(limit = 200): Promise<{ alerts: AlertRow[] }> {
 export interface SettingsResponse {
   settings: SettingView[];
   ai_configured: boolean;
+  /**
+   * Settings whose stored ciphertext this master key cannot open. Present only
+   * when non-empty: the channel they belong to reads as configured on the wire
+   * but can never deliver (§15).
+   */
+  unreadable_secrets?: string[];
 }
 
 export function getSettings(): Promise<SettingsResponse> {

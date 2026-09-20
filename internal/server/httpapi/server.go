@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/fonlan/fobe/internal/server/agentupdate"
@@ -38,6 +39,14 @@ type Server struct {
 	Version         string
 	InstallTmplPath string // optional override of scripts/install.sh.tmpl
 	AIHTTPClient    *http.Client
+
+	// loginGate bounds unauthenticated password verification (§4.3 实现修订
+	// 2026-09-20): an identity-independent CPU + memory brake in front of the
+	// 64 MiB-per-attempt argon2id check.
+	loginGate loginGate
+	// wsReg tracks live browser sockets so revocation can close them (§4.1
+	// 实现修订 2026-09-20) and terminal sockets can be capped per node.
+	wsReg wsRegistry
 
 	// sing-box release cache (§9.2). Empty values fall back to the upstream
 	// defaults (api.github.com / github.com) inside singboxdl.
@@ -88,6 +97,10 @@ type Server struct {
 	// Channels is the same notifier set the scheduler delivers with, used by
 	// the panel's test button (POST /api/settings/notify/test).
 	Channels []notify.Notifier
+	// UnreadableSecrets names stored-but-undecryptable settings (a wrong master
+	// key), so the panel can say why a channel is dead instead of reporting it
+	// as "not configured" (§15 实现修订 2026-09-20). Optional.
+	UnreadableSecrets func() []string
 
 	// events broker for /ws/events (live panel updates)
 	evMu   sync.Mutex
@@ -305,7 +318,10 @@ func (s *Server) Handler() http.Handler {
 	// frontend last: SPA fallback / API-only hint
 	mux.HandleFunc("/", s.handleStatic)
 
-	return logRequests(s.Log, mux)
+	// Outermost first: headers and the cross-site guard are cheap; the body cap
+	// must wrap the mux so every handler reads through a bounded reader.
+	handler := securityHeaders(crossSiteGuard(limitRequestBody(mux)))
+	return logRequests(s.Log, handler)
 }
 
 func logRequests(log *slog.Logger, next http.Handler) http.Handler {
@@ -317,8 +333,98 @@ func logRequests(log *slog.Logger, next http.Handler) http.Handler {
 		rec := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rec, r)
 		if rec.status >= 500 {
-			log.Error("http 5xx", "method", r.Method, "path", r.URL.Path, "status", rec.status)
+			log.Error("http 5xx", "method", r.Method, "path", logPath(r.URL.Path), "status", rec.status)
 		}
+	})
+}
+
+// logPath keeps credentials out of the access log. /sub/<token> IS that
+// subscription's credential, and a 5xx used to write it verbatim — anyone able
+// to read the log could then fetch the subscription (and the node's proxy
+// credentials with it) without the panel password (§10 实现修订 2026-09-20).
+func logPath(p string) string {
+	if strings.HasPrefix(p, "/sub/") {
+		return "/sub/[redacted]"
+	}
+	return p
+}
+
+// maxJSONBody / maxSnapshotBody bound request bodies (§16 实现修订 2026-09-20).
+// Without a cap, the unauthenticated endpoints accepted an arbitrarily large
+// JSON string and json.Decoder buffers it in full before any validation runs —
+// a remote memory-exhaustion vector. Snapshot import and the GeoIP upload are
+// the only legitimate multi-megabyte bodies.
+const (
+	maxJSONBody     = 8 << 20
+	maxSnapshotBody = 64 << 20
+)
+
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch:
+		default:
+			next.ServeHTTP(w, r)
+			return
+		}
+		limit := int64(maxJSONBody)
+		if r.URL.Path == "/api/import" || r.URL.Path == "/api/geoip/mmdb" {
+			limit = maxSnapshotBody
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// stateChangingGet lists the GET endpoints that mutate state. SameSite=Lax keeps
+// the cookie off cross-site POSTs, but a top-level navigation still carries it,
+// so these two can be triggered from another site (§16 实现修订 2026-09-20).
+func stateChangingGet(r *http.Request) bool {
+	if r.URL.Path == "/api/export" {
+		return true
+	}
+	return strings.HasSuffix(r.URL.Path, "/forwards") && r.URL.Query().Get("live") == "1"
+}
+
+// crossSiteGuard refuses cross-site requests that would change state. Browsers
+// label every request with Sec-Fetch-Site, which page script cannot forge, so
+// this needs no Origin/Host comparison — the Vite dev proxy rewrites Host
+// (changeOrigin), which is exactly why an Origin check would break dev. Requests
+// without the header (curl, the agent) pass: they carry no ambient cookie.
+func crossSiteGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Sec-Fetch-Site") != "cross-site" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		safe := r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions
+		if safe && !stateChangingGet(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		writeErr(w, http.StatusForbidden, "cross_site_request")
+	})
+}
+
+// securityHeaders adds the defensive response headers. The CSP is deliberately
+// modest: xterm injects a <style> element at runtime, so inline styles must stay
+// allowed; everything else is same-origin (the bundle is self-hosted, §16
+// 不变量 11). HSTS is only sent when the request arrived over TLS.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Permissions-Policy", "geolocation=(), camera=(), microphone=()")
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: wss:; "+
+				"object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			h.Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -382,7 +488,36 @@ func decodeJSON(r *http.Request, v any) error {
 	return dec.Decode(v)
 }
 
-// requireSession guards panel endpoints with the session cookie.
+// sessionIDKey carries the validated session id to handlers that need it: the
+// browser WebSocket handlers register their socket under it so that revoking a
+// session can actually close the connection.
+type sessionIDKey struct{}
+
+func withSessionID(ctx context.Context, sid string) context.Context {
+	return context.WithValue(ctx, sessionIDKey{}, sid)
+}
+
+// sessionIDFromRequest returns the session id validated by requireSession.
+func sessionIDFromRequest(r *http.Request) string {
+	sid, _ := r.Context().Value(sessionIDKey{}).(string)
+	return sid
+}
+
+// passwordChangeExempt is what a session that still carries the one-time
+// initial password may reach: exactly what the SPA needs to change it or log
+// out. Everything else — including the terminal WS and the export snapshot —
+// waits (§4.1 实现修订 2026-09-20).
+func passwordChangeExempt(path string) bool {
+	switch path {
+	case "/api/me", "/api/password", "/api/logout":
+		return true
+	}
+	return false
+}
+
+// requireSession guards panel endpoints with the session cookie. It enforces
+// three things the cookie cannot: revocation, expiry, and the forced password
+// change.
 func (s *Server) requireSession(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sid := security.SessionIDFromRequest(r)
@@ -395,8 +530,29 @@ func (s *Server) requireSession(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		s.Store.TouchSession(sid, nowUnix())
-		next(w, r)
+		now := nowUnix()
+		if security.SessionExpired(sess.CreatedAt, now) {
+			// The cookie's MaxAge is enforced by the browser alone, so a session
+			// id copied out of the database or a backup used to stay valid
+			// forever (§4.1 实现修订 2026-09-20). Revoke the row so the table
+			// tells the same story as the answer.
+			_ = s.Store.RevokeSession(sid)
+			writeErr(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		// A one-time initial password must actually be changed before the panel
+		// is usable. The SPA redirect is a convenience, not the control: without
+		// this, the password printed in the startup log keeps working against
+		// every endpoint — the probe's root shell and the full export snapshot
+		// included.
+		if !passwordChangeExempt(r.URL.Path) {
+			if user, uerr := s.Store.GetUser(); uerr == nil && user.MustChange {
+				writeErr(w, http.StatusConflict, "password_change_required")
+				return
+			}
+		}
+		s.Store.TouchSession(sid, now)
+		next(w, r.WithContext(withSessionID(r.Context(), sid)))
 	}
 }
 

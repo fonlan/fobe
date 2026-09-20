@@ -175,7 +175,7 @@ func IsReleaseVersion(v string) bool {
 // ArtifactPresent reports whether the published agent build is downloadable
 // from the artifact volume (<dl>/agent/<version>/{linux-amd64,.sha256}).
 func ArtifactPresent(dlDir, version string) bool {
-	if dlDir == "" || version == "" {
+	if dlDir == "" || !SafeVersionPart(version) {
 		return false
 	}
 	for _, name := range artifactFiles {

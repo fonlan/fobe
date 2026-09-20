@@ -76,8 +76,15 @@ func TestAPIKeyNeverAppearsInErrors(t *testing.T) {
 				t.Fatal("want an error for http 401")
 			}
 			assertNoSecret(t, err.Error())
-			if !strings.Contains(err.Error(), redactedMarker) {
-				t.Fatalf("expected the redaction marker in %q", err.Error())
+			// The upstream body must NOT be panel-visible any more: it is what
+			// an SSRF target answers with. It travels in the log-only snippet.
+			if strings.Contains(err.Error(), redactedMarker) {
+				t.Fatalf("upstream body leaked into the panel-visible message: %q", err.Error())
+			}
+			snippet := Snippet(err)
+			assertNoSecret(t, snippet)
+			if !strings.Contains(snippet, redactedMarker) {
+				t.Fatalf("expected the redaction marker in the snippet %q", snippet)
 			}
 		})
 	}
@@ -120,8 +127,10 @@ func TestErrorBodyIsRedactedBeforeTruncation(t *testing.T) {
 		t.Fatal("want an error")
 	}
 	assertNoSecret(t, err.Error())
-	if len(err.Error()) > maxErrorMessageBytes+512 {
-		t.Fatalf("error message was not truncated: %d bytes", len(err.Error()))
+	snippet := Snippet(err)
+	assertNoSecret(t, snippet)
+	if len(snippet) > maxErrorMessageBytes+512 {
+		t.Fatalf("the body snippet was not truncated: %d bytes", len(snippet))
 	}
 }
 

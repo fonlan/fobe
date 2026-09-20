@@ -54,6 +54,36 @@ func (s *Server) handleFeishuQRCancel(w http.ResponseWriter, r *http.Request) {
 // The channel switch is deliberately not consulted: trying a channel out
 // before switching it on is the point. Same for the event switches — the test
 // is its own event kind.
+// notifyKeysFor maps a delivery channel to the settings it depends on.
+func notifyKeysFor(channel string) []string {
+	switch channel {
+	case "telegram":
+		return []string{notify.KeyTelegramToken}
+	case "webhook":
+		return []string{notify.KeyWebhookURL}
+	case "feishu":
+		return []string{notify.KeyFeishuAppSecret, notify.KeyFeishuWebhookURL, notify.KeyFeishuWebhookSecret}
+	}
+	return nil
+}
+
+// secretUnreadable reports whether any of keys is stored-but-undecryptable.
+func (s *Server) secretUnreadable(keys []string) bool {
+	if s.UnreadableSecrets == nil {
+		return false
+	}
+	bad := map[string]bool{}
+	for _, k := range s.UnreadableSecrets() {
+		bad[k] = true
+	}
+	for _, k := range keys {
+		if bad[k] {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Channel string `json:"channel"`
@@ -80,6 +110,14 @@ func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := target.Deliver(ev); err != nil {
 		if errors.Is(err, notify.ErrNotConfigured) {
+			// "Not configured" and "configured but unreadable" look identical
+			// from Configured() — the first is a normal state, the second means
+			// the master key no longer opens the stored secret (§15 实现修订
+			// 2026-09-20).
+			if s.secretUnreadable(notifyKeysFor(req.Channel)) {
+				writeJSON(w, http.StatusOK, map[string]any{"ok": false, "code": "notify_secret_unreadable"})
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "code": "notify_not_configured"})
 			return
 		}

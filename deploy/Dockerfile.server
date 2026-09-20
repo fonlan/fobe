@@ -95,7 +95,13 @@ RUN set -eu; \
       > /out/agent-seed/agent/$VER/manifest.json
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata
+# su-exec is what lets the entrypoint drop from root — needed once, to take
+# ownership of a bind-mounted /data — to the unprivileged user that actually
+# serves traffic (§17 实现修订 2026-09-20).
+RUN apk add --no-cache ca-certificates tzdata su-exec \
+ && addgroup -S -g 10001 fobe \
+ && adduser -S -D -H -u 10001 -G fobe fobe \
+ && mkdir -p /data && chown fobe:fobe /data
 COPY --from=build /out/fobe-server /usr/local/bin/fobe-server
 # The seed stays outside the artifact volume on purpose (see the header).
 COPY --from=build /out/agent-seed/ /srv/agent-seed/
@@ -105,7 +111,10 @@ COPY scripts/install.sh.tmpl /srv/install.sh.tmpl
 # /data volume) so a fresh deployment needs no .env at all, and routes
 # `admin` subcommands past the key requirement.
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# 0755, not `+x`: the script is re-executed as the unprivileged fobe user after
+# the privilege drop, so it must be READABLE by that user too (chmod +x only
+# adds the execute bit, and the build context's 0711 left sh unable to read it).
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
 ENV FOBE_DB=/data/fobe.db \
     FOBE_WEB_DIR=/srv/web \

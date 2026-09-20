@@ -96,7 +96,7 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 3. **真实 IP 传递**：`Host` / `X-Real-IP` / `X-Forwarded-For` / `X-Forwarded-Proto`。传错的话，黑名单会封错对象，安装命令与订阅里生成的域名也会错。
 4. **体量与缓存**：`client_max_body_size` 放宽（模板上传），`/sub/` 关闭缓存（否则客户端换了订阅还是旧节点）。
 
-**信任链**：server 只信任 `FOBE_TRUSTED_PROXIES`（默认 `127.0.0.1/32,::1/128,172.16.0.0/12`）范围的上游所传的 `X-Forwarded-For`，并且只取最左侧地址；上游不在白名单内时**忽略 XFF，改用 socket 源地址**。若你日后在前面再叠一层 CDN/反代（Cloudflare 等），必须把它的回源网段加进来。
+**信任链**：server 只信任 `FOBE_TRUSTED_PROXIES`（默认 `127.0.0.1/32,::1/128,172.16.0.0/12`）范围的上游所传的 `X-Forwarded-For`，并且**从右往左**取第一个不在白名单内的地址（**实现修订 2026-09-20**：原先取最左，遇到 nginx 的 `$proxy_add_x_forwarded_for` 就等于让客户端自选来源 IP）；上游不在白名单内时**忽略 XFF，改用 socket 源地址**。若你日后在前面再叠一层 CDN/反代（Cloudflare 等），必须把它的回源网段加进来。
 
 **替代做法（可选）**：若你想让 nginx 直接吐静态文件，需自己产出前端文件（`cd web && npm run build`，或 `docker cp <容器>:/srv/web ./dist`），再把 `location /` 指向该目录，但**必须保留** `/api`、`/ws/`、`/sub/`、`/install.sh`、`/dl/` 转发到 server。默认推荐前者：配置最短，且不存在"静态文件与 API 走不同域名导致 Cookie/WS 跨域"的坑。
 
@@ -107,7 +107,12 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 ### 4.1 面板
 
 - 单用户，密码 `argon2id` 存库。
-- 会话：HttpOnly + Secure + SameSite=Lax Cookie，服务端存 session 表，可一键吊销全部。
+- 会话：HttpOnly + SameSite=Lax Cookie，服务端存 session 表；**服务端强制 30 天绝对有效期**（`security.SessionExpired`，过期即拒绝并把行标成 `revoked`，每 10 分钟的清理任务顺手删掉过期行），可一键吊销全部。`Secure` 由「请求自身是 https」**或** `server.public_url` 是 https 决定（**实现修订 2026-09-20**：此前只看请求头，代理漏传 `X-Forwarded-Proto` 时 HTTPS 部署的 Cookie 会静默失去 Secure）。
+- **会话 id 不出现在任何 API 响应里**：`GET /api/sessions` 只回 `id_short`（指纹），因为它就是 Cookie 值本身、而这个端点没有任何「按 id 动作」（**实现修订 2026-09-20**）。
+- **吊销会真的断开连接**：浏览器 WS 只在握手时认证一次，所以 `revoke-all` 与改密码都会关闭对应的活动 WS（`wsReg.closeExcept`）。改密码保留当前浏览器、吊销其它会话（**实现修订 2026-09-20**）。
+- **一次性初始密码在服务端强制修改**：`must_change=1` 时除 `/api/me`、`/api/password`、`/api/logout` 外一律 `409 password_change_required`（**实现修订 2026-09-20**：此前只有前端重定向，启动日志里那条初始密码可以一直用到 `/ws/terminal` 与 `/api/export`）。
+- **CSRF**：不发 token，靠 `SameSite=Lax`（变更类都是非 GET 的 JSON 请求）**加**一道 `Sec-Fetch-Site: cross-site` 拒绝，后者只作用于变更类方法与两个有副作用的 GET（`/api/export`、`/api/nodes/{id}/forwards?live=1`）。刻意不做 Origin/主机比对：Vite dev 代理会改写 Host（`changeOrigin: true`），那样会打断 `scripts/dev.sh`。
+- **响应头**：`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy`、`Permissions-Policy`，外加一条温和的 CSP（`script-src 'self'`；`style-src` 必须允许 `'unsafe-inline'`，因为 xterm 运行时注入 `<style>`）与 https 时的 HSTS。
 - **不做 2FA**（你的选择）。补偿：登录失败黑名单（见 4.3）+ 强制 HTTPS + 绑域名。
 - CLI 逃生口（进容器执行，不依赖 Web）：
   - `fobe-server admin unblock <ip|all>` 解封
@@ -131,7 +136,8 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
 ### 4.3 登录失败黑名单
 
 - 连续 3 次失败 → 拉黑该 IP；持久化到 SQLite（重启不丢）。
-- 真实 IP 来源：`FOBE_TRUSTED_PROXIES` 白名单内上游传来的 `X-Forwarded-For` 最左侧地址；上游不在白名单内 → **忽略 XFF，改用 socket 源地址**（防伪造头绕过或嫁祸）。
+- 真实 IP 来源：`FOBE_TRUSTED_PROXIES` 白名单内上游传来的 `X-Forwarded-For`，**从右往左**取第一个不在白名单内的地址（2026-09-20 实现修订）；上游不在白名单内 → **忽略 XFF，改用 socket 源地址**（防伪造头绕过或嫁祸）。
+- **与来源身份无关的闸（2026-09-20 实现修订）**：`POST /api/login` 前面加了一道全局令牌桶（突发 30 / 每秒 10 次）+ 并发上限（4 个在跑的 argon2id）。黑名单按 IP 计数，而身份可以是无限多个（分布式来源），每次校验又固定吃 64 MiB，所以「内存有上界」必须由一道不依赖来源的闸来保证。**代价（写清楚）**：持续洪水期间操作员自己的登录也会吃到 `429 too_many_requests`；绕过方式是局域网/回环地址或 `fobe-server admin` CLI，两者都不走这个 handler。
 - **防自锁**（三条硬规则）：
   1. 回环与私有网段（含 Docker 网段、`X-Forwarded-For` 里的内网地址）**永不加黑**；
   2. 上游代理地址与 `FOBE_TRUSTED_PROXIES` 网段永不加入黑名单；
@@ -207,6 +213,8 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 - 首次运行检测 overlay 剩余空间，低于阈值时拒绝安装 sing-box 并给出提示（避免把路由器写满）。**实现修订 2026-09-16（阈值必须随产物大小走）**：原先只查一个平坦的 64 MiB，而 agent 要写的 sing-box 二进制自 1.14 起已近 90 MiB（见 §9.2 实现修订）——闸门等于放行一个必然写满 overlay 的安装。现在分两道：收敛前的粗筛仍查 64 MiB / 100 inode（此时还不知道产物多大），拿到响应头后按 `64 MiB + 产物` 复核；**替换已有二进制时再加一份**，因为它要被留成 `.prev` 供回滚（与 §5.5 的 2× 规则同源，只是首装没有那份 `.prev`，不该为不存在的副本拒绝）。空间扫描不到时一律放行（fail open）。**实现修订 2026-09-17e（inode 半闸只对"有 inode 预算"的文件系统生效）**：btrfs 等动态分配 inode 的文件系统 `statfs` 上报 `f_files = f_ffree = 0`（`df -i` 显示 0 0，是"无预算"不是"用尽"），原判定把 8 GiB 空闲的 btrfs 数据卷判成 0 inode 可用而拒绝安装（面板报 `insufficient disk space on /etc/one-sing: 8375 MiB / 0 inodes free`）。现在 statfs 一并取总 inode 数：为 0 视为该文件系统不跟踪 inode、跳过 inode 半闸（字节闸不变），错误信息也不再展示无意义的 inode 数字；真实耗尽的 ext4/f2fs（总 inode > 0 且空闲 < 100）照旧拒绝。
 
 ### 5.5 agent 自更新（跟随服务端）（实现修订 2026-09-15）
+
+> **实现修订 2026-09-20（版本号是路径组件，必须校验字符集）**：版本号被拼进 `<dl>/agent/<version>/…` 与 `/dl/agent/<version>/…`，而它来自构建参数（`-X main.version=$VERSION`）。现在 `agentupdate.SafeVersionPart`（`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` 且不含 `..`）在 `ArtifactPresent`/`Seed` 各入口与**服务端启动时**都检查，不合法直接拒绝启动——一个带 `/` 的 tag 曾经能写出产物卷。
 
 > 目标：**探针 agent 一直跟着服务端走**——服务端换了版本，探针就换成与之匹配的那一版，**不看高低**（降级与升级共用同一套逻辑）。本节取代 §9.2 里"agent 自更新走同一条链路"那句：自更新**不复用 sing-box 的三道闸门**（sing-box 有 `check` 与 30s 观察期，agent 没有可比的"先验后启"手段），换来的是**旁路自检 + 原子提交**，且**不保留 `.prev`**。
 
@@ -295,6 +303,8 @@ curl -fsSL https://panel.example.com/install.sh | bash -s -- --token <REGTOKEN> 
 ---
 
 ## 7. Agent ↔ Server 协议
+
+> **实现修订 2026-09-20（命令结果按节点归属）**：`FinishCommand` 的 WHERE 增加 `node_id` 与 `status IN ('pending','sent')` 两个条件。此前只按 `id` 更新，任何一台已认证探针都能把**别的节点**的排队命令标记为完成并写入伪造输出（命令 id 是 64 位随机令牌，猜中很难，但这是一条不该存在的横向捷径）。
 
 传输：单条 WSS（`/ws/agent`），JSON 信封，版本化：
 
@@ -544,6 +554,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 ```
 
 ### 9.5 服务端产物缓存与批量更新（实现修订 2026-09-15）
+
+> **实现修订 2026-09-20（重定向与解压上限）**：产物下载客户端现在逐跳复检重定向目标（`security.GuardClient`：放行 GitHub 的跨主机 302 到 `objects.githubusercontent.com`，但拒绝任何落到 link-local/未指定地址的跳转），并且给 tar.gz 加了**解压总量**上限（`maxArchiveDecompressedBytes`，512 MiB）。原先只封了「解出来的那个文件」的大小，`tar.Next()` 却会把跳过的成员一并解压 ⇒ 一个小体积、多成员的 gzip 炸弹照样烧 CPU。
 
 > 背景：§9.2 假定"面板能列出可选版本"，但**从来没有任何一条链路负责把产物取回来**——`/dl` 只是直出 `<FOBE_DL_DIR>` 里已有的文件，`GET /api/singbox/versions` 只读 `<FOBE_DL_DIR>/singbox/<version>/manifest.json`。缓存空的部署里，面板永远只有一个空版本列表。本节补齐"取货"与"分发"两段，且**不新增安装路径**：agent 侧的下载 → 校验 → 备份 → 三道闸门 → 回滚完全不变，批量更新只是把 `desired_version` 批量改掉。
 
@@ -811,6 +823,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 ### 12.5 多 provider、协议适配与模型元数据（2026-09-18 新增）
 
+> **实现修订 2026-09-20（出站目的地与错误体）**：① `base_url` 现在过 `security.CheckOutboundHost`：**拒绝** link-local（含云元数据 169.254.169.254）、未指定地址与组播，**放行** loopback 与 RFC1918——本机 Ollama、局域网网关都是正常部署，而元数据服务在这里没有任何正当用途；每个重定向跳同样复检。② 上游响应体**不再进入面板可见的错误文本**：`aiprotocol.UpstreamError.Error()` 只有协议/端点/状态码，被脱敏截断的正文放在 `Snippet` 里，只进服务端日志。此前「把 provider 指向内网地址再点一下」就能把那个服务的响应页显示在面板里——那是一条 SSRF 读取通道，不是调试便利。**残余代价（写清楚）**：持有设置接口的会话仍可把 provider/webhook 当盲端口扫描器用。
+
 **三协议的差异不止端点**（实现时按这张表分叉，别指望只改 URL）：
 
 | 维度 | openai-completions | openai-responses | anthropic-messages |
@@ -1032,6 +1046,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 ### 15.0 渠道与事件开关（2026-09-16 修订：通知独立成页）
 
+> **实现修订 2026-09-20（Webhook URL 与「解不开」不再静默）**：① `notify.webhook_url` 与 `notify.feishu_webhook_url` 一样列入 `sensitiveKeys`（通用 webhook 的密钥同样在 URL 里），PUT 时校验为绝对 http(s) 且过 `security.CheckOutboundHost`，不合法回 `bad_webhook_url`。② **主密钥解不开通知密钥时不再静默失效**：`decryptSetting` 把「未设置」与「解不开」分开，解不开的键在启动时记 error + 写 `secret_unreadable` 审计，`GET /api/settings` 多回一个 `unreadable_secrets` 数组（仅非空时），面板通知页顶部直接列出这些键，测试按钮回 `notify_secret_unreadable` 而不是 `notify_not_configured`。此前换钥/恢复旧库后所有告警哑掉、面板却一直显示「已配置」。
+
 设置里**通知不再是基础设置页上的一张卡片**，而是与「服务器」同级的一个子页（`/settings/notifications`，§16）：页面自上而下是**渠道**（Telegram / 飞书 / 通用 Webhook，同级并列，各自带开关、配置与"发送测试消息"）→ **文案与时间**（推送语言 + 时区）→ **事件开关** → **流量阈值**。
 
 - **渠道开关**：`notify.telegram_enabled` / `notify.webhook_enabled` / `notify.feishu_enabled`。关掉只停推送、**不清空配置**（重新打开不用重填凭据），也不影响"发送测试消息"——测试走 `Deliver`，开关只管调度。`Configured()` 语义保持"有配置"，与开关正交。
@@ -1052,6 +1068,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 ---
 
 ## 16. 前端
+
+> **实现修订 2026-09-20（请求面与访问日志）**：① 所有 POST/PUT/PATCH 的请求体过 `http.MaxBytesReader`（默认 8 MiB，`/api/import` 与 `/api/geoip/mmdb` 64 MiB）。此前只有 MMDB 上传封了顶，而 `/api/login`、`/api/agent/register` **无需认证**且 `json.Decoder` 会先把整串读进内存 ⇒ 远端内存耗尽。② `http.Server` 增加 `ReadTimeout`（5 分钟）与 `IdleTimeout`（2 分钟）；**刻意不设 `WriteTimeout`**（AI 回合与终端/事件长连接会被它切断）。③ 访问日志对 `/sub/` 末段脱敏：订阅 token 就是那条订阅的凭据，5xx 时原样写进日志等于把凭据交给任何能读日志的人。④ `/api/health` 不再回 `initialized`（它替扫描器区分了「全新面板，初始密码在日志里」与已配置面板）。
 
 - 技术：**React + TypeScript + Vite**；构建产物输出到 `web/dist`。**生产镜像在构建阶段把产物烤进镜像**（`/srv/web`），由 server 直出（`FOBE_WEB_DIR`）——不嵌入 Go 二进制（避免体积膨胀），也不再依赖宿主机挂载前端目录。若想让外部 nginx 直接吐静态文件，见 §3 末尾的替代做法。
 - **本地开发不走容器**：前端 `npm run dev`（Vite dev server，把 `/api`、`/ws`、`/sub`、`/install.sh`、`/dl` 代理到 `http://127.0.0.1:8080`，**WebSocket 代理必须开 `ws: true`**），后端 `go run ./cmd/server`。此时把 `FOBE_WEB_DIR` 留空 → server 进 **API-only 模式**：`/` 返回一句"请访问 Vite dev server"的提示（不 404、不白屏），其余接口行为与生产一致。
@@ -1082,6 +1100,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 ---
 
 ## 17. 部署与目录
+
+> **实现修订 2026-09-20（容器不再以 root 提供网络服务）**：运行镜像新增 `fobe` 用户与 `su-exec`；入口脚本**只为接管 `/data` 属主（bind mount 保留宿主属主，构建期定不了）**而短暂以 root 运行，随后 `exec su-exec fobe` 自我重启为普通用户，主密钥落盘、DB、缓存全部由该用户写。compose 同时给服务加 `no-new-privileges` 与 `cap_drop: ALL` + 仅回补入口所需的能力（CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID）。`docker compose exec server fobe-server admin …` 走的是 exec、不经过入口脚本，因此逃生口仍是 root，不受影响。
 
 ```
 fobe/

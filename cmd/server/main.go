@@ -18,8 +18,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -83,9 +85,29 @@ func mustMasterKey() []byte {
 	return key
 }
 
+// unreadableSetting reports a stored secret this master key cannot open: the
+// value exists and is marked encrypted, but decryption fails.
+func unreadableSetting(st *store.Store, crypt *security.Cryptor, key string) bool {
+	val, encrypted, err := st.GetSettingValue(key)
+	if err != nil || val == "" || !encrypted {
+		return false
+	}
+	_, err = crypt.Decrypt(val)
+	return err != nil
+}
+
 func runServer() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
+
+	// The version ends up as a path component in the artifact volume and a URL
+	// segment in /install.sh and the §5.5 self-update target, and it arrives
+	// from a build argument — refuse to run a build that could escape the volume
+	// (§5.5 实现修订 2026-09-20).
+	if !agentupdate.SafeVersionPart(version) {
+		log.Error("refusing to start: VERSION is not usable as a path component", "version", version)
+		os.Exit(1)
+	}
 
 	key := mustMasterKey()
 	st := mustStore(dbPath())
@@ -107,6 +129,19 @@ func runServer() {
 		os.Exit(1)
 	}
 
+	// A value that exists but cannot be decrypted is NOT "unset": the channel it
+	// belongs to is dead, and without tracking it the panel would keep showing
+	// the channel as configured while every delivery failed silently (§15
+	// 实现修订 2026-09-20). Declared here because both the API closure and the
+	// notifier decrypt function read it.
+	var unreadableMu sync.Mutex
+	unreadable := map[string]bool{}
+	markUnreadable := func(key string) {
+		unreadableMu.Lock()
+		unreadable[key] = true
+		unreadableMu.Unlock()
+	}
+
 	ensureAdminUser(st, log)
 
 	// GeoIP country resolution (design §14): local GeoLite2-Country MMDB at
@@ -124,6 +159,17 @@ func runServer() {
 	h.SetCryptor(crypt)
 	log.Info("geoip resolver", "mmdb", geoPath, "online_fallback", geoOnline)
 	api := httpapi.NewServer(st, h, trust, crypt, log)
+	api.AIHTTPClient = security.GuardClient(&http.Client{})
+	api.UnreadableSecrets = func() []string {
+		unreadableMu.Lock()
+		defer unreadableMu.Unlock()
+		out := make([]string, 0, len(unreadable))
+		for k := range unreadable {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
 	api.Version = version
 	api.WebDir = env("FOBE_WEB_DIR", "")
 	dlDir := env("FOBE_DL_DIR", "")
@@ -170,7 +216,10 @@ func runServer() {
 	api.ModelsDev.Start(bgCtx)
 
 	stop := make(chan struct{})
-	notifyClient := &http.Client{Timeout: notify.DeliveryTimeout}
+	// Notification endpoints are operator-supplied URLs, so every outbound
+	// request re-checks each redirect hop against the blocked destination
+	// classes (§15 实现修订 2026-09-20).
+	notifyClient := security.GuardClient(&http.Client{Timeout: notify.DeliveryTimeout})
 	decryptSetting := func(key string) (string, bool) {
 		val, encrypted, err := st.GetSettingValue(key)
 		if err != nil || val == "" {
@@ -179,12 +228,25 @@ func runServer() {
 		if encrypted {
 			plain, err := crypt.Decrypt(val)
 			if err != nil {
+				markUnreadable(key)
 				log.Warn("decrypt setting", "key", key, "err", err)
 				return "", false
 			}
 			val = plain
 		}
 		return val, true
+	}
+	// Report what is already broken at startup, so the failure reaches the audit
+	// trail even if nobody opens the notifications page.
+	for _, key := range []string{
+		notify.KeyTelegramToken, notify.KeyWebhookURL, notify.KeyWebhookSecret,
+		notify.KeyFeishuAppSecret, notify.KeyFeishuWebhookURL, notify.KeyFeishuWebhookSecret,
+	} {
+		if unreadableSetting(st, crypt, key) {
+			markUnreadable(key)
+			log.Error("stored secret cannot be decrypted with this master key; the channel is disabled", "key", key)
+			_ = st.InsertAudit(&store.AuditEntry{Actor: "system", Action: "secret_unreadable", Command: key})
+		}
 	}
 	feishu := notify.NewFeishu(decryptSetting, notifyClient)
 	channels := []notify.Notifier{
@@ -331,10 +393,17 @@ func runServer() {
 	startPprof(log)
 
 	addr := env("FOBE_LISTEN", "0.0.0.0:8080")
+	// Timeouts: the header timeout is the slowloris brake, ReadTimeout bounds a
+	// stalled body (generous on purpose — a snapshot import can be tens of
+	// megabytes), IdleTimeout reaps dead keep-alive connections. WriteTimeout
+	// stays unset: the AI chat streams for minutes and the terminal/event
+	// sockets are long-lived, so it would cut both off (§17 实现修订 2026-09-20).
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           api.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
 	}
 	go func() {
 		log.Info("fobe-server listening", "addr", addr, "version", version,

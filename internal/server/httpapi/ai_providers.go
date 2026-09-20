@@ -12,8 +12,19 @@ import (
 	"time"
 
 	"github.com/fonlan/fobe/internal/server/aiprotocol"
+	"github.com/fonlan/fobe/internal/server/security"
 	"github.com/fonlan/fobe/internal/server/store"
 )
+
+// outboundAIClient is the client used to reach a provider. When none was
+// injected it still re-validates redirect hops, so the destination guard cannot
+// be lost to the nil fallback (§12.5 实现修订 2026-09-20).
+func (s *Server) outboundAIClient() *http.Client {
+	if s.AIHTTPClient != nil {
+		return s.AIHTTPClient
+	}
+	return security.GuardClient(&http.Client{})
+}
 
 // AI provider / model endpoints (design.md §12.1/§12.5, 2026-09-18).
 //
@@ -169,6 +180,13 @@ func normalizeProviderBaseURL(raw string) (string, error) {
 	}
 	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return "", errors.New("host/credentials/query/fragment")
+	}
+	// §12.5 实现修订 2026-09-20: refuse the destinations that turn a settings form
+	// into an SSRF probe of the host's own network (link-local/metadata,
+	// unspecified). LAN and loopback stay allowed on purpose — a self-hosted
+	// gateway is a normal deployment.
+	if err := security.CheckOutboundHost(u.Hostname()); err != nil {
+		return "", err
 	}
 	return strings.TrimRight(u.String(), "/"), nil
 }
@@ -868,10 +886,7 @@ func (s *Server) handleFetchAIModels(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), aiFetchModelsTimeout)
 	defer cancel()
-	client := s.AIHTTPClient
-	if client == nil {
-		client = &http.Client{}
-	}
+	client := s.outboundAIClient()
 	fetched, err := aiprotocol.FetchModels(ctx, client, aiprotocol.Request{
 		BaseURL:  provider.BaseURL,
 		APIKey:   apiKey,
@@ -879,9 +894,11 @@ func (s *Server) handleFetchAIModels(w http.ResponseWriter, r *http.Request) {
 		Protocol: provider.Protocol,
 	})
 	if err != nil {
-		// The upstream error never contains the key (the adapter redacts), so
-		// logging it is safe and is the only way to explain a 404 endpoint.
-		s.Log.Warn("fetch upstream models", "provider", provider.ID, "err", err)
+		// The upstream error never contains the key (the adapter redacts), and
+		// the body excerpt is log-only — the panel gets the short message
+		// (§12.5 实现修订 2026-09-20).
+		s.Log.Warn("fetch upstream models", "provider", provider.ID, "err", err,
+			"body", aiprotocol.Snippet(err))
 		writeErr(w, http.StatusBadGateway, "ai_fetch_models_failed")
 		return
 	}

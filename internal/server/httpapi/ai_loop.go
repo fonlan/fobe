@@ -198,10 +198,7 @@ func (s *Server) runAITurn(ctx context.Context, sse *aiSSEWriter, r *http.Reques
 		s.Log.Warn("touch ai session", "err", err)
 	}
 
-	client := s.AIHTTPClient
-	if client == nil {
-		client = &http.Client{}
-	}
+	client := s.outboundAIClient()
 
 	// The loop. Each iteration is ONE upstream call; the model decides whether
 	// another follows by asking for tools or not (§12.6: no step cap on
@@ -436,7 +433,10 @@ func (s *Server) persistTurnEnd(sessionID, reason string, payload map[string]any
 // forwarding it is the only way an operator learns that (say) the model name is
 // wrong.
 func (s *Server) emitAIUpstreamError(sse *aiSSEWriter, sessionID string, err error) {
-	s.Log.Warn("ai upstream stream", "err", err)
+	// The panel receives the short message; the upstream body stays in the log
+	// so that pointing a provider at an internal service cannot display that
+	// service's answer in the UI (§12.5 实现修订 2026-09-20).
+	s.Log.Warn("ai upstream stream", "err", err, "body", aiprotocol.Snippet(err))
 	_ = sse.Send(aiEventError, map[string]any{"code": "ai_upstream_error", "message": err.Error()})
 	s.finishAITurn(sse, sessionID, "upstream_error", 0, nil)
 }

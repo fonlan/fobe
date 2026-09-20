@@ -67,7 +67,7 @@ server {
 
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For   $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
 
         proxy_set_header Upgrade    $http_upgrade;      # WSS / 终端
@@ -86,14 +86,14 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For   $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         add_header Cache-Control "no-store" always;
     }
 }
 ```
 
-8080 不要裸奔公网：nginx 同机时把 compose 的 ports 改成 `127.0.0.1:8080:8080`，不同机就用防火墙只放行 nginx 来源。若 nginx 不与面板同机、或前面还有 CDN，要把上游网段加进 `FOBE_TRUSTED_PROXIES`，否则黑名单会认错来源 IP。
+8080 不要裸奔公网：nginx 同机时把 compose 的 ports 改成 `127.0.0.1:8080:8080`，不同机就用防火墙只放行 nginx 来源。若 nginx 不与面板同机、或前面还有 CDN，要把上游网段加进 `FOBE_TRUSTED_PROXIES`，否则黑名单会认错来源 IP。上面用 `$remote_addr` 是**替换**客户端的头；server 侧还会从右往左取第一个不在 `FOBE_TRUSTED_PROXIES` 内的地址，所以即使你沿用 `$proxy_add_x_forwarded_for`（追加）也不会让客户端伪造来源 IP——但替换式写法才是推荐配置。
 
 ### 装探针
 

@@ -1357,7 +1357,7 @@ function SecurityCard() {
             </thead>
             <tbody>
               {sessions.map((s) => (
-                <tr key={s.id} className={s.revoked ? 'row-muted' : ''}>
+                <tr key={s.id_short} className={s.revoked ? 'row-muted' : ''}>
                   <td className="mono">{s.ip}</td>
                   <td className="mono nowrap">{fmtTime(s.created_at)}</td>
                   <td className="mono nowrap">{fmtTime(s.last_seen)}</td>

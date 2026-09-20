@@ -17,6 +17,12 @@ import (
 
 const maxTerminalBrowserFrameBytes = 1 << 20
 
+// maxTerminalSocketsPerNode bounds concurrent browser terminals for one node.
+// The agent keeps a single active PTY and every open kills the previous shell
+// (design §11), so an authenticated client looping on /ws/terminal could churn
+// the probe's PTY — and the audit log — indefinitely.
+const maxTerminalSocketsPerNode = 4
+
 var terminalUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -34,12 +40,19 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.wsReg.countTerminals(nodeID) >= maxTerminalSocketsPerNode {
+		writeErr(w, http.StatusConflict, "too_many_terminals")
+		return
+	}
+
 	ws, err := terminalUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer ws.Close()
 	ws.SetReadLimit(maxTerminalBrowserFrameBytes)
+	s.wsReg.add(ws, wsConnInfo{sessionID: sessionIDFromRequest(r), nodeID: nodeID})
+	defer s.wsReg.remove(ws)
 
 	sessionID, err := security.RandomToken(16)
 	if err != nil {

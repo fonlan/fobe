@@ -61,8 +61,8 @@ docker compose exec server fobe-server admin unblock <ip|all> | reset-password |
 
 1. **探针永不监听管理端口**，只主动外连 `/ws/agent`。fobe 内不含任何反代/证书逻辑——TLS 是使用者自备 nginx 的事（design §3）。
 2. **密钥**一律经 `security.Cryptor`（AES-GCM）存取；主密钥 `FOBE_MASTER_KEY` 缺失时**拒绝启动**，不降级成明文（镜像入口脚本只是"替用户填上"——生成随机密钥落盘 `/data/.master_key` 并复用，见 design §4.4 修订；改入口脚本时不得引入明文回退）。凭据不得进日志；审计里的敏感值要脱敏（anytls 密码已用 `[redacted]`）。
-3. **黑名单语义**：`expires_at=0` 只是失败计数、不算封禁，只有 `expires_at > now` 才拦截；回环/私有/可信代理网段永不加黑。`NeverBlacklist` 必须在 `handleLogin` 里接线（曾漏接导致本机自锁）。
-4. **XFF 只信 `FOBE_TRUSTED_PROXIES` 内上游传来的最左地址**，范围外忽略 XFF 改用 socket 源地址。
+3. **黑名单语义**：`expires_at=0` 只是失败计数、不算封禁，只有 `expires_at > now` 才拦截；回环/私有/可信代理网段永不加黑。`NeverBlacklist` 必须在 `handleLogin` 里接线（曾漏接导致本机自锁）。**2026-09-20 起计数必须随封禁一起过期**（成功登录无条件删行、`RecordLoginFail` 发现存量行已过期就先归零），否则一次手滑之后「每次再错一次就重封 30 分钟」且面板看不见残留行；另有与来源身份无关的全局闸 `loginGate`（突发 30 / 每秒 10 / 并发 4）挡在 argon2id 前面。
+4. **XFF 只信 `FOBE_TRUSTED_PROXIES` 内上游，并从中从右往左取第一个不在白名单内的地址**（2026-09-20 修订：原先是取最左，配 `$proxy_add_x_forwarded_for` 等于让每个客户端自选来源 IP，黑名单因此形同虚设）；范围外忽略 XFF 改用 socket 源地址。
 5. `server.public_url` 是安装命令与订阅域名的准绳，**优先于请求 Host**；改了它要同步改 `install.sh` 的渲染预期。
 6. **API 只返回结构化数据与 snake_case 错误码**（`writeErr(w, status, code)`），不出中文文案；文案在 `web/src/i18n.tsx`，zh/en 两份都要加。
 7. **AI 执行默认放行，但元操作强制确认**（面板密码、主密钥、AI 自身配置、**由 AI 发起的** agent 自更新——design §12.3）；每条执行写 `audit_logs`；AI 执行的约束是**有界闸**（每轮变更预算 / 每分钟上限 / 连续失败暂停 / 重复检测）与 `ai.default_policy=confirm`——**不要**再加回"一键冻结全部 AI 执行"的 Kill Switch：这个助手的能力就是跑命令，冻成只读等于让它失效（2026-09-18 拍板移除，见 design §12.3）。探针跟随服务端由 `agent.auto_update` 单独控制。§5.5 的**系统自动跟随**不属于元操作（服务端版本变更触发，AI 侧只有只读查询）。

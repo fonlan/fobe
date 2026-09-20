@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fonlan/fobe/internal/server/security"
 )
 
 // Upstream defaults. Both bases are overridable (Config) so tests and
@@ -119,7 +121,10 @@ func New(cfg Config) *Client {
 		cfg.Repo = DefaultRepo
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
+		// Release assets redirect (github.com → objects.githubusercontent.com),
+		// so the policy is not "same host" but "every hop still resolves to a
+		// routable public address" (§9.5 实现修订 2026-09-20).
+		cfg.HTTPClient = security.GuardClient(&http.Client{Timeout: defaultHTTPTimeout})
 	}
 	if cfg.MaxDownloadBytes <= 0 {
 		cfg.MaxDownloadBytes = defaultMaxDownloadBytes

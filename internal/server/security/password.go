@@ -22,7 +22,14 @@ const (
 	argonSaltLen = 16
 )
 
-// HashPassword produces a PHC-format argon2id hash: $argon2id$v=19$m=65536,t=2,p=2$salt$hash
+// HashPassword produces a PHC-format argon2id hash:
+//
+//	$argon2id$v=19$m=65536,t=1,p=2$salt$hash
+//
+// The parameters are the ones in the const block above (m=64 MiB, t=1, p=2 —
+// the docstring used to claim t=2). They are deliberately expensive: 64 MiB per
+// verification is what makes an unauthenticated flood a memory-exhaustion
+// vector, which is why POST /api/login sits behind loginGate.
 func HashPassword(password string) (string, error) {
 	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {

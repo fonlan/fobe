@@ -54,9 +54,24 @@ func (tc *TrustChain) isTrusted(ip net.IP) bool {
 	return false
 }
 
-// RealIP resolves the client IP for a request:
-// socket source when the peer is not a trusted proxy, otherwise the
-// leftmost entry of X-Forwarded-For (design §3: leftmost = original client).
+// RealIP resolves the client IP for a request (design §3/§4.3): the socket
+// source when the peer is not a trusted proxy, otherwise the first entry of
+// X-Forwarded-For that is not itself a trusted proxy, walking RIGHT to LEFT.
+//
+// Right-to-left is the only direction that works with the documented nginx
+// config: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for` appends
+// $remote_addr *after* whatever the client sent, so the trustworthy end is the
+// right one. Reading the leftmost entry (what this used to do, 2026-09-20
+// 实现修订) is correct only when the proxy *replaces* the header — with the
+// documented config it handed every client control over its own apparent
+// address, which defeated the login blacklist twice over: spoof a private
+// address and §4.3's anti-lockout rule exempts you from counting entirely,
+// spoof a public one and you get an unlimited supply of identities to guess
+// passwords from.
+//
+// An entry that does not parse ends the walk: continuing left would mean
+// trusting a value that no hop can be held accountable for, so the socket
+// address wins instead (fail-closed).
 func (tc *TrustChain) RealIP(r *http.Request) string {
 	socketIP := socketIP(r)
 	if !tc.isTrusted(socketIP) {
@@ -66,11 +81,31 @@ func (tc *TrustChain) RealIP(r *http.Request) string {
 	if xff == "" {
 		return socketIP.String()
 	}
-	leftmost := strings.TrimSpace(strings.SplitN(xff, ",", 2)[0])
-	if ip := net.ParseIP(leftmost); ip != nil {
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := parseForwarded(parts[i])
+		if ip == nil {
+			break // unparseable hop: nothing to its left is attributable
+		}
+		if tc.isTrusted(ip) {
+			continue // our own proxy chain: keep walking left
+		}
 		return ip.String()
 	}
 	return socketIP.String()
+}
+
+// parseForwarded accepts the address forms a proxy may write into XFF: a bare
+// IP, or ip:port (some proxies append the port).
+func parseForwarded(s string) net.IP {
+	s = strings.TrimSpace(s)
+	if ip := net.ParseIP(s); ip != nil {
+		return ip
+	}
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		return net.ParseIP(host)
+	}
+	return nil
 }
 
 // NeverBlacklist implements the anti-lockout rules (design §4.3):

@@ -146,16 +146,49 @@ const (
 	maxErrorMessageBytes = 2048
 )
 
+// UpstreamError is a failing (or unreadable) answer from a provider endpoint.
+//
+// Error() is deliberately BODY-FREE. It is forwarded to the panel verbatim as
+// ai_upstream_error, so interpolating the response body meant "point a provider
+// at an internal address and press the test button" displayed that service's
+// answer in the panel — an SSRF read channel rather than a debugging aid
+// (§12.5 实现修订 2026-09-20). The redacted, truncated body travels separately in
+// Snippet, which only ever goes to the server log.
+type UpstreamError struct {
+	Protocol string
+	Endpoint string
+	Status   int
+	Reason   string // short, panel-safe
+	Snippet  string // log only: redacted body excerpt
+}
+
+func (e *UpstreamError) Error() string {
+	msg := fmt.Sprintf("%s %s: upstream returned http %d", e.Protocol, e.Endpoint, e.Status)
+	if e.Reason != "" {
+		msg += ": " + e.Reason
+	}
+	return msg
+}
+
+// Snippet returns the log-only detail of an UpstreamError ("" for anything
+// else). It must never be sent to the panel.
+func Snippet(err error) string {
+	var ue *UpstreamError
+	if errors.As(err, &ue) {
+		return ue.Snippet
+	}
+	return ""
+}
+
 // upstreamError turns a non-2xx answer into an error whose body is redacted
 // first and truncated second (never the other way round: truncation can split a
 // key and leave its prefix readable).
 func upstreamError(protocol, endpoint string, resp *http.Response, key string) error {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-	msg := truncate(redact(strings.TrimSpace(string(raw)), key), maxErrorMessageBytes)
-	if msg == "" {
-		return fmt.Errorf("%s %s: upstream returned http %d", protocol, endpoint, resp.StatusCode)
+	return &UpstreamError{
+		Protocol: protocol, Endpoint: endpoint, Status: resp.StatusCode,
+		Snippet: truncate(redact(strings.TrimSpace(string(raw)), key), maxErrorMessageBytes),
 	}
-	return fmt.Errorf("%s %s: upstream returned http %d: %s", protocol, endpoint, resp.StatusCode, msg)
 }
 
 // decodeJSONBody reads a small non-streaming body (the model list) with the
@@ -169,7 +202,13 @@ func decodeJSONBody(protocol, endpoint string, resp *http.Response, key string, 
 		return fmt.Errorf("%s %s: read body: %w", protocol, endpoint, err)
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("%s %s: decode body: %w (body starts %.200q)", protocol, endpoint, err, redact(string(raw), key))
+		// The body excerpt is log-only here too: a "not JSON" answer is exactly
+		// what an internal service replies with (§12.5 实现修订 2026-09-20).
+		return &UpstreamError{
+			Protocol: protocol, Endpoint: endpoint, Status: resp.StatusCode,
+			Reason:  "the response is not valid JSON",
+			Snippet: fmt.Sprintf("decode: %v (body starts %.200q)", err, redact(string(raw), key)),
+		}
 	}
 	return nil
 }

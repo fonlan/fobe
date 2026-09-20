@@ -48,6 +48,9 @@ export default function Notifications() {
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [switchBusy, setSwitchBusy] = useState<string | null>(null);
+  // Settings the master key can no longer open (§15): the channel reads as
+  // configured but delivers nothing, so the page has to say so out loud.
+  const [brokenSecrets, setBrokenSecrets] = useState<string[]>([]);
 
   const field = useField({ settings, draft, setDraft });
 
@@ -58,6 +61,7 @@ export default function Notifications() {
       for (const s of r.settings ?? []) map[s.key] = s;
       setSettings(map);
       setDraft({});
+      setBrokenSecrets(r.unreadable_secrets ?? []);
       setErr(null);
     } catch (e) {
       setErr(apiErrorMessage(e, t));
@@ -130,6 +134,15 @@ export default function Notifications() {
           <button type="button" className="btn" onClick={() => void load()}>
             {t('retry')}
           </button>
+        </div>
+      )}
+
+      {/* A channel whose secret cannot be decrypted looks "configured" on the
+          wire and delivers nothing; the server names the keys (§15). */}
+      {brokenSecrets.length > 0 && (
+        <div className="card error-card">
+          <p>{t('notify_secret_unreadable_banner')}</p>
+          <p className="mono">{brokenSecrets.join(', ')}</p>
         </div>
       )}
 
@@ -315,6 +328,10 @@ function ChannelCard({
 function testResult(t: ReturnType<typeof useI18n>['t'], r: NotifyTestResult): { ok: boolean; text: string } {
   if (r.ok) return { ok: true, text: t('feishu_test_ok') };
   if (r.code === 'notify_not_configured') return { ok: false, text: t('feishu_test_not_configured') };
+  // A stored secret the master key can no longer open is NOT "not configured":
+  // saying so would send the operator looking for a missing field that is
+  // actually there (§15).
+  if (r.code === 'notify_secret_unreadable') return { ok: false, text: t('feishu_test_secret_unreadable') };
   return { ok: false, text: t('feishu_test_fail', { detail: r.detail || r.code || '' }) };
 }
 

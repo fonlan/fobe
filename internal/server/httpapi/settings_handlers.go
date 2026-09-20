@@ -2,12 +2,25 @@ package httpapi
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/fonlan/fobe/internal/server/agentupdate"
 	"github.com/fonlan/fobe/internal/server/notify"
+	"github.com/fonlan/fobe/internal/server/security"
 )
+
+// validOutboundURL accepts an absolute http(s) endpoint whose host is not in a
+// blocked destination class. Webhook URLs are dialed by the server, so they get
+// the same check as an AI provider base_url (§15 实现修订 2026-09-20).
+func validOutboundURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	return security.CheckOutboundHost(u.Hostname()) == nil
+}
 
 // Settings groups (design §4.4 / §12.1 / §13 / §14 / §15 / §16):
 //   ai.default_policy, ai.default_provider_id, ai.default_model_id
@@ -42,6 +55,7 @@ var sensitiveKeys = map[string]bool{
 	"notify.webhook_secret":        true,
 	"notify.feishu_app_secret":     true,
 	"notify.feishu_webhook_url":    true, // embeds the bot token in its path
+	"notify.webhook_url":           true, // the generic kind carries its secret in the URL too（§15 实现修订 2026-09-20）
 	"notify.feishu_webhook_secret": true,
 }
 
@@ -105,7 +119,16 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	// ai_configured is derived (not a setting) so the frontend never has to
 	// re-implement the §12.1 "configured" rule: the terminal page hides the
 	// assistant sidebar whenever the chat endpoint would 503 anyway.
-	writeJSON(w, http.StatusOK, map[string]any{"settings": out, "ai_configured": s.aiConfigured()})
+	resp := map[string]any{"settings": out, "ai_configured": s.aiConfigured()}
+	if s.UnreadableSecrets != nil {
+		if keys := s.UnreadableSecrets(); len(keys) > 0 {
+			// A value exists but this master key cannot open it: without this
+			// the panel shows the channel as configured while every delivery
+			// silently fails (§15 实现修订 2026-09-20).
+			resp["unreadable_secrets"] = keys
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type putSettingsReq struct {
@@ -181,6 +204,13 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if key == notify.KeyTimezone && !notify.ValidTimezone(value) {
 			writeErr(w, http.StatusBadRequest, "bad_timezone")
+			return
+		}
+		// §15 实现修订 2026-09-20: a webhook URL is an outbound endpoint the
+		// server dials on the operator's behalf, so it is validated like one.
+		if (key == notify.KeyWebhookURL || key == notify.KeyFeishuWebhookURL) &&
+			value != "" && !validOutboundURL(value) {
+			writeErr(w, http.StatusBadRequest, "bad_webhook_url")
 			return
 		}
 		// §15 switches: like the §5.5 switch, an unparsable truthy value would

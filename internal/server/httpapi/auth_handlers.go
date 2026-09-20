@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"net/url"
 
 	"github.com/fonlan/fobe/internal/server/security"
 	"github.com/fonlan/fobe/internal/server/store"
@@ -22,6 +23,23 @@ type meResp struct {
 	Version            string `json:"version"`
 }
 
+// cookieSecure decides the Secure flag for the session cookie. It ORs the
+// request's own TLS evidence with the configured server.public_url scheme: the
+// first term keeps plain-http local dev working, and the second stops a proxy
+// that forgets X-Forwarded-Proto from silently downgrading an HTTPS deployment
+// to a cleartext cookie (§4.1 实现修订 2026-09-20).
+func (s *Server) cookieSecure(r *http.Request) bool {
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		return true
+	}
+	v, err := s.Store.GetSetting("server.public_url")
+	if err != nil || v == "" {
+		return false
+	}
+	u, err := url.Parse(v)
+	return err == nil && u.Scheme == "https"
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := s.Trust.RealIP(r)
 	// 回环/私有/可信代理网段永不加黑(§4.3 防自锁硬规则):不查封禁、
@@ -36,6 +54,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Identity-independent brakes (§4.3 实现修订 2026-09-20). The blacklist
+	// above is per-IP, so it cannot bound a distributed or header-rotating
+	// attacker, while every verification below allocates 64 MiB. Refuse before
+	// reading the body or touching the database: a rejected request must cost
+	// the server nothing.
+	if !s.loginGate.tryAcquire() {
+		w.Header().Set("Retry-After", "1")
+		writeErr(w, http.StatusTooManyRequests, "too_many_requests")
+		return
+	}
+	defer s.loginGate.release()
 
 	var req loginReq
 	if err := decodeJSON(r, &req); err != nil || req.Password == "" {
@@ -91,7 +121,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	security.SetSessionCookie(w, r, sid)
+	security.SetSessionCookie(w, r, sid, s.cookieSecure(r))
 	s.Store.InsertAudit(&store.AuditEntry{Actor: "panel", Action: "login_ok", SourceIP: ip})
 	writeJSON(w, http.StatusOK, meResp{MustChangePassword: user.MustChange, Version: s.Version})
 }
@@ -100,7 +130,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if sid := security.SessionIDFromRequest(r); sid != "" {
 		_ = s.Store.RevokeSession(sid)
 	}
-	security.ClearSessionCookie(w)
+	security.ClearSessionCookie(w, s.cookieSecure(r))
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -146,16 +176,25 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+	// Changing the password must evict whoever else holds a session — including
+	// any socket they already upgraded, which would otherwise survive (§4.1
+	// 实现修订 2026-09-20). The current browser stays signed in.
+	keep := security.SessionIDFromRequest(r)
+	if _, err := s.Store.RevokeOtherSessions(keep); err == nil {
+		s.wsReg.closeExcept(keep)
+	}
 	s.Store.InsertAudit(&store.AuditEntry{Actor: "panel", Action: "password_changed", SourceIP: s.Trust.RealIP(r)})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// handleHealth is the only unauthenticated status endpoint. It deliberately
+// says nothing about whether a user exists: "initialized: false" told any
+// scanner that this was a fresh panel whose one-time password is sitting in the
+// startup log (§4.1 实现修订 2026-09-20).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	_, err := s.Store.GetUser()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":      "ok",
-		"version":     s.Version,
-		"initialized": err == nil,
-		"web":         s.WebDir != "",
+		"status":  "ok",
+		"version": s.Version,
+		"web":     s.WebDir != "",
 	})
 }

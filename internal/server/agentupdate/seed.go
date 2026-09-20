@@ -64,7 +64,7 @@ func Seed(seedDir, dlDir, serverVersion string, log *slog.Logger) error {
 	copied := []string{}
 	for _, e := range entries {
 		version := e.Name()
-		if !e.IsDir() || version == "latest" {
+		if !e.IsDir() || version == "latest" || !SafeVersionPart(version) {
 			continue
 		}
 		src := filepath.Join(seedAgent, version, "linux-amd64")
@@ -100,7 +100,7 @@ func Seed(seedDir, dlDir, serverVersion string, log *slog.Logger) error {
 			"dir", filepath.Join(dlDir, "agent"), "versions", copied)
 	}
 
-	if serverVersion == "" || !fileNonEmpty(artifactPath(dlDir, serverVersion, "linux-amd64")) {
+	if !SafeVersionPart(serverVersion) || !fileNonEmpty(artifactPath(dlDir, serverVersion, "linux-amd64")) {
 		return nil
 	}
 	return pointLatest(dlDir, serverVersion, log)

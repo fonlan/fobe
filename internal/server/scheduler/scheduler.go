@@ -16,6 +16,7 @@ import (
 
 	"github.com/fonlan/fobe/internal/server/notify"
 	"github.com/fonlan/fobe/internal/server/quota"
+	"github.com/fonlan/fobe/internal/server/security"
 	"github.com/fonlan/fobe/internal/server/store"
 )
 
@@ -102,6 +103,14 @@ func (s *Scheduler) pruneRetention() {
 		} else if n > 0 {
 			s.log.Info("pruned rows", "table", t.name, "count", n)
 		}
+	}
+	// Sessions expire on their own absolute lifetime (§4.1 实现修订
+	// 2026-09-20). requireSession already refuses an expired row; this is what
+	// keeps the table from growing forever.
+	if n, err := s.store.PruneExpiredSessions(now - int64(security.SessionTTL.Seconds())); err != nil {
+		s.log.Warn("prune", "table", "sessions", "err", err)
+	} else if n > 0 {
+		s.log.Info("pruned rows", "table", "sessions", "count", n)
 	}
 }
 
