@@ -50,8 +50,8 @@ func CheckOutboundHost(host string) error {
 }
 
 func checkBlockedIP(ip net.IP) error {
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() {
-		return fmt.Errorf("%w: link-local or unspecified address %s", ErrBlockedDestination, ip)
+	if ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return fmt.Errorf("%w: link-local, unspecified or multicast address %s", ErrBlockedDestination, ip)
 	}
 	return nil
 }

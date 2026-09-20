@@ -217,7 +217,12 @@ func (s *Store) RecordLoginFail(ip, reason string, maxFails int, blockSeconds in
 			count = 0
 		}
 		count++
-		_, err = s.db.Exec(`UPDATE ip_blacklist SET fail_count = ?, reason = ?, expires_at = CASE WHEN expires_at <= ? THEN 0 ELSE expires_at END WHERE ip = ?`, count, reason, nowTs, ip)
+		_, err = s.db.Exec(
+			`UPDATE ip_blacklist SET fail_count = ?, reason = ?,
+			 expires_at = CASE WHEN expires_at <= ? THEN 0 ELSE expires_at END
+			 WHERE ip = ?`,
+			count, reason, nowTs, ip,
+		)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("record login fail: %w", err)

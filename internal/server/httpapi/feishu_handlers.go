@@ -54,36 +54,6 @@ func (s *Server) handleFeishuQRCancel(w http.ResponseWriter, r *http.Request) {
 // The channel switch is deliberately not consulted: trying a channel out
 // before switching it on is the point. Same for the event switches — the test
 // is its own event kind.
-// notifyKeysFor maps a delivery channel to the settings it depends on.
-func notifyKeysFor(channel string) []string {
-	switch channel {
-	case "telegram":
-		return []string{notify.KeyTelegramToken}
-	case "webhook":
-		return []string{notify.KeyWebhookURL}
-	case "feishu":
-		return []string{notify.KeyFeishuAppSecret, notify.KeyFeishuWebhookURL, notify.KeyFeishuWebhookSecret}
-	}
-	return nil
-}
-
-// secretUnreadable reports whether any of keys is stored-but-undecryptable.
-func (s *Server) secretUnreadable(keys []string) bool {
-	if s.UnreadableSecrets == nil {
-		return false
-	}
-	bad := map[string]bool{}
-	for _, k := range s.UnreadableSecrets() {
-		bad[k] = true
-	}
-	for _, k := range keys {
-		if bad[k] {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Channel string `json:"channel"`
@@ -132,6 +102,36 @@ func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit("notify_test_sent", req.Channel, s.Trust.RealIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// notifyKeysFor maps a delivery channel to the settings it depends on.
+func notifyKeysFor(channel string) []string {
+	switch channel {
+	case "telegram":
+		return []string{notify.KeyTelegramToken}
+	case "webhook":
+		return []string{notify.KeyWebhookURL}
+	case "feishu":
+		return []string{notify.KeyFeishuAppSecret, notify.KeyFeishuWebhookURL, notify.KeyFeishuWebhookSecret}
+	}
+	return nil
+}
+
+// secretUnreadable reports whether any of keys is stored-but-undecryptable.
+func (s *Server) secretUnreadable(keys []string) bool {
+	if s.UnreadableSecrets == nil {
+		return false
+	}
+	bad := map[string]bool{}
+	for _, k := range s.UnreadableSecrets() {
+		bad[k] = true
+	}
+	for _, k := range keys {
+		if bad[k] {
+			return true
+		}
+	}
+	return false
 }
 
 // handleFeishuClear unbinds one sub-channel: mode=app drops the QR/manual app

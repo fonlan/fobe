@@ -328,7 +328,7 @@ func logRequests(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// skip the noisy agent heartbeat path
 		if r.URL.Path != "/ws/agent" {
-			log.Debug("http", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+			log.Debug("http", "method", r.Method, "path", logPath(r.URL.Path), "remote", r.RemoteAddr)
 		}
 		rec := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rec, r)
