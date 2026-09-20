@@ -183,15 +183,35 @@ func (s *Store) DeleteAIProvider(id string) error {
 	return nil
 }
 
+// aiModelCols is the single column list every simple ai_models query shares
+// (same contract as nodeColumns); scanAIModel is its one scan target and also
+// decodes the csv-packed columns.
+const aiModelCols = `id, display_name, context_window, max_output_tokens,
+		       input_modalities, output_modalities, reasoning_levels, reasoning_off_style,
+		       overridden_fields, source, enabled, created_at, updated_at`
+
+func scanAIModel(rs rowScanner) (*AIModel, error) {
+	m := &AIModel{}
+	var in, out2, levels, overridden string
+	err := rs.Scan(&m.ID, &m.DisplayName, &m.ContextWindow, &m.MaxOutputTokens,
+		&in, &out2, &levels, &m.ReasoningOffStyle, &overridden, &m.Source, &m.Enabled, &m.CreatedAt, &m.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan ai model: %w", err)
+	}
+	m.InputModalities = csvSplit(in)
+	m.OutputModalities = csvSplit(out2)
+	m.ReasoningLevels = csvSplit(levels)
+	m.OverriddenFields = csvSplit(overridden)
+	return m, nil
+}
+
 // ListAIModels returns every model, enabled or not, ordered by display name for
 // a stable picker.
 func (s *Store) ListAIModels() ([]AIModel, error) {
-	rows, err := s.db.Query(
-		`SELECT id, display_name, context_window, max_output_tokens,
-		        input_modalities, output_modalities, reasoning_levels, reasoning_off_style,
-		        overridden_fields, source, enabled, created_at, updated_at
-		 FROM ai_models ORDER BY display_name, id`,
-	)
+	rows, err := s.db.Query(`SELECT ` + aiModelCols + ` FROM ai_models ORDER BY display_name, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list ai models: %w", err)
 	}
@@ -199,42 +219,18 @@ func (s *Store) ListAIModels() ([]AIModel, error) {
 
 	out := []AIModel{}
 	for rows.Next() {
-		var m AIModel
-		var in, out2, levels, overridden string
-		if err := rows.Scan(&m.ID, &m.DisplayName, &m.ContextWindow, &m.MaxOutputTokens,
-			&in, &out2, &levels, &m.ReasoningOffStyle, &overridden, &m.Source, &m.Enabled, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		m, err := scanAIModel(rows)
+		if err != nil {
 			return nil, err
 		}
-		m.InputModalities = csvSplit(in)
-		m.OutputModalities = csvSplit(out2)
-		m.ReasoningLevels = csvSplit(levels)
-		m.OverriddenFields = csvSplit(overridden)
-		out = append(out, m)
+		out = append(out, *m)
 	}
 	return out, rows.Err()
 }
 
 func (s *Store) GetAIModel(id string) (*AIModel, error) {
-	m := &AIModel{}
-	var in, out2, levels, overridden string
-	err := s.db.QueryRow(
-		`SELECT id, display_name, context_window, max_output_tokens,
-		        input_modalities, output_modalities, reasoning_levels, reasoning_off_style,
-		        overridden_fields, source, enabled, created_at, updated_at
-		 FROM ai_models WHERE id = ?`, id,
-	).Scan(&m.ID, &m.DisplayName, &m.ContextWindow, &m.MaxOutputTokens,
-		&in, &out2, &levels, &m.ReasoningOffStyle, &overridden, &m.Source, &m.Enabled, &m.CreatedAt, &m.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get ai model: %w", err)
-	}
-	m.InputModalities = csvSplit(in)
-	m.OutputModalities = csvSplit(out2)
-	m.ReasoningLevels = csvSplit(levels)
-	m.OverriddenFields = csvSplit(overridden)
-	return m, nil
+	return scanAIModel(s.db.QueryRow(
+		`SELECT `+aiModelCols+` FROM ai_models WHERE id = ?`, id))
 }
 
 // UpsertAIModel writes the row, preserving created_at on conflict.
@@ -324,17 +320,11 @@ func (s *Store) ListAIModelsForProvider(providerID string) ([]AIModel, error) {
 
 	out := []AIModel{}
 	for rows.Next() {
-		var m AIModel
-		var in, out2, levels, overridden string
-		if err := rows.Scan(&m.ID, &m.DisplayName, &m.ContextWindow, &m.MaxOutputTokens,
-			&in, &out2, &levels, &m.ReasoningOffStyle, &overridden, &m.Source, &m.Enabled, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		m, err := scanAIModel(rows)
+		if err != nil {
 			return nil, err
 		}
-		m.InputModalities = csvSplit(in)
-		m.OutputModalities = csvSplit(out2)
-		m.ReasoningLevels = csvSplit(levels)
-		m.OverriddenFields = csvSplit(overridden)
-		out = append(out, m)
+		out = append(out, *m)
 	}
 	return out, rows.Err()
 }

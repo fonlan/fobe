@@ -159,10 +159,75 @@ func isNotifySwitch(key string) bool {
 	return strings.HasPrefix(key, "notify.event.")
 }
 
+// validateSettingValue is the single source of truth for per-key setting
+// validation, shared by PUT /api/settings (answers 400 <code>) and the §17
+// import (drops invalid values): a hand-edited snapshot must not install
+// anything the API itself would have rejected. It returns the API error code
+// when the value is invalid, "" when acceptable.
+func validateSettingValue(key, value string) string {
+	if key == "server.public_url" {
+		if _, err := normalizePublicURL(value); err != nil {
+			return "invalid_public_url"
+		}
+	}
+	if key == "ui.theme" {
+		switch value {
+		case "light", "dark", "system":
+		default:
+			return "bad_theme"
+		}
+	}
+	// §5.5 switch. Anything truthy-but-unparsable would silently mean "on"
+	// (the default), so refuse it instead of pretending to have turned it off.
+	if key == agentupdate.SettingAutoUpdate && !validBoolSetting(value) {
+		return "bad_switch"
+	}
+	// §15 飞书 host selector; anything but the two known brands is refused.
+	if key == "notify.feishu_domain" && value != "feishu" && value != "lark" {
+		return "bad_feishu_domain"
+	}
+	// §15 text settings (2026-09-19 修订): only the two canonical language
+	// tags, and only a zone the image's tzdata can actually resolve — a
+	// silently swallowed "Mars/Olympus" would look like a working setting.
+	if key == notify.KeyLanguage && !notify.ValidLanguage(value) {
+		return "bad_notify_language"
+	}
+	if key == notify.KeyTimezone && !notify.ValidTimezone(value) {
+		return "bad_timezone"
+	}
+	// §15 实现修订 2026-09-20: a webhook URL is an outbound endpoint the
+	// server dials on the operator's behalf, so it is validated like one.
+	if (key == notify.KeyWebhookURL || key == notify.KeyFeishuWebhookURL) &&
+		value != "" && !validOutboundURL(value) {
+		return "bad_webhook_url"
+	}
+	// §15 switches: like the §5.5 switch, an unparsable truthy value would
+	// silently mean "on", so refuse anything that is not a known spelling.
+	if isNotifySwitch(key) && !validBoolSetting(value) {
+		return "bad_switch"
+	}
+	if key == "latency.interval_seconds" && !validLatencyInterval(value) {
+		return "bad_latency_interval"
+	}
+	// §10.2: the auto-name template travels verbatim into every client
+	// config the subscription hands out, so a typo'd placeholder is refused
+	// here rather than shipped; the switch follows the same rule as §5.5.
+	if key == SettingRelayNameFormat && !validRelayNameFormat(value) {
+		return "bad_relay_name_format"
+	}
+	if key == SettingRelayAutoInclude && !validBoolSetting(value) {
+		return "bad_switch"
+	}
+	// §14.1 policy values; validated by the same helper the §17 import uses.
+	if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {
+		return geoIPSettingErrCode(key)
+	}
+	return ""
+}
+
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	var req putSettingsReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	for key, value := range req.Settings {
@@ -170,73 +235,8 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "unknown_key")
 			return
 		}
-		if key == "server.public_url" {
-			if _, err := normalizePublicURL(value); err != nil {
-				writeErr(w, http.StatusBadRequest, "invalid_public_url")
-				return
-			}
-		}
-		if key == "ui.theme" {
-			switch value {
-			case "light", "dark", "system":
-			default:
-				writeErr(w, http.StatusBadRequest, "bad_theme")
-				return
-			}
-		}
-		// §5.5 switch. Anything truthy-but-unparsable would silently mean "on"
-		// (the default), so refuse it instead of pretending to have turned it off.
-		if key == agentupdate.SettingAutoUpdate && !validBoolSetting(value) {
-			writeErr(w, http.StatusBadRequest, "bad_switch")
-			return
-		}
-		// §15 飞书 host selector; anything but the two known brands is refused.
-		if key == "notify.feishu_domain" && value != "feishu" && value != "lark" {
-			writeErr(w, http.StatusBadRequest, "bad_feishu_domain")
-			return
-		}
-		// §15 text settings (2026-09-19 修订): only the two canonical language
-		// tags, and only a zone the image's tzdata can actually resolve — a
-		// silently swallowed "Mars/Olympus" would look like a working setting.
-		if key == notify.KeyLanguage && !notify.ValidLanguage(value) {
-			writeErr(w, http.StatusBadRequest, "bad_notify_language")
-			return
-		}
-		if key == notify.KeyTimezone && !notify.ValidTimezone(value) {
-			writeErr(w, http.StatusBadRequest, "bad_timezone")
-			return
-		}
-		// §15 实现修订 2026-09-20: a webhook URL is an outbound endpoint the
-		// server dials on the operator's behalf, so it is validated like one.
-		if (key == notify.KeyWebhookURL || key == notify.KeyFeishuWebhookURL) &&
-			value != "" && !validOutboundURL(value) {
-			writeErr(w, http.StatusBadRequest, "bad_webhook_url")
-			return
-		}
-		// §15 switches: like the §5.5 switch, an unparsable truthy value would
-		// silently mean "on", so refuse anything that is not a known spelling.
-		if isNotifySwitch(key) && !validBoolSetting(value) {
-			writeErr(w, http.StatusBadRequest, "bad_switch")
-			return
-		}
-		if key == "latency.interval_seconds" && !validLatencyInterval(value) {
-			writeErr(w, http.StatusBadRequest, "bad_latency_interval")
-			return
-		}
-		// §10.2: the auto-name template travels verbatim into every client
-		// config the subscription hands out, so a typo'd placeholder is refused
-		// here rather than shipped; the switch follows the same rule as §5.5.
-		if key == SettingRelayNameFormat && !validRelayNameFormat(value) {
-			writeErr(w, http.StatusBadRequest, "bad_relay_name_format")
-			return
-		}
-		if key == SettingRelayAutoInclude && !validBoolSetting(value) {
-			writeErr(w, http.StatusBadRequest, "bad_switch")
-			return
-		}
-		// §14.1 policy values; validated by the same helper the §17 import uses.
-		if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {
-			writeErr(w, http.StatusBadRequest, geoIPSettingErrCode(key))
+		if code := validateSettingValue(key, value); code != "" {
+			writeErr(w, http.StatusBadRequest, code)
 			return
 		}
 		stored := value

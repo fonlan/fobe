@@ -58,8 +58,7 @@ func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Channel string `json:"channel"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	var target notify.Notifier

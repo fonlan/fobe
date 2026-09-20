@@ -24,8 +24,7 @@ type createRegTokenReq struct {
 
 func (s *Server) handleCreateRegToken(w http.ResponseWriter, r *http.Request) {
 	var req createRegTokenReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
@@ -367,8 +366,7 @@ func (s *Server) handleListLatencyTargets(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleCreateLatencyTarget(w http.ResponseWriter, r *http.Request) {
 	var req latencyTargetReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if code := normalizeLatencyTarget(&req); code != "" {
@@ -399,8 +397,7 @@ func (s *Server) handleUpdateLatencyTarget(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req latencyTargetReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if code := normalizeLatencyTarget(&req); code != "" {
@@ -409,12 +406,7 @@ func (s *Server) handleUpdateLatencyTarget(w http.ResponseWriter, r *http.Reques
 	}
 	affected, _ := s.Store.NodeIDsForLatencyTarget(tid)
 	endpointChanged, err := s.Store.UpdateLatencyTarget(tid, req.Name, req.Kind, req.Host, req.Port)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	for _, nodeID := range affected {

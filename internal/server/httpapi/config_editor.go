@@ -270,11 +270,7 @@ func inboundViewOf(ib singbox.LocalInbound, n int) inboundView {
 // config.json (GET /api/nodes/{id}/singbox/config).
 func (s *Server) handleGetNodeSingboxConfig(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	inbounds, ok := s.liveInbounds(id)
@@ -379,16 +375,11 @@ type inboundEdit struct {
 // (PUT /api/nodes/{id}/singbox/config).
 func (s *Server) handlePutNodeSingboxConfig(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	var req configEditRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	local, err := s.Store.GetNodeSingboxLocal(id, s.Crypt)
@@ -971,11 +962,7 @@ func stringFieldOf(v any) string {
 // answers with a fresh state frame within a round trip.
 func (s *Server) handleNodeSingboxRefresh(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	cmdID, err := s.enqueueCommand(commandEnqueue{

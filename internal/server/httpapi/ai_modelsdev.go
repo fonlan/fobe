@@ -173,17 +173,11 @@ func (s *Server) handleMatchAIModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req aiMatchRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	provider, err := s.Store.GetAIProvider(strings.TrimSpace(req.ProviderID))
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 
@@ -320,17 +314,11 @@ type aiImportResult struct {
 func (s *Server) handleImportAIModels(w http.ResponseWriter, r *http.Request) {
 	providerID := r.PathValue("id")
 	provider, err := s.Store.GetAIProvider(providerID)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	var req aiImportRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 

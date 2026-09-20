@@ -168,8 +168,7 @@ func writeAIResolveErr(w http.ResponseWriter, err error) {
 // or an unreadable key would otherwise arrive as a confusing mid-stream event.
 func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 	var req aiChatRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	req.Message = strings.TrimSpace(req.Message)
@@ -183,11 +182,7 @@ func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.Store.GetNode(req.NodeID); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(req.NodeID); !writeStoreErr(w, err) {
 		return
 	}
 

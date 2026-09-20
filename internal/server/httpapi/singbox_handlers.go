@@ -102,11 +102,7 @@ func (s *Server) handleSingboxVersions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetNodeSingbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	sb, err := s.Store.GetNodeSingbox(id)
@@ -144,11 +140,7 @@ func (s *Server) handleGetNodeSingbox(w http.ResponseWriter, r *http.Request) {
 // the same port.
 func (s *Server) handleSingboxUninstall(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	sb, err := s.Store.GetNodeSingbox(id)
@@ -195,11 +187,7 @@ type singboxInstallReq struct {
 // means no command replay is needed.
 func (s *Server) handleSingboxInstall(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	var req singboxInstallReq
@@ -256,11 +244,7 @@ func (s *Server) handleSingboxInstall(w http.ResponseWriter, r *http.Request) {
 // queue (§7: offline-queued, TTL-limited) using the existing command kinds.
 func (s *Server) handleSingboxAction(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	kind := map[string]string{

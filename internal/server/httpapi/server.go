@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -486,6 +487,31 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func decodeJSON(r *http.Request, v any) error {
 	dec := json.NewDecoder(r.Body)
 	return dec.Decode(v)
+}
+
+// writeStoreErr maps a store error onto the API convention (§16): a missing row
+// is 404 not_found, any other failure is 500 internal. It returns true when err
+// is nil and the handler may proceed.
+func writeStoreErr(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not_found")
+	} else {
+		writeErr(w, http.StatusInternalServerError, "internal")
+	}
+	return false
+}
+
+// decodeReq decodes the JSON body into v, answering 400 bad_request otherwise.
+// It returns true when the caller may proceed.
+func decodeReq(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := decodeJSON(r, v); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return false
+	}
+	return true
 }
 
 // sessionIDKey carries the validated session id to handlers that need it: the

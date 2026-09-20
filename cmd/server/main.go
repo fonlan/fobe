@@ -452,45 +452,28 @@ func startSingboxCache(ctx context.Context, st *store.Store, log *slog.Logger, d
 	return mgr
 }
 
-// settingBool reads a boolean setting the way the panel writes it ("1"/"0",
-// "true"/"false"; absent = false).
-func settingBool(st *store.Store, key string) bool {
-	v, err := st.GetSetting(key)
-	if err != nil {
+// envDisabled reports whether a default-on env switch was explicitly turned
+// off ("0"/"false"/"off"/"no"); unset or anything else keeps the default on.
+func envDisabled(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "0", "false", "off", "no":
+		return true
+	default:
 		return false
 	}
-	v = strings.TrimSpace(v)
-	if b, err := strconv.ParseBool(v); err == nil {
-		return b
-	}
-	return v == "1"
 }
 
 // singboxAutoDownloadEnabled reports whether the startup download runs.
 // FOBE_SINGBOX_AUTO_DOWNLOAD=0 (or false/off/no) turns it off; anything else,
 // including unset, keeps the default on (design §9.2).
-func singboxAutoDownloadEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("FOBE_SINGBOX_AUTO_DOWNLOAD"))) {
-	case "0", "false", "off", "no":
-		return false
-	default:
-		return true
-	}
-}
+func singboxAutoDownloadEnabled() bool { return !envDisabled("FOBE_SINGBOX_AUTO_DOWNLOAD") }
 
 // geoipAutoUpdateEnabled reports whether automatic GeoIP database refreshes may
 // run (design §14.1). FOBE_GEOIP_AUTO_UPDATE=0 (or false/off/no) turns them
 // off, including the startup download of a missing database; the panel's
 // "update now" button and an upload still work. Anything else, including
 // unset, keeps the default on — the panel's own switch is the softer control.
-func geoipAutoUpdateEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("FOBE_GEOIP_AUTO_UPDATE"))) {
-	case "0", "false", "off", "no":
-		return false
-	default:
-		return true
-	}
-}
+func geoipAutoUpdateEnabled() bool { return !envDisabled("FOBE_GEOIP_AUTO_UPDATE") }
 
 // ensureAdminUser makes FOBE_ADMIN_PASSWORD the source of truth for the
 // admin password: on first boot it seeds the user (design §19.11); on every

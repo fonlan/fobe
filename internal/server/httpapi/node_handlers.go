@@ -215,12 +215,7 @@ func deref(p *int64) int64 {
 func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	n, err := s.Store.GetNode(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	view := s.buildNodeView(n)
@@ -320,17 +315,12 @@ type billingReq struct {
 
 func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 
 	var req updateNodeReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if req.Name != nil {
@@ -661,16 +651,11 @@ type primaryIPReq struct {
 // ReplaceNodeIPs restores it after every full agent report.
 func (s *Server) handleSetPrimaryIP(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	var req primaryIPReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	ip := strings.TrimSpace(req.IP)
@@ -713,11 +698,7 @@ type probeReq struct {
 // browser). Offline agents are a 409, not a queue — nothing is persisted.
 func (s *Server) handleNodeProbe(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	var req probeReq

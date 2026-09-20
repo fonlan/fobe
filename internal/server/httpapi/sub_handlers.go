@@ -175,8 +175,7 @@ type createSubscriptionReq struct {
 // and as Cryptor ciphertext so the panel can re-show the link at any time.
 func (s *Server) handleCreateSubscription(w http.ResponseWriter, r *http.Request) {
 	var req createSubscriptionReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
@@ -242,12 +241,7 @@ var errTokenUnrecoverable = errors.New("subscription token is not recoverable")
 func (s *Server) handleSubscriptionLink(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sub, err := s.Store.GetSubscription(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	token, err := s.subscriptionToken(sub)
@@ -265,12 +259,7 @@ func (s *Server) handleSubscriptionLink(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleUpdateSubscription(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sub, err := s.Store.GetSubscription(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	var req struct {
@@ -280,8 +269,7 @@ func (s *Server) handleUpdateSubscription(w http.ResponseWriter, r *http.Request
 		UAFilter   *string  `json:"ua_filter,omitempty"`
 		Format     *string  `json:"format,omitempty"` // '' → auto, else singbox/clash
 	}
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if req.Format != nil {
@@ -350,11 +338,7 @@ func (s *Server) handleUpdateSubscription(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleDeleteSubscription(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetSubscription(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetSubscription(id); !writeStoreErr(w, err) {
 		return
 	}
 	if err := s.Store.DeleteSubscription(id); err != nil {
@@ -390,16 +374,11 @@ type setSubNodesReq struct {
 
 func (s *Server) handleSetSubscriptionNodes(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetSubscription(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetSubscription(id); !writeStoreErr(w, err) {
 		return
 	}
 	var req setSubNodesReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if req.Entries == nil {
@@ -540,11 +519,7 @@ func (s *Server) handleSubscriptionEntries(w http.ResponseWriter, r *http.Reques
 // the new one stays copyable from the panel afterwards.
 func (s *Server) handleRotateSubscription(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetSubscription(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetSubscription(id); !writeStoreErr(w, err) {
 		return
 	}
 	token, err := security.RandomToken(24)
@@ -568,11 +543,7 @@ func (s *Server) handleRotateSubscription(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleSubscriptionAccess(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetSubscription(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetSubscription(id); !writeStoreErr(w, err) {
 		return
 	}
 	logs, err := s.Store.ListSubAccess(id, 200)
@@ -633,8 +604,7 @@ func (s *Server) validateTemplateReq(req *saveTemplateReq) (string, bool) {
 
 func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	var req saveTemplateReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if code, ok := s.validateTemplateReq(&req); !ok {
@@ -659,17 +629,11 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateTemplate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	t, err := s.Store.GetTemplate(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	var req saveTemplateReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if req.Name == "" && req.Format == "" && req.Content == "" {
@@ -691,11 +655,7 @@ func (s *Server) handleUpdateTemplate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetTemplate(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetTemplate(id); !writeStoreErr(w, err) {
 		return
 	}
 	if err := s.Store.DeleteTemplate(id); err != nil {

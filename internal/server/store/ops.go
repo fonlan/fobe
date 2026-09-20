@@ -77,10 +77,6 @@ type CommandMeta struct {
 	Risk        string
 }
 
-func (s *Store) CreateCommand(id, nodeID, kind, payload string, ttlSeconds int64) error {
-	return s.CreateCommandWithMeta(id, nodeID, kind, payload, ttlSeconds, CommandMeta{Actor: "panel"})
-}
-
 func (s *Store) CreateCommandWithMeta(id, nodeID, kind, payload string, ttlSeconds int64, meta CommandMeta) error {
 	_, err := s.db.Exec(
 		`INSERT INTO commands
@@ -91,6 +87,22 @@ func (s *Store) CreateCommandWithMeta(id, nodeID, kind, payload string, ttlSecon
 	return err
 }
 
+// commandCols is the single column list every commands query shares; scanCommand
+// is its one scan target.
+const commandCols = `id, node_id, kind, payload, status, created_at, sent_at, finished_at, result,
+		       ttl_seconds, actor, ai_session_id, reason, risk`
+
+func scanCommand(rs rowScanner) (*Command, error) {
+	c := &Command{}
+	err := rs.Scan(&c.ID, &c.NodeID, &c.Kind, &c.Payload, &c.Status, &c.CreatedAt,
+		&c.SentAt, &c.FinishedAt, &c.Result, &c.TTLSeconds, &c.Actor, &c.AISessionID,
+		&c.Reason, &c.Risk)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return c, err
+}
+
 // NextPendingCommand claims the oldest pending command for a node, marking it sent.
 func (s *Store) NextPendingCommand(nodeID string) (*Command, error) {
 	tx, err := s.db.Begin()
@@ -99,16 +111,8 @@ func (s *Store) NextPendingCommand(nodeID string) (*Command, error) {
 	}
 	defer tx.Rollback()
 
-	c := &Command{}
-	err = tx.QueryRow(
-		`SELECT id, node_id, kind, payload, status, created_at, sent_at, finished_at, result,
-			        ttl_seconds, actor, ai_session_id, reason, risk
-			 FROM commands WHERE node_id = ? AND status = 'pending' ORDER BY created_at LIMIT 1`, nodeID,
-	).Scan(&c.ID, &c.NodeID, &c.Kind, &c.Payload, &c.Status, &c.CreatedAt, &c.SentAt,
-		&c.FinishedAt, &c.Result, &c.TTLSeconds, &c.Actor, &c.AISessionID, &c.Reason, &c.Risk)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
+	c, err := scanCommand(tx.QueryRow(
+		`SELECT `+commandCols+` FROM commands WHERE node_id = ? AND status = 'pending' ORDER BY created_at LIMIT 1`, nodeID))
 	if err != nil {
 		return nil, err
 	}
@@ -151,9 +155,7 @@ func (s *Store) TimeoutStaleCommands() (int64, error) {
 
 func (s *Store) ListCommands(nodeID string, limit int) ([]Command, error) {
 	rows, err := s.db.Query(
-		`SELECT id, node_id, kind, payload, status, created_at, sent_at, finished_at, result,
-			        ttl_seconds, actor, ai_session_id, reason, risk
-			 FROM commands WHERE node_id = ? ORDER BY created_at DESC LIMIT ?`, nodeID, limit,
+		`SELECT `+commandCols+` FROM commands WHERE node_id = ? ORDER BY created_at DESC LIMIT ?`, nodeID, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -161,13 +163,11 @@ func (s *Store) ListCommands(nodeID string, limit int) ([]Command, error) {
 	defer rows.Close()
 	out := []Command{}
 	for rows.Next() {
-		var c Command
-		if err := rows.Scan(&c.ID, &c.NodeID, &c.Kind, &c.Payload, &c.Status, &c.CreatedAt,
-			&c.SentAt, &c.FinishedAt, &c.Result, &c.TTLSeconds, &c.Actor, &c.AISessionID,
-			&c.Reason, &c.Risk); err != nil {
+		c, err := scanCommand(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, c)
+		out = append(out, *c)
 	}
 	return out, rows.Err()
 }
@@ -227,15 +227,13 @@ func (s *Store) RecoverAlert(kind, nodeID string) error {
 	return err
 }
 
-// OpenAlert returns the newest unrecovered alert of kind+node; ErrNotFound
-// when none is open. Lets jobs dedupe on their own stage (e.g. billing days).
-func (s *Store) OpenAlert(kind, nodeID string) (*Alert, error) {
+// alertCols is the single column list every alerts query shares; scanAlert is
+// its one scan target.
+const alertCols = `id, kind, node_id, payload, created_at, delivered_at, recovered_at`
+
+func scanAlert(rs rowScanner) (*Alert, error) {
 	a := &Alert{}
-	err := s.db.QueryRow(
-		`SELECT id, kind, node_id, payload, created_at, delivered_at, recovered_at
-		 FROM alerts WHERE kind = ? AND node_id = ? AND recovered_at IS NULL
-		 ORDER BY id DESC LIMIT 1`, kind, nodeID,
-	).Scan(&a.ID, &a.Kind, &a.NodeID, &a.Payload, &a.CreatedAt, &a.DeliveredAt, &a.RecoveredAt)
+	err := rs.Scan(&a.ID, &a.Kind, &a.NodeID, &a.Payload, &a.CreatedAt, &a.DeliveredAt, &a.RecoveredAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -245,41 +243,35 @@ func (s *Store) OpenAlert(kind, nodeID string) (*Alert, error) {
 	return a, nil
 }
 
+// OpenAlert returns the newest unrecovered alert of kind+node; ErrNotFound
+// when none is open. Lets jobs dedupe on their own stage (e.g. billing days).
+func (s *Store) OpenAlert(kind, nodeID string) (*Alert, error) {
+	return scanAlert(s.db.QueryRow(
+		`SELECT `+alertCols+` FROM alerts WHERE kind = ? AND node_id = ? AND recovered_at IS NULL
+		 ORDER BY id DESC LIMIT 1`, kind, nodeID))
+}
+
 func (s *Store) ListAlerts(limit int) ([]Alert, error) {
-	rows, err := s.db.Query(
-		`SELECT id, kind, node_id, payload, created_at, delivered_at, recovered_at
-		 FROM alerts ORDER BY id DESC LIMIT ?`, limit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Alert{}
-	for rows.Next() {
-		var a Alert
-		if err := rows.Scan(&a.ID, &a.Kind, &a.NodeID, &a.Payload, &a.CreatedAt, &a.DeliveredAt, &a.RecoveredAt); err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
+	return s.listAlerts(`SELECT `+alertCols+` FROM alerts ORDER BY id DESC LIMIT ?`, limit)
 }
 
 func (s *Store) UndeliveredAlerts() ([]Alert, error) {
-	rows, err := s.db.Query(
-		`SELECT id, kind, node_id, payload, created_at, delivered_at, recovered_at
-		 FROM alerts WHERE delivered_at IS NULL ORDER BY id`)
+	return s.listAlerts(`SELECT ` + alertCols + ` FROM alerts WHERE delivered_at IS NULL ORDER BY id`)
+}
+
+func (s *Store) listAlerts(query string, args ...any) ([]Alert, error) {
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []Alert{}
 	for rows.Next() {
-		var a Alert
-		if err := rows.Scan(&a.ID, &a.Kind, &a.NodeID, &a.Payload, &a.CreatedAt, &a.DeliveredAt, &a.RecoveredAt); err != nil {
+		a, err := scanAlert(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, a)
+		out = append(out, *a)
 	}
 	return out, rows.Err()
 }
@@ -980,15 +972,6 @@ func (s *Store) CreateSubscription(id, name, tokenHash, tokenEnc string) error {
 	return err
 }
 
-func (s *Store) GetSubscriptionByTokenHash(tokenHash string) (id, name string, enabled bool, err error) {
-	err = s.db.QueryRow(`SELECT id, name, enabled FROM subscriptions WHERE token_hash = ?`, tokenHash).
-		Scan(&id, &name, &enabled)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", false, ErrNotFound
-	}
-	return
-}
-
 // SetSubscriptionNodes is the pre-§10.2 binding API (node ids only). It now
 // writes through subscription_entries — the single source of truth — and only
 // owns the direct half, so relay entries bound by the reconciler survive a
@@ -1165,36 +1148,37 @@ type Template struct {
 	UpdatedAt int64
 }
 
+// templateCols is the single column list every templates query shares.
+const templateCols = `id, name, format, content, created_at, updated_at`
+
+func scanTemplate(rs rowScanner) (*Template, error) {
+	t := &Template{}
+	err := rs.Scan(&t.ID, &t.Name, &t.Format, &t.Content, &t.CreatedAt, &t.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return t, err
+}
+
 func (s *Store) ListTemplates() ([]Template, error) {
-	rows, err := s.db.Query(
-		`SELECT id, name, format, content, created_at, updated_at FROM templates ORDER BY created_at`)
+	rows, err := s.db.Query(`SELECT ` + templateCols + ` FROM templates ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []Template{}
 	for rows.Next() {
-		var t Template
-		if err := rows.Scan(&t.ID, &t.Name, &t.Format, &t.Content, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		t, err := scanTemplate(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, t)
+		out = append(out, *t)
 	}
 	return out, rows.Err()
 }
 
 func (s *Store) GetTemplate(id string) (*Template, error) {
-	t := &Template{}
-	err := s.db.QueryRow(
-		`SELECT id, name, format, content, created_at, updated_at FROM templates WHERE id = ?`, id,
-	).Scan(&t.ID, &t.Name, &t.Format, &t.Content, &t.CreatedAt, &t.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return t, nil
+	return scanTemplate(s.db.QueryRow(`SELECT `+templateCols+` FROM templates WHERE id = ?`, id))
 }
 
 func (s *Store) InsertTemplate(t *Template) error {

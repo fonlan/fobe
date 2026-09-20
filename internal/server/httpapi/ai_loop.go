@@ -583,17 +583,11 @@ type aiContinueRequest struct {
 // the paused one except for the tool result it now carries.
 func (s *Server) handleAIChatContinue(w http.ResponseWriter, r *http.Request) {
 	var req aiContinueRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	action, err := s.Store.GetAIPendingAction(req.ActionID)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	if action.Status != "pending" {
@@ -787,12 +781,7 @@ type aiSessionMessageView struct {
 func (s *Server) handleGetAISession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	session, err := s.Store.GetAISession(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	messages, err := s.Store.ListAIMessages(id, aiLoopHistoryLimit)

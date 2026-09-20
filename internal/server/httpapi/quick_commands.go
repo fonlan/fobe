@@ -5,7 +5,6 @@
 package httpapi
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -69,8 +68,7 @@ func (s *Server) handleListQuickCommands(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleCreateQuickCommand(w http.ResponseWriter, r *http.Request) {
 	var req quickCommandReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if code := normalizeQuickCommand(&req); code != "" {
@@ -101,20 +99,14 @@ func (s *Server) handleUpdateQuickCommand(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req quickCommandReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if code := normalizeQuickCommand(&req); code != "" {
 		writeErr(w, http.StatusBadRequest, code)
 		return
 	}
-	if err := s.Store.UpdateQuickCommand(id, req.Name, req.Command); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeErr(w, http.StatusNotFound, "not_found")
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if err := s.Store.UpdateQuickCommand(id, req.Name, req.Command); !writeStoreErr(w, err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -126,12 +118,7 @@ func (s *Server) handleDeleteQuickCommand(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "bad_request")
 		return
 	}
-	if err := s.Store.DeleteQuickCommand(id); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeErr(w, http.StatusNotFound, "not_found")
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if err := s.Store.DeleteQuickCommand(id); !writeStoreErr(w, err) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -143,8 +130,7 @@ type quickCommandOrderReq struct {
 
 func (s *Server) handleReorderQuickCommands(w http.ResponseWriter, r *http.Request) {
 	var req quickCommandOrderReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if err := s.Store.ReorderQuickCommands(req.IDs); err != nil {

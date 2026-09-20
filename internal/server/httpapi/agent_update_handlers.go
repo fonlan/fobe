@@ -32,11 +32,7 @@ func (s *Server) handleAgentUpdateStatus(w http.ResponseWriter, r *http.Request)
 // change) and nudge an online agent so it does not wait for its next handshake.
 func (s *Server) handleAgentUpdateRetry(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	if s.AgentUpdate == nil {
@@ -75,11 +71,7 @@ func (s *Server) handleAgentUpdateRetry(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleAgentReinstallCommand(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	n, err := s.Store.GetNode(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	baseURL, err := s.publicBaseURL(r)

@@ -133,11 +133,7 @@ func validateForwardReq(r forwardRuleReq) string {
 // block on a probe (offline probes answer instantly from here).
 func (s *Server) handleListNodeForwards(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return
 	}
 	reply, err := s.forwardsReply(id)
@@ -169,8 +165,7 @@ func (s *Server) handleAddNodeForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req forwardAddReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if code := validateForwardReq(req.Rule); code != "" {
@@ -190,8 +185,7 @@ func (s *Server) handleUpdateNodeForward(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req forwardUpdateReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if code := validateForwardReq(req.Rule); code != "" {
@@ -211,8 +205,7 @@ func (s *Server) handleDeleteNodeForward(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req forwardDeleteReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	rule := req.Rule.toProtocol()
@@ -223,11 +216,7 @@ func (s *Server) handleDeleteNodeForward(w http.ResponseWriter, r *http.Request)
 // forwardsNode resolves {id} and rejects unknown nodes.
 func (s *Server) forwardsNode(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetNode(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return "", false
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetNode(id); !writeStoreErr(w, err) {
 		return "", false
 	}
 	return id, true

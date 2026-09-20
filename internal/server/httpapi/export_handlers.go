@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/fonlan/fobe/internal/server/notify"
 	"github.com/fonlan/fobe/internal/server/security"
 	"github.com/fonlan/fobe/internal/server/store"
 )
@@ -386,8 +385,7 @@ type importStats struct {
 // (idempotent by machine_id / name; the counts are returned and audited).
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	var ef exportFile
-	if err := decodeJSON(r, &ef); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &ef) {
 		return
 	}
 	if ef.Version != exportFormatVersion {
@@ -914,23 +912,10 @@ func (s *Server) importSettings(settings map[string]string, stats *importStats) 
 		if !allowedKeys[key] || sensitiveKeys[key] {
 			continue
 		}
-		if key == "server.public_url" {
-			if _, err := normalizePublicURL(value); err != nil {
-				continue
-			}
-		}
-		// A hand-edited snapshot must not install a §14.1 policy the API would
-		// have rejected (a nonsense threshold or a non-URL source).
-		if geoIPSettingKey(key) && !validGeoIPSetting(key, value) {
-			continue
-		}
-		// Same rule for the §15 text settings (2026-09-19 修订): an unknown
-		// language tag or a zone this image cannot resolve is dropped rather
-		// than stored and silently ignored at delivery time.
-		if key == notify.KeyLanguage && !notify.ValidLanguage(value) {
-			continue
-		}
-		if key == notify.KeyTimezone && !notify.ValidTimezone(value) {
+		// Same bar as the API (validateSettingValue): a hand-edited snapshot
+		// must not install anything PUT /api/settings would have rejected —
+		// a nonsense policy, an unresolvable zone, a non-URL webhook source.
+		if validateSettingValue(key, value) != "" {
 			continue
 		}
 		if err := s.Store.SetSetting(key, value, false); err != nil {

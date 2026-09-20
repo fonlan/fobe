@@ -508,8 +508,7 @@ func (s *Server) applyProviderRequest(req aiProviderRequest, existing *store.AIP
 
 func (s *Server) handleCreateAIProvider(w http.ResponseWriter, r *http.Request) {
 	var req aiProviderRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	row, err := s.applyProviderRequest(req, nil)
@@ -539,17 +538,11 @@ func (s *Server) handleCreateAIProvider(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleUpdateAIProvider(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	existing, err := s.Store.GetAIProvider(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	var req aiProviderRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	row, err := s.applyProviderRequest(req, existing)
@@ -579,12 +572,7 @@ func (s *Server) handleUpdateAIProvider(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleDeleteAIProvider(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	provider, err := s.Store.GetAIProvider(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if !writeStoreErr(w, err) {
 		return
 	}
 	if err := s.Store.DeleteAIProvider(id); err != nil {
@@ -611,8 +599,7 @@ func (s *Server) clearAIDefaultIfProvider(providerID string) {
 
 func (s *Server) handleSaveAIModel(w http.ResponseWriter, r *http.Request) {
 	var req aiModelRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	req.ID = strings.TrimSpace(req.ID)
@@ -694,11 +681,7 @@ var aiReasoningOffStyles = map[string]bool{
 
 func (s *Server) handleDeleteAIModel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if _, err := s.Store.GetAIModel(id); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetAIModel(id); !writeStoreErr(w, err) {
 		return
 	}
 	if err := s.Store.DeleteAIModel(id); err != nil {
@@ -723,16 +706,11 @@ type aiLinkRequest struct {
 // operator cannot see.
 func (s *Server) handleLinkAIProviderModels(w http.ResponseWriter, r *http.Request) {
 	providerID := r.PathValue("id")
-	if _, err := s.Store.GetAIProvider(providerID); errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "not_found")
-		return
-	} else if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal")
+	if _, err := s.Store.GetAIProvider(providerID); !writeStoreErr(w, err) {
 		return
 	}
 	var req aiLinkRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	for _, modelID := range req.ModelIDs {
@@ -778,8 +756,7 @@ type aiDefaultsRequest struct {
 // not a property of the pair.
 func (s *Server) handleSetAIDefaults(w http.ResponseWriter, r *http.Request) {
 	var req aiDefaultsRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	req.ProviderID, req.ModelID = strings.TrimSpace(req.ProviderID), strings.TrimSpace(req.ModelID)

@@ -203,8 +203,7 @@ type singboxUpdateReq struct {
 // distribution to the background job, which returns its id immediately.
 func (s *Server) handleSingboxUpdate(w http.ResponseWriter, r *http.Request) {
 	var req singboxUpdateReq
-	if err := decodeJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request")
+	if !decodeReq(w, r, &req) {
 		return
 	}
 	if !req.Confirm {
