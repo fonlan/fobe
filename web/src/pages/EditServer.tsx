@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
@@ -40,6 +40,8 @@ export default function EditServer() {
   const [data, setData] = useState<NodeDetailData | null>(null);
   const [targets, setTargets] = useState<LatencyTarget[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [formSavedMsg, setFormSavedMsg] = useState<string | null>(null);
+  const savedTimer = useRef(0);
 
   const load = useCallback(async () => {
     try {
@@ -51,6 +53,16 @@ export default function EditServer() {
       setErr(apiErrorMessage(e, t));
     }
   }, [id, t]);
+
+  // NodeSettingsForm 的 key 绑节点数据：保存成功触发的 load 会改变 key、重挂载
+  // 表单，把组件内的成功消息连同输入状态一起清掉（失败路径不触发 load，红字不
+  // 受影响）。所以「已保存」由父级持有并显示，跨重挂载存活。
+  const onNodeFormSaved = () => {
+    setFormSavedMsg(t('server_edit_saved'));
+    window.clearTimeout(savedTimer.current);
+    savedTimer.current = window.setTimeout(() => setFormSavedMsg(null), 3000);
+    void load();
+  };
 
   useEffect(() => {
     void load();
@@ -86,8 +98,11 @@ export default function EditServer() {
       </div>
 
       <section className="card">
-        <h3>{t('sec_edit')}</h3>
-        <NodeSettingsForm key={JSON.stringify([data.node, data.network, data.traffic_cycle, data.interfaces])} data={data} onSaved={() => void load()} />
+        <h3>
+          {t('sec_edit')}
+          {formSavedMsg && <span className="form-ok"> · {formSavedMsg}</span>}
+        </h3>
+        <NodeSettingsForm key={JSON.stringify([data.node, data.network, data.traffic_cycle, data.interfaces])} data={data} onSaved={onNodeFormSaved} />
       </section>
 
       <section className="card">
@@ -367,7 +382,6 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
       // untouched → leave the flag alone (an absent field keeps auto/pin as is)
       if (countryTouched) body.country_code = country.trim().toUpperCase();
       await api.updateNode(node.id, body);
-      setMsg(t('server_edit_saved'));
       onSaved();
     });
   };
