@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
+import { useAsyncAction } from '../components/useAsyncAction';
 import { useI18n } from '../i18n';
 import {
   copyText,
@@ -130,6 +131,7 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const run = useAsyncAction(setBusy, setErr, setMsg);
 
   const behind = node.agent_target_version !== '' && node.agent_target_version !== node.agent_version;
   const stateKey = node.agent_update_state ? `agent_state_${node.agent_update_state}` : '';
@@ -140,18 +142,11 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
 
   const retry = async () => {
     if (busy) return;
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await run(async () => {
       const r = await api.retryAgentUpdate(node.id);
       setMsg(t('agent_update_retry_done') + (r.pushed ? '' : ' · ' + t('offline')));
       onChanged();
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const reinstall = async () => {
@@ -159,16 +154,14 @@ function AgentUpdatePanel({ node, onChanged }: { node: NodeDetailData['node']; o
     // Minting this token is a credential operation: running the command on the
     // probe rebinds it and invalidates whatever it had before.
     if (!window.confirm(t('agent_reinstall_confirm'))) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      const r = await api.agentReinstallCommand(node.id);
-      setCmd(r.install_command);
-    } catch (e) {
-      setErr(t('agent_reinstall_failed') + ' · ' + apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    await run(
+      async () => {
+        const r = await api.agentReinstallCommand(node.id);
+        setCmd(r.install_command);
+      },
+      null,
+      (e) => setErr(t('agent_reinstall_failed') + ' · ' + apiErrorMessage(e, t)),
+    );
   };
 
   const copy = async () => {
@@ -318,6 +311,7 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const run = useAsyncAction(setBusy, setErr, setMsg);
 
   // 「已续费」（design §15 实现修订 2026-09-17）：按当前周期把下次到期日顺延。
   // 滚动始终以原到期日为基准整周期推进（不在上一步的结果上累加），与流量周期
@@ -348,11 +342,8 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (busy) return;
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    const quotaBytes = quotaGb.trim() === '' ? null : Math.round(parseFloat(quotaGb) * 2 ** 30);
-    try {
+    await run(async () => {
+      const quotaBytes = quotaGb.trim() === '' ? null : Math.round(parseFloat(quotaGb) * 2 ** 30);
       const body: UpdateNodeBody = {
         name,
         sub_name: subName.trim(),
@@ -378,11 +369,7 @@ function NodeSettingsForm({ data, onSaved }: { data: NodeDetailData; onSaved: ()
       await api.updateNode(node.id, body);
       setMsg(t('server_edit_saved'));
       onSaved();
-    } catch (ex) {
-      setErr(apiErrorMessage(ex, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (
@@ -547,6 +534,7 @@ function LatencyTargetsForm({
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const run = useAsyncAction(setBusy, setErr, setMsg);
 
   const toggle = (tid: number) => {
     setSelected((prev) => (prev.includes(tid) ? prev.filter((x) => x !== tid) : [...prev, tid]));
@@ -555,18 +543,11 @@ function LatencyTargetsForm({
 
   const submit = async () => {
     if (busy) return;
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await run(async () => {
       await api.updateNode(data.node.id, { latency_target_ids: selected });
       setMsg(t('server_edit_saved'));
       onSaved();
-    } catch (ex) {
-      setErr(apiErrorMessage(ex, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   if (allTargets.length === 0) {
@@ -604,19 +585,14 @@ function IPList({ data, onChanged }: { data: NodeDetailData; onChanged: () => vo
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const run = useAsyncAction(setBusy, setErr);
 
   const setPrimaryIP = async (ip: string) => {
     if (busy) return;
-    setBusy(true);
-    setErr(null);
-    try {
+    await run(async () => {
       await api.setNodePrimaryIP(data.node.id, ip);
       onChanged();
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   if (data.ips.length === 0) return <div className="hint">{t('unknown')}</div>;
@@ -782,22 +758,16 @@ function SingboxCard({ nodeId, onlineNow, onChanged }: { nodeId: string; onlineN
     return () => window.clearInterval(h);
   }, [watchUntil, onlineNow, load]);
 
+  const action = useAsyncAction(setBusy, setErr, setMsg);
   const run = async (fn: () => Promise<unknown>, okMsg: string) => {
     if (busy) return;
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await action(async () => {
       await fn();
       setMsg(okMsg);
       setWatchUntil(Date.now() + 60000);
       await load();
       onChanged();
-    } catch (ex) {
-      setErr(apiErrorMessage(ex, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (
@@ -1271,12 +1241,11 @@ function ForwardsCard({
     setErr(null);
   };
 
+  const action = useAsyncAction(setBusy, setErr, setMsg);
+
   const apply = async (fn: () => Promise<ForwardsStatus>, okMsg: string) => {
     if (busy) return;
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await action(async () => {
       const st = await fn();
       setStatus(st);
       if (st.queued) {
@@ -1286,19 +1255,12 @@ function ForwardsCard({
         setMsg(okMsg);
       }
       resetForm();
-    } catch (ex) {
-      setErr(apiErrorMessage(ex, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const refresh = async () => {
     if (busy) return;
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await action(async () => {
       const st = await api.nodeForwards(nodeId, true);
       setStatus(st);
       if (st.queued) {
@@ -1307,11 +1269,7 @@ function ForwardsCard({
       } else {
         setMsg(t('fw_refreshed'));
       }
-    } catch (ex) {
-      setErr(apiErrorMessage(ex, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   // nft string literals have no escapes: a quote in the comment is not a

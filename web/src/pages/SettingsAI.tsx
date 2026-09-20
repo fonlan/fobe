@@ -3,6 +3,7 @@ import * as api from '../api';
 import { ApiError, apiErrorMessage } from '../api';
 import Modal from '../components/Modal';
 import { SaveRow, Toggle } from '../components/SettingsForm';
+import { useAsyncAction } from '../components/useAsyncAction';
 import { DownloadIcon, PencilIcon, RefreshIcon, TrashIcon } from '../components/Icons';
 import { useI18n, type TFn } from '../i18n';
 import { fmtTime } from '../format';
@@ -145,6 +146,8 @@ export default function SettingsAI() {
   const [busy, setBusy] = useState(false);
   const [rowBusy, setRowBusy] = useState<string | null>(null);
   const [mdBusy, setMdBusy] = useState(false);
+  const run = useAsyncAction(setBusy, setErr, setMsg);
+  const runMd = useAsyncAction(setMdBusy, setErr, setMsg);
   // Modal targets: null = closed, 'new' = creating.
   const [providerEdit, setProviderEdit] = useState<AIProvider | 'new' | null>(null);
   const [fetchFor, setFetchFor] = useState<AIProvider | null>(null);
@@ -185,29 +188,18 @@ export default function SettingsAI() {
 
   const saveSettings = async (payload: Record<string, string>) => {
     if (busy || Object.keys(payload).length === 0) return;
-    setBusy(true);
-    try {
+    await run(async () => {
       await api.putSettings(payload);
       await load();
       flash(t('settings_saved'));
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const refreshModelsDev = async () => {
-    setMdBusy(true);
-    setErr(null);
-    try {
+    await runMd(async () => {
       await api.refreshModelsDev();
       await reload(t('ai_modelsdev_refreshed'));
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setMdBusy(false);
-    }
+    });
   };
 
   const toggleProvider = async (p: AIProvider, on: boolean) => {
@@ -597,6 +589,7 @@ function ProviderEditor({
   const [enabled, setEnabled] = useState(provider?.enabled ?? true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const run = useAsyncAction(setBusy, setErr);
 
   // Sorted so the dropdown does not reshuffle between renders (the server
   // emits the slugs in map order).
@@ -616,29 +609,23 @@ function ProviderEditor({
 
   const submit = async () => {
     if (!canSave) return;
-    setBusy(true);
-    setErr(null);
-    const body: AIProviderInput = {
-      name: name.trim(),
-      protocol,
-      base_url: baseURL.trim(),
-      models_dev_slug: slug,
-      enabled,
-    };
-    // Omitted = keep whatever is stored; "" = clear. Never both.
-    if (clearKey) body.api_key = '';
-    else if (apiKey.trim() !== '') body.api_key = apiKey.trim();
-    if (clearHeaders) body.extra_headers = '';
-    else if (headers.trim() !== '') body.extra_headers = headers.trim();
-    try {
+    await run(async () => {
+      const body: AIProviderInput = {
+        name: name.trim(),
+        protocol,
+        base_url: baseURL.trim(),
+        models_dev_slug: slug,
+        enabled,
+      };
+      // Omitted = keep whatever is stored; "" = clear. Never both.
+      if (clearKey) body.api_key = '';
+      else if (apiKey.trim() !== '') body.api_key = apiKey.trim();
+      if (clearHeaders) body.extra_headers = '';
+      else if (headers.trim() !== '') body.extra_headers = headers.trim();
       if (isNew) await api.createAIProvider(body);
       else if (provider) await api.updateAIProvider(provider.id, body);
       await onSaved(isNew ? t('ai_provider_created') : t('ai_provider_saved'));
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (
@@ -791,6 +778,7 @@ function FetchModelsModal({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [result, setResult] = useState<AIModelImportResult | null>(null);
+  const run = useAsyncAction(setBusy, setErr);
 
   useEffect(() => {
     let alive = true;
@@ -836,18 +824,12 @@ function FetchModelsModal({
 
   const doImport = async () => {
     if (selected.length === 0 || busy) return;
-    setBusy(true);
-    setErr(null);
-    try {
+    await run(async () => {
       const r = await api.importAIProviderModels(provider.id, selected);
       setResult(r);
       setPicked({});
       await onSaved(t('ai_import_added', { n: r.added.length }));
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (
@@ -987,6 +969,7 @@ function ModelEditor({
   const [matchProvider, setMatchProvider] = useState(model?.provider_ids[0] ?? '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const run = useAsyncAction(setBusy, setErr);
 
   const modelID = (model?.id ?? id).trim();
 
@@ -1050,16 +1033,11 @@ function ModelEditor({
     setErr(null);
     const body = collect([...frozen, ...changedFields()]);
     if (!body) return;
-    setBusy(true);
-    try {
+    await run(async () => {
       await api.saveAIModel(body);
       await syncLinks();
       await onSaved(t('ai_model_saved'));
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   /**
@@ -1083,8 +1061,7 @@ function ModelEditor({
       setErr(t('ai_match_no_provider'));
       return;
     }
-    setBusy(true);
-    try {
+    await run(async () => {
       const r = await api.matchAIModels(matchProvider, [modelID]);
       // The match has no opinion about links, but the provider it matched
       // against is the one the operator just chose for this model; leaving it
@@ -1105,11 +1082,7 @@ function ModelEditor({
         parts.push(t('ai_import_frozen', { n: r.frozen.length, fields: r.frozen.join(', ') }));
       }
       await onSaved(parts.join(' · '));
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   /**
@@ -1132,16 +1105,11 @@ function ModelEditor({
     }
     const body = collect([...frozen, ...changedFields()].filter((f) => f !== field));
     if (!body) return;
-    setBusy(true);
-    try {
+    await run(async () => {
       await api.saveAIModel(body);
       await api.matchAIModels(matchProvider, [model.id]);
       await onSaved(t('ai_restore_done', { field: fieldLabel(t, field) }));
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const modalityOptions = (current: string[]) => uniq([...MODALITIES, ...current]);
@@ -1368,6 +1336,12 @@ function DefaultCard({
   const [modelID, setModelID] = useState(catalog.default_model_id || '');
   const [reasoning, setReasoning] = useState(catalog.default_reasoning || '');
   const [busy, setBusy] = useState(false);
+  // onError reports failures upward; the parent owns that state, so the
+  // runner's start-of-action clear is filtered out (null never propagates).
+  const reportErr = (v: string | null) => {
+    if (v !== null) onError(v);
+  };
+  const run = useAsyncAction(setBusy, reportErr);
 
   // Follow the server's stored values whenever they change (save, import, a
   // deleted provider). Deps are the ids themselves, so a local selection that
@@ -1408,32 +1382,22 @@ function DefaultCard({
       onError(t('ai_default_pair_required'));
       return;
     }
-    setBusy(true);
-    try {
+    await run(async () => {
       await api.setAIDefaults(providerID, modelID, effectiveReasoning);
       await onChanged(t('ai_default_saved'));
-    } catch (e) {
-      onError(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const clear = async () => {
     if (busy) return;
     if (!window.confirm(t('ai_default_clear_confirm'))) return;
-    setBusy(true);
-    try {
+    await run(async () => {
       // Everything the card configures travels together: "clear the default"
       // resets the pair AND the thinking level, not a half state the operator
       // has to hunt down field by field.
       await api.setAIDefaults('', '', '');
       await onChanged(t('ai_default_cleared'));
-    } catch (e) {
-      onError(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (

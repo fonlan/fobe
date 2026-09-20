@@ -8,6 +8,7 @@ import { SaveRow, useField } from '../components/SettingsForm';
 import { DownloadIcon, PublishIcon, RefreshIcon, RetryIcon, TrashIcon } from '../components/Icons';
 import { useI18n, type TFn } from '../i18n';
 import { useTheme, type ThemeMode } from '../theme';
+import { useAsyncAction } from '../components/useAsyncAction';
 import { fmtBytes, fmtRate, fmtTime } from '../format';
 import type {
   AgentUpdateStatus,
@@ -100,6 +101,7 @@ export default function Settings() {
   const [err, setErr] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const runSave = useAsyncAction(setBusy, setErr, setSavedMsg);
 
   const load = useCallback(async () => {
     try {
@@ -148,18 +150,12 @@ export default function Settings() {
       return;
     }
     if (Object.keys(payload).length === 0) return;
-    setBusy(true);
-    setSavedMsg(null);
-    try {
+    await runSave(async () => {
       await api.putSettings(payload);
       await load();
       setSavedMsg(t('settings_saved'));
       window.setTimeout(() => setSavedMsg(null), 3000);
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const field = useField({ settings, draft, setDraft });
@@ -406,6 +402,10 @@ function SingboxCacheCard() {
   const [impact, setImpact] = useState<SingboxImpact | null>(null);
   const [impactBusy, setImpactBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const run = useAsyncAction(setBusy, setErr, setMsg);
+  const runRel = useAsyncAction(setRelBusy, setErr, setMsg);
+  const runImpact = useAsyncAction(setImpactBusy, setErr, setMsg);
+  const runSubmit = useAsyncAction(setSubmitting, setErr, setMsg);
 
   const load = useCallback(async () => {
     try {
@@ -431,16 +431,11 @@ function SingboxCacheCard() {
    */
   const loadReleases = useCallback(
     async (refresh = false) => {
-      setRelBusy(true);
-      try {
+      await runRel(async () => {
         setReleases(await api.singboxReleases(refresh));
-      } catch (e) {
-        setErr(apiErrorMessage(e, t));
-      } finally {
-        setRelBusy(false);
-      }
+      });
     },
-    [t],
+    [runRel],
   );
 
   // Live progress: the server pushes a full job snapshot for every node it
@@ -504,26 +499,16 @@ function SingboxCacheCard() {
   }, [jobState, download, load]);
 
   const retry = async () => {
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await run(async () => {
       await api.singboxRetryCache();
       setMsg(t('sb_cache_retry_queued'));
       await load();
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const startDownload = async (version: string) => {
     if (!version) return;
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await run(async () => {
       const r = await api.downloadSingboxVersion(version);
       if (r.cached) {
         setMsg(t('sb_cache_download_cached', { version: r.version }));
@@ -533,11 +518,7 @@ function SingboxCacheCard() {
       }
       setPick('');
       await load();
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const delVersion = async (v: SingboxCacheVersion) => {
@@ -546,52 +527,38 @@ function SingboxCacheCard() {
       ? t('sb_cache_delete_refs_confirm', { version: v.version, n: v.refs })
       : t('sb_cache_delete_confirm', { version: v.version, size: fmtBytes(v.size) });
     if (!window.confirm(question)) return;
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await run(async () => {
       await api.deleteSingboxVersion(v.version, force);
       setMsg(t('sb_cache_deleted', { version: v.version }));
       await load();
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   /** Row action: confirm the blast radius, then distribute one version. */
   const checkImpact = async (version: string) => {
     if (impactBusy || downloadActive) return;
-    setImpactBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await runImpact(async () => {
       setImpact(await api.singboxUpdateImpact(version));
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setImpactBusy(false);
-    }
+    });
   };
 
   const confirmUpdate = async () => {
     if (!impact || submitting || downloadActive) return;
-    setSubmitting(true);
-    setErr(null);
-    try {
-      const r = await api.singboxUpdate({ version: impact.target_version, confirm: true });
-      setJob(r.job);
-      setImpact(null);
-      setMsg(t('sb_update_submitted'));
-      await load();
-    } catch (e) {
-      // A running job is not an error to hide: reload so its progress shows.
-      if (e instanceof api.ApiError && e.code === 'update_in_progress') void load();
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setSubmitting(false);
-    }
+    await runSubmit(
+      async () => {
+        const r = await api.singboxUpdate({ version: impact.target_version, confirm: true });
+        setJob(r.job);
+        setImpact(null);
+        setMsg(t('sb_update_submitted'));
+        await load();
+      },
+      null,
+      (e) => {
+        // A running job is not an error to hide: reload so its progress shows.
+        if (e instanceof api.ApiError && e.code === 'update_in_progress') void load();
+        setErr(apiErrorMessage(e, t));
+      },
+    );
   };
 
   const versions = cache?.versions ?? [];
@@ -954,6 +921,7 @@ function BackupCard() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [stats, setStats] = useState<ImportStats | null>(null);
+  const run = useAsyncAction(setBusy, setErr);
 
   const doExport = async () => {
     // §17 (2026-09-18): the snapshot carries credential material now, so the
@@ -961,15 +929,7 @@ function BackupCard() {
     // and what has to be kept with it. Everything else about the export is
     // unchanged, but "one click to download every secret" must not be.
     if (!window.confirm(t('backup_export_confirm'))) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await api.downloadExport();
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    await run(() => api.downloadExport());
   };
 
   const doImport = async (f: File) => {
@@ -981,16 +941,10 @@ function BackupCard() {
       return;
     }
     if (!window.confirm(t('backup_import_confirm', { name: f.name }))) return;
-    setBusy(true);
-    setErr(null);
-    setStats(null);
-    try {
+    await run(async () => {
+      setStats(null);
       setStats(await api.importBackup(data));
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (
@@ -1066,6 +1020,8 @@ function GeoIPCard({
   const [starting, setStarting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const runStart = useAsyncAction(setStarting, setErr, setMsg);
+  const runUpload = useAsyncAction(setUploading, setErr, setMsg);
 
   const load = useCallback(async () => {
     try {
@@ -1125,33 +1081,19 @@ function GeoIPCard({
 
   const updateNow = async () => {
     if (starting || active) return;
-    setStarting(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await runStart(async () => {
       const r = await api.geoipUpdate();
       setMsg(r.accepted ? t('geoip_update_started') : t('geoip_update_running'));
       await load();
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setStarting(false);
-    }
+    });
   };
 
   const doUpload = async (f: File) => {
-    setUploading(true);
-    setErr(null);
-    setMsg(null);
-    try {
+    await runUpload(async () => {
       await api.uploadGeoIPMMDB(f);
       setMsg(t('geoip_upload_done'));
       await load();
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setUploading(false);
-    }
+    });
   };
 
   const stateTone = status?.state === 'failed' ? ' status-failed' : status?.state === 'ok' ? ' status-ok' : ' status-timeout';
@@ -1242,6 +1184,7 @@ function SecurityCard() {
   const [sessions, setSessions] = useState<SessionRow[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const run = useAsyncAction(setBusy, setErr);
 
   const load = useCallback(async () => {
     try {
@@ -1268,15 +1211,10 @@ function SecurityCard() {
   };
 
   const revokeAll = async () => {
-    setBusy(true);
-    try {
+    await run(async () => {
       await api.revokeAllSessions();
       await load();
-    } catch (e) {
-      setErr(apiErrorMessage(e, t));
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (
