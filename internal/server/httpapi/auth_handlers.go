@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -12,6 +13,21 @@ import (
 const (
 	maxLoginFails       = 3    // design §4.3: blacklist after 3 consecutive failures
 	blockSeconds  int64 = 1800 // 30 min per offense; panel/CLI can unblock earlier
+)
+
+// §15 alert kinds raised from this handler. A failed login is about a source
+// address, not a probe, so these alerts keep node_id empty and the address
+// travels in the payload (§15 实现修订 2026-09-20).
+const (
+	alertLoginFailed      = "login_failed"
+	alertLoginBlacklisted = "login_blacklisted"
+
+	// loginAlertDedupeSecs is the §15 merge window. It is global on purpose
+	// rather than per-source: /api/login is unauthenticated, so a per-IP window
+	// would hand a source-rotating attacker the message rate. One notice per
+	// kind per hour is the same bound §15 puts on every other alert; the
+	// per-attempt record lives in audit_logs.
+	loginAlertDedupeSecs int64 = 3600
 )
 
 type loginReq struct {
@@ -88,6 +104,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			s.Store.InsertAudit(&store.AuditEntry{
 				Actor: "panel", Action: "login_failed", SourceIP: ip, Command: "protected_ip_not_counted",
 			})
+			// 防自锁管的是不加黑，不是不吭声（§15 2026-09-20）：受保护网段的失败
+			// 也推送，载荷里标出来源未计数，操作者自己看得出这是内网手滑还是异常。
+			s.raiseLoginAlert(alertLoginFailed, map[string]any{"ip": ip, "protected": true})
 			writeErr(w, http.StatusUnauthorized, "bad_credentials")
 			return
 		}
@@ -100,6 +119,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			s.Store.InsertAudit(&store.AuditEntry{
 				Actor: "panel", Action: "login_failed", SourceIP: ip, Command: detail,
 			})
+			// One kind per attempt: the failure that crosses the threshold IS the
+			// blacklist event. Raising login_failed for it too would put two
+			// messages about the same moment in the operator's chat (the head of
+			// the burst already raised the plain one).
+			if count >= maxLoginFails {
+				s.raiseLoginAlert(alertLoginBlacklisted, map[string]any{
+					"ip": ip, "count": count, "block_seconds": blockSeconds,
+				})
+			} else {
+				s.raiseLoginAlert(alertLoginFailed, map[string]any{
+					"ip": ip, "count": count, "max_fails": maxLoginFails,
+				})
+			}
 		}
 		code := "bad_credentials"
 		if count >= maxLoginFails {
@@ -124,6 +156,26 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	security.SetSessionCookie(w, r, sid, s.cookieSecure(r))
 	s.Store.InsertAudit(&store.AuditEntry{Actor: "panel", Action: "login_ok", SourceIP: ip})
 	writeJSON(w, http.StatusOK, meResp{MustChangePassword: user.MustChange, Version: s.Version})
+}
+
+// raiseLoginAlert queues one §15 alert for a failed login attempt (the
+// scheduler delivers it on its next pass, and the §15 event switch for the
+// "security" group can mute the whole family). node_id stays empty on purpose:
+// the subject is a source address, not a probe, so the chat line reads
+// "Source IP" rather than a bogus node name and the panel's alert list shows
+// "-" in its node column — every attempt's address is in audit_logs.
+//
+// The merge window is what stops an unauthenticated endpoint from flooding the
+// operator's chat: alerts of one kind merge even when the source rotates, so
+// the attacker cannot choose the message rate.
+func (s *Server) raiseLoginAlert(kind string, payload map[string]any) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	if _, _, err := s.Store.CreateAlert(kind, "", string(raw), loginAlertDedupeSecs); err != nil {
+		s.Log.Warn("create login alert", "kind", kind, "err", err)
+	}
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
+
+	"github.com/fonlan/fobe/internal/server/notify"
 )
 
 // §15 pushed-text settings (2026-09-19 修订): the copy language and the zone
@@ -96,6 +98,34 @@ func TestImportDropsUnusableNotifyTextSettings(t *testing.T) {
 	}
 	if got = getSettingsMap(t, srv.URL, cookie); got["notify.language"] != "zh-CN" || got["notify.timezone"] != "Asia/Shanghai" {
 		t.Fatalf("usable settings not imported: %v", got)
+	}
+}
+
+// Every §15 event group the server advertises must also be writable: the panel
+// builds its switch list from notify.EventGroups, so a group missing from
+// allowedKeys renders a toggle the API rejects and GET never returns (the
+// 2026-09-20 "security" group hit exactly that). Pinning the two together is
+// what keeps the next group from shipping half-registered.
+func TestEveryEventGroupSwitchIsWritable(t *testing.T) {
+	srv, _ := newTestServer(t)
+	cookie := panelCookie(t, srv)
+	for _, group := range notify.EventGroups {
+		key := notify.EventSwitchKey(group)
+		if !allowedKeys[key] {
+			t.Fatalf("event group %s: %s is not in allowedKeys", group, key)
+		}
+		r := doReq(t, &http.Client{}, "PUT", srv.URL+"/api/settings", cookie,
+			map[string]any{"settings": map[string]string{key: "0"}})
+		if r.Status != 200 {
+			t.Fatalf("PUT %s: %d %s", key, r.Status, r.Body)
+		}
+	}
+	got := getSettingsMap(t, srv.URL, cookie)
+	for _, group := range notify.EventGroups {
+		key := notify.EventSwitchKey(group)
+		if got[key] != "0" {
+			t.Fatalf("switch %s did not round-trip: %q", key, got[key])
+		}
 	}
 }
 

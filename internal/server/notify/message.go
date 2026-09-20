@@ -101,6 +101,10 @@ func (c catalog) describe(kind string, payload map[string]any) (icon, title stri
 	switch kind {
 	case "node_offline":
 		return "🔴", c.tr("Probe offline")
+	case "login_failed":
+		return "🟠", c.tr("Panel login failed")
+	case "login_blacklisted":
+		return "🔴", c.tr("Panel login blocked (IP blacklisted)")
 	case "traffic_warn":
 		return "🟠", c.tr("Traffic approaching quota")
 	case "traffic_crit":
@@ -164,6 +168,12 @@ func (c catalog) fields(kind string, p map[string]any) []field {
 	}
 	b := &builder{c: c, payload: p, used: map[string]bool{}}
 	switch kind {
+	case "login_failed", "login_blacklisted":
+		b.take(c.tr("Source IP"), "ip", textValue)
+		b.take(c.tr("Failures"), "count", numberText)
+		b.take(c.tr("Limit"), "max_fails", numberText)
+		b.take(c.tr("Blocked for"), "block_seconds", c.duration)
+		b.take(c.tr("Protected network"), "protected", c.yesNo)
 	case "traffic_warn", "traffic_crit":
 		b.take(c.tr("Usage"), "pct", percentText)
 		b.bytesPair(c.tr("Traffic"), "used_bytes", "quota_bytes")
@@ -334,6 +344,39 @@ func (c catalog) mode(v any) string {
 		return c.tr("Max (IN/OUT)")
 	default:
 		return textValue(v)
+	}
+}
+
+// yesNo renders a flag that is only present in the payload when it is true
+// (a protected-network failure, §4.3): absent means the ordinary case, so the
+// line never appears rather than printing a misleading "No".
+func (c catalog) yesNo(v any) string {
+	b, ok := v.(bool)
+	if !ok {
+		return plainText(v)
+	}
+	if b {
+		return c.tr("Yes")
+	}
+	return c.tr("No")
+}
+
+// duration renders the blacklist window of a login alert ("30 min"). It is a
+// catalog method because the unit is part of the translated phrase.
+func (c catalog) duration(v any) string {
+	n, ok := number(v)
+	if !ok {
+		return plainText(v)
+	}
+	switch secs := int64(n); {
+	case secs <= 0:
+		return ""
+	case secs%3600 == 0:
+		return fmt.Sprintf(c.tr("%d h"), secs/3600)
+	case secs%60 == 0:
+		return fmt.Sprintf(c.tr("%d min"), secs/60)
+	default:
+		return fmt.Sprintf(c.tr("%d s"), secs)
 	}
 }
 

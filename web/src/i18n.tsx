@@ -440,6 +440,8 @@ const zh = {
   kind_agent_update_failed: '探针自更新失败',
   kind_agent_update_transient: '探针自更新反复失败',
   kind_agent_update_stale: '探针版本落后',
+  kind_login_failed: '面板登录失败',
+  kind_login_blacklisted: '登录失败过多，来源 IP 已封禁',
 
   // settings
   settings_title: '设置',
@@ -611,6 +613,8 @@ const zh = {
   notify_event_off: '不推送',
   notify_event_node_status: '探针上线下线',
   notify_event_node_status_desc: '探针 90 秒无心跳判离线并告警，恢复上线时补一条恢复通知。',
+  notify_event_security: '面板登录失败',
+  notify_event_security_desc: '有人用错误密码登录面板时推送（同一小时内合并为一条）；失败达到阈值封禁来源 IP 时再推一条。受保护网段（回环/内网）的失败只标记、不计数，逐条来源地址在审计日志里。',
   notify_event_traffic: '流量阈值',
   notify_event_traffic_desc: '周期用量达到下方阈值时提醒（接近配额、超出配额）。',
   notify_event_billing: '缴费到期提醒',
@@ -1460,6 +1464,8 @@ const en: Record<DictKey, string> = {
   kind_agent_update_failed: 'Probe self-update failed',
   kind_agent_update_transient: 'Probe self-update keeps failing',
   kind_agent_update_stale: 'Probe behind server version',
+  kind_login_failed: 'Panel login failed',
+  kind_login_blacklisted: 'Panel login blocked (IP blacklisted)',
 
   settings_title: 'Settings',
   sec_access: 'Access',
@@ -1630,6 +1636,8 @@ const en: Record<DictKey, string> = {
   notify_event_off: 'Muted',
   notify_event_node_status: 'Probe online / offline',
   notify_event_node_status_desc: 'A probe with no heartbeat for 90s is marked offline; coming back sends a recovery notice.',
+  notify_event_security: 'Panel login failures',
+  notify_event_security_desc: 'A wrong password on the panel login is pushed (merged into one message per hour); one more notice follows when the failures blacklist the source IP. Failures from protected networks (loopback/private) are marked but not counted; every attempt\'s address is in the audit log.',
   notify_event_traffic: 'Traffic thresholds',
   notify_event_traffic_desc: 'Fires when period usage crosses the thresholds below (near quota, over quota).',
   notify_event_billing: 'Billing reminders',

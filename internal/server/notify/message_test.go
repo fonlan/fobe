@@ -215,6 +215,54 @@ func TestMessageTextNodeListIsCapped(t *testing.T) {
 	}
 }
 
+// Login alerts (§15 实现修订 2026-09-20) are about the panel itself: no probe
+// is involved, so there is no "Node:" line and the source address has to come
+// out of the payload as its own labelled fact.
+func TestMessageTextLoginAlerts(t *testing.T) {
+	fail := enText(Event{
+		Kind: "login_failed", CreatedAt: 1730000000, Event: EventAlert,
+		Payload: `{"ip":"203.0.113.77","count":1,"max_fails":3}`,
+	})
+	want := "🟠 fobe · Panel login failed\n" +
+		"Time: 2024-10-27 03:33:20 UTC\n" +
+		"Source IP: 203.0.113.77\n" +
+		"Failures: 1\n" +
+		"Limit: 3"
+	if fail != want {
+		t.Fatalf("login failed = %q, want %q", fail, want)
+	}
+	if strings.Contains(fail, "Node:") {
+		t.Fatalf("a login alert must not print a node line: %q", fail)
+	}
+
+	// A protected-network failure (§4.3) has no counter, only the flag that
+	// says it was not counted — and the flag must not show when it is absent.
+	protected := zhMessage(Event{
+		Kind: "login_failed", CreatedAt: 1730000000, Event: EventAlert,
+		Payload: `{"ip":"192.168.1.20","protected":true}`,
+	})
+	wantProtected := "🟠 fobe · 面板登录失败\n" +
+		"时间: 2024-10-27 03:33:20 UTC\n" +
+		"来源 IP: 192.168.1.20\n" +
+		"受保护网段: 是"
+	if protected != wantProtected {
+		t.Fatalf("protected login = %q, want %q", protected, wantProtected)
+	}
+
+	blocked := zhMessage(Event{
+		Kind: "login_blacklisted", CreatedAt: 1730000000, Event: EventAlert,
+		Payload: `{"ip":"203.0.113.77","count":3,"block_seconds":1800}`,
+	})
+	wantBlocked := "🔴 fobe · 登录失败过多，来源 IP 已封禁\n" +
+		"时间: 2024-10-27 03:33:20 UTC\n" +
+		"来源 IP: 203.0.113.77\n" +
+		"失败次数: 3\n" +
+		"封禁时长: 30 分钟"
+	if blocked != wantBlocked {
+		t.Fatalf("blacklisted login = %q, want %q", blocked, wantBlocked)
+	}
+}
+
 func TestMessageTextUnknownKindKeepsSlugAndFields(t *testing.T) {
 	for _, text := range []string{
 		enText(Event{

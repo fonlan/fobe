@@ -54,7 +54,11 @@ const EventSwitchPrefix = "notify.event."
 
 // Event groups (also the switch slugs shown on the notifications page).
 const (
-	GroupNodeStatus   = "node_status"
+	GroupNodeStatus = "node_status"
+	// GroupSecurity is the panel's own authentication (§4.3): failed logins and
+	// the blacklist decisions they cause. These alerts are about a source
+	// address, not a probe, so they carry no node_id (§15 实现修订 2026-09-20).
+	GroupSecurity     = "security"
 	GroupTraffic      = "traffic"
 	GroupBilling      = "billing"
 	GroupSingbox      = "singbox"
@@ -66,7 +70,7 @@ const (
 // including ones whose kinds no feature currently raises (an off switch for a
 // silent event is harmless; a missing switch is a surprise).
 var EventGroups = []string{
-	GroupNodeStatus, GroupTraffic, GroupBilling, GroupSingbox, GroupUpdates, GroupCounterReset,
+	GroupNodeStatus, GroupSecurity, GroupTraffic, GroupBilling, GroupSingbox, GroupUpdates, GroupCounterReset,
 }
 
 // EventGroup maps an alert kind to its switch group. Unknown kinds land in
@@ -77,6 +81,8 @@ func EventGroup(kind string) string {
 	switch kind {
 	case "node_offline":
 		return GroupNodeStatus
+	case "login_failed", "login_blacklisted":
+		return GroupSecurity
 	case "traffic_warn", "traffic_crit":
 		return GroupTraffic
 	case "billing_due", "due_overdue":

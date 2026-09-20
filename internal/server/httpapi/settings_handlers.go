@@ -78,10 +78,12 @@ var allowedKeys = func() map[string]bool {
 		"notify.feishu_bot_name", "notify.feishu_domain",
 		"notify.feishu_webhook_url", "notify.feishu_webhook_secret",
 		// §15 switches (2026-09-16, 通知独立成页): one per channel, one per
-		// event group. Unset = on, so only explicit choices are stored.
+		// event group. Unset = on, so only explicit choices are stored. The event
+		// switches are derived from notify.EventGroups below rather than spelled
+		// out here: a hand-written copy silently rejected a new group's switch on
+		// PUT and hid it from GET (the panel renders the group from the server's
+		// list, so nobody noticed until the toggle failed) — 2026-09-20 修订.
 		"notify.telegram_enabled", "notify.webhook_enabled", "notify.feishu_enabled",
-		"notify.event.node_status", "notify.event.traffic", "notify.event.billing",
-		"notify.event.singbox", "notify.event.updates", "notify.event.counter_reset",
 		// §15 copy language and timestamp zone of the pushed text (2026-09-19
 		// 修订). Unset keeps the pre-setting behaviour: English copy, UTC clock.
 		notify.KeyLanguage, notify.KeyTimezone,
@@ -101,6 +103,9 @@ var allowedKeys = func() map[string]bool {
 		SettingRelayNameFormat, SettingRelayAutoInclude,
 	} {
 		m[k] = true
+	}
+	for _, group := range notify.EventGroups {
+		m[notify.EventSwitchKey(group)] = true
 	}
 	return m
 }()

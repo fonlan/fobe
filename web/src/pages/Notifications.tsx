@@ -30,7 +30,7 @@ const TRAFFIC_KEYS = ['alert.traffic_warn_pct', 'alert.traffic_crit_pct'] as con
 const TEXT_KEYS = ['notify.language', 'notify.timezone'] as const;
 
 /** Event groups, mirroring notify.EventGroups on the server. */
-const EVENT_GROUPS = ['node_status', 'traffic', 'billing', 'singbox', 'updates', 'counter_reset'] as const;
+const EVENT_GROUPS = ['node_status', 'security', 'traffic', 'billing', 'singbox', 'updates', 'counter_reset'] as const;
 
 /** Channel switch setting keys, mirroring notify.Key*Enabled. */
 const CHANNEL_SWITCH = {

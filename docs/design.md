@@ -143,6 +143,7 @@ fobe **不实现**反向代理，也**不做**证书签发与续期。它只做�
   2. 上游代理地址与 `FOBE_TRUSTED_PROXIES` 网段永不加入黑名单；
   3. 黑名单表带 `expires_at`，CLI 可无条件清空。
 - 面板提供"当前封禁列表 + 一键解封"页面，不逼你非进容器不可（CLI 是兜底）。
+- 每次密码校验失败按 §15 推送告警（`security` 事件组，2026-09-20 修订）：未达阈值是 `login_failed`，拉黑那一刻是 `login_blacklisted`；受保护网段（规则 1/2）的失败**也推送**但标记为未计数——防自锁管的是不加黑，不是不吭声。
 
 ### 4.4 密钥托管
 
@@ -1034,6 +1035,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 | sing-box 异常 | 进程退出 / 端口不可连 / 回滚发生 | 立即 |
 | sing-box 批量更新未收敛 | 分发后 15 分钟仍未报告目标版本（§9.5.4） | 15 分钟 |
 | 计数器重置 | 流量计数回绕 | 立即（信息级） |
+| 面板登录失败 | `POST /api/login` 密码校验失败（§4.3） | 立即 |
 
 通道：**Telegram Bot** + **通用 Webhook**（JSON POST，HMAC 签名头）+ **飞书**（2026-09-16 修订）。
 
@@ -1046,6 +1048,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 
 - **文案语言与时间时区（2026-09-19 修订）**：`notify.language`（`zh-CN` / `en-US`，缺省 `en-US`）与 `notify.timezone`（IANA 名，缺省 / `UTC` = 世界时）是**服务端设置**，在「设置 → 通知」里切换。为什么不是跟随面板语言：面板界面语言存在浏览器 localStorage 里（§16），而告警落在群里、没有语言可跟随，所以这两件事必须分开。两者都经渠道的 `DecryptFunc` **每次投递惰性读取**（与凭据同一套契约），改完下一条告警即生效、不重启。写入路径严格校验：未知语言标签 → `bad_notify_language`，镜像 tzdata 解析不了的时区 → `bad_timezone`；§17 的导入同样丢弃这两类值——静默存下一个解不开的时区，看上去就像「已经设置好了」。投递侧读不出来时回落到 UTC，绝不因为一个时区值挡住告警。时区依赖镜像自带 `tzdata`（deploy/Dockerfile.server 已装）。
 
+- **面板登录失败告警（2026-09-20 修订）**：`handleLogin` 在密码校验失败时投递告警，新增两个 kind：`login_failed`（未达封禁阈值的失败）与 `login_blacklisted`（达到阈值、来源 IP 被拉黑的那次失败，`block_seconds` 即 §4.3 的封禁时长）。两者**都不设 node_id**——告警主体是来源地址而不是探针，所以聊天正文没有 `Node:` 行、只有 `Source IP:`（地址在 payload 里），面板告警页的节点列显示 `-`；逐条失败仍在 `audit_logs`（`login_failed` + `source_ip`，受保护网段标 `protected_ip_not_counted`，面板审计页有来源 IP 列）。**去重是全局的而不是按 IP 的**：`/api/login` 无需认证，按来源去重等于把消息条数交给攻击者（换一个 IP 就能再刷一条），所以同一 kind 一小时内只发一条（`loginAlertDedupeSecs`，与本节首条「同一节点同一类型 1 小时内只发一次」同一口径）；受保护网段的失败也推送，payload 标 `protected: true`。开关是 §15.0 的 `security` 组。
+
 ### 15.0 渠道与事件开关（2026-09-16 修订：通知独立成页）
 
 > **实现修订 2026-09-20（Webhook URL 与「解不开」不再静默）**：① `notify.webhook_url` 与 `notify.feishu_webhook_url` 一样列入 `sensitiveKeys`（通用 webhook 的密钥同样在 URL 里），PUT 时校验为绝对 http(s) 且过 `security.CheckOutboundHost`，不合法回 `bad_webhook_url`。② **主密钥解不开通知密钥时不再静默失效**：`decryptSetting` 把「未设置」与「解不开」分开，解不开的键在启动时记 error + 写 `secret_unreadable` 审计，`GET /api/settings` 多回一个 `unreadable_secrets` 数组（仅非空时），面板通知页顶部直接列出这些键，测试按钮回 `notify_secret_unreadable` 而不是 `notify_not_configured`。此前换钥/恢复旧库后所有告警哑掉、面板却一直显示「已配置」。
@@ -1053,7 +1057,7 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 设置里**通知不再是基础设置页上的一张卡片**，而是与「服务器」同级的一个子页（`/settings/notifications`，§16）：页面自上而下是**渠道**（Telegram / 飞书 / 通用 Webhook，同级并列，各自带开关、配置与"发送测试消息"）→ **文案与时间**（推送语言 + 时区）→ **事件开关** → **流量阈值**。
 
 - **渠道开关**：`notify.telegram_enabled` / `notify.webhook_enabled` / `notify.feishu_enabled`。关掉只停推送、**不清空配置**（重新打开不用重填凭据），也不影响"发送测试消息"——测试走 `Deliver`，开关只管调度。`Configured()` 语义保持"有配置"，与开关正交。
-- **事件开关**：`notify.event.<组>`，组是按操作者心智划分的（不是按 kind 一一对应）：`node_status`（探针上线下线，含恢复）、`traffic`（流量阈值：warn/crit）、`billing`（缴费到期：7/3/1 天与逾期）、`singbox`（sing-box 异常：退出/回滚）、`updates`（sing-box 批量更新未收敛、探针自更新失败/落后）、`counter_reset`（计数器重置）。未知 kind 归入 `updates`，保证新告警类型天然可关。
+- **事件开关**：`notify.event.<组>`，组是按操作者心智划分的（不是按 kind 一一对应）：`node_status`（探针上线下线，含恢复）、`security`（面板登录失败与来源 IP 封禁，2026-09-20 修订）、`traffic`（流量阈值：warn/crit）、`billing`（缴费到期：7/3/1 天与逾期）、`singbox`（sing-box 异常：退出/回滚）、`updates`（sing-box 批量更新未收敛、探针自更新失败/落后）、`counter_reset`（计数器重置）。未知 kind 归入 `updates`，保证新告警类型天然可关。
 - **两侧都默认开**：设置项缺省（或值不可解析）= 开，否则一次升级就会静默掉已经生效的通道/事件。
 - **关掉 ≠ 攒着**：被开关拦下的告警**直接出队**（`scheduler.deliverOne` 对"没有任何渠道接受"返回已处理）。取舍：重新打开开关不会补推关闭期间的历史——把静音期当成"待发队列"会在重新打开时一次性倒灌，那不是"别打扰我"的意思；`alerts` 表仍然是全量权威记录，面板告警页照常可见。某个渠道失败（非开关原因）仍然留在队列里下轮重试。
 - 流量阈值（`alert.traffic_warn_pct` / `alert.traffic_crit_pct`，默认 80/100）也落在这一页——它们只被 `traffic` 事件使用，放在别处等于让用户满仓库找旋钮。

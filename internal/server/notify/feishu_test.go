@@ -231,6 +231,8 @@ func TestEventGroupMapping(t *testing.T) {
 		"singbox_down":        GroupSingbox,
 		"singbox_rollback":    GroupSingbox,
 		"counter_reset":       GroupCounterReset,
+		"login_failed":        GroupSecurity, // §15 实现修订 2026-09-20
+		"login_blacklisted":   GroupSecurity,
 		"agent_update_failed": GroupUpdates, // unknown kinds stay switchable
 	}
 	for kind, want := range cases {
