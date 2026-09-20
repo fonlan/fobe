@@ -4,6 +4,7 @@ import { apiErrorMessage } from '../api';
 import { kindText, useI18n } from '../i18n';
 import { fmtTime } from '../format';
 import type { AlertRow } from '../types';
+import { ErrorState } from '../components/ErrorState';
 
 export default function Alerts() {
   const { t } = useI18n();
@@ -31,12 +32,7 @@ export default function Alerts() {
       </div>
 
       {err && (
-        <div className="card error-card">
-          <p>{err}</p>
-          <button type="button" className="btn" onClick={() => void load()}>
-            {t('retry')}
-          </button>
-        </div>
+        <ErrorState message={err} onRetry={() => () => void load()} />
       )}
 
       {alerts !== null && alerts.length === 0 && <div className="empty-hint">{t('alerts_empty')}</div>}

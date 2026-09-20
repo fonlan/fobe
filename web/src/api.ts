@@ -7,7 +7,6 @@ import type {
   AlertRow,
   AuditPage,
   BlacklistRow,
-  CommandRow,
   FeishuQRStatus,
   ForwardsStatus,
   ForwardRuleInput,
@@ -24,7 +23,6 @@ import type {
   NodeView,
   QuickCommand,
   RegTokenInfo,
-  RegTokenRow,
   SessionRow,
   SettingView,
   SingboxCache,
@@ -290,60 +288,10 @@ export function agentReinstallCommand(
   return request(`/api/nodes/${encodeURIComponent(id)}/agent/reinstall-command`, { method: 'POST' });
 }
 
-// --- commands ---------------------------------------------------------------
-// Read-only: the panel can no longer enqueue shell commands (the detail-page
-// commands card was removed). This list feeds the AI panel's result polling.
-
-export function listCommands(id: string): Promise<{ commands: CommandRow[] }> {
-  return request(`/api/nodes/${encodeURIComponent(id)}/commands`);
-}
-
-// The commands table rows currently serialize without json tags (PascalCase
-// keys, sql.NullInt64 as {Int64,Valid}); normalize defensively to snake_case.
-
-function nullInt64(v: unknown): number | null {
-  if (typeof v === 'number') return v;
-  if (v && typeof v === 'object') {
-    const o = v as Record<string, unknown>;
-    if (o['Valid'] === true && typeof o['Int64'] === 'number') return o['Int64'];
-  }
-  return null;
-}
-
-function normCommand(raw: Record<string, unknown>): CommandRow {
-  const g = (...keys: string[]): unknown => {
-    for (const k of keys) {
-      const v = raw[k];
-      if (v !== undefined && v !== null) return v;
-    }
-    return undefined;
-  };
-  return {
-    id: String(g('id', 'ID') ?? ''),
-    node_id: String(g('node_id', 'NodeID') ?? ''),
-    kind: String(g('kind', 'Kind') ?? ''),
-    payload: String(g('payload', 'Payload') ?? ''),
-    status: String(g('status', 'Status') ?? ''),
-    created_at: Number(g('created_at', 'CreatedAt') ?? 0),
-    sent_at: nullInt64(g('sent_at', 'SentAt')),
-    finished_at: nullInt64(g('finished_at', 'FinishedAt')),
-    result: String(g('result', 'Result') ?? ''),
-  };
-}
-
-export async function listCommandsNormalized(id: string): Promise<CommandRow[]> {
-  const r = await listCommands(id);
-  return (r.commands ?? []).map((c) => normCommand(c as unknown as Record<string, unknown>));
-}
-
 // --- registration tokens ----------------------------------------------------
 
 export function createRegToken(name: string, note: string): Promise<RegTokenInfo> {
   return request('/api/reg-tokens', { method: 'POST', body: { name, note } });
-}
-
-export function listRegTokens(): Promise<{ tokens: RegTokenRow[] }> {
-  return request('/api/reg-tokens?all=1');
 }
 
 // --- latency targets --------------------------------------------------------
@@ -1139,7 +1087,7 @@ export function getAISession(id: string): Promise<AISessionHistory> {
  *
  * The server normalizes its lists (nil slices serialize as `[]`), but a `null`
  * array would crash the page on the first `.length`, so the shape is repaired on
- * arrival — the same stance normCommand / normSubscriptionEntry take.
+ * arrival — the same stance normSubscriptionEntry takes.
  */
 export async function getAICatalog(): Promise<AICatalog> {
   const raw = await request<Partial<AICatalog>>('/api/ai/catalog');

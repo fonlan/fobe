@@ -5,6 +5,7 @@ import { apiErrorMessage } from '../api';
 import { SaveRow, Toggle, useField, type FieldFn } from '../components/SettingsForm';
 import { useI18n } from '../i18n';
 import type { FeishuQRStatus, NotifyTestResult, SettingView } from '../types';
+import { ErrorState } from '../components/ErrorState';
 
 /**
  * §15 通知 (2026-09-16 修订: 独立成页). One page owns everything about how
@@ -129,12 +130,7 @@ export default function Notifications() {
       <p className="hint">{t('notify_page_hint')}</p>
 
       {err && (
-        <div className="card error-card">
-          <p>{err}</p>
-          <button type="button" className="btn" onClick={() => void load()}>
-            {t('retry')}
-          </button>
-        </div>
+        <ErrorState message={err} onRetry={() => () => void load()} />
       )}
 
       {/* A channel whose secret cannot be decrypted looks "configured" on the

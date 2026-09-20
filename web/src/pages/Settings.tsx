@@ -6,7 +6,7 @@ import Modal from '../components/Modal';
 import ProgressBar from '../components/ProgressBar';
 import { SaveRow, useField } from '../components/SettingsForm';
 import { DownloadIcon, PublishIcon, RefreshIcon, RetryIcon, TrashIcon } from '../components/Icons';
-import { useI18n } from '../i18n';
+import { useI18n, type TFn } from '../i18n';
 import { useTheme, type ThemeMode } from '../theme';
 import { fmtBytes, fmtRate, fmtTime } from '../format';
 import type {
@@ -24,9 +24,49 @@ import type {
   SingboxReleases,
   SingboxUpdateJob,
 } from '../types';
+import { ErrorState } from '../components/ErrorState';
 
 /** Job states that mean the batch is over (mirrors internal/server/singboxupdate). */
 const SINGBOX_JOB_TERMINAL = new Set(['done', 'failed']);
+
+/** t() with a graceful fallback for state enums: a missing label renders the
+ *  raw value instead of the raw key. Shared by the singbox and GeoIP cards. */
+function stateLabel(t: TFn, prefix: string, value: string): string {
+  const key = prefix + value;
+  const v = t(key);
+  return v === key ? value : v;
+}
+
+interface DlProgress {
+  downloaded: number;
+  /** 0/undefined = upstream sent no Content-Length. */
+  total?: number;
+  percent?: number;
+  speed?: number;
+}
+
+/** Progress-bar percent; 0 while the total is unknown. */
+function dlProgressPct(dl: DlProgress | null | undefined): number {
+  return dl?.total ? dl.percent ?? 0 : 0;
+}
+
+/** Progress row text: "done / total" once the length is known (bytes only
+ *  before that — the resolving/waiting phases would otherwise read "0 B"),
+ *  plus the speed. The phase is the bar's label, so it is not repeated here.
+ *  bytesSoFar picks the no-total wording: the singbox card says so, GeoIP
+ *  shows bare bytes. */
+function dlProgressText(t: TFn, dl: DlProgress | null | undefined, bytesSoFar: 'label' | 'bare'): string {
+  if (!dl) return '';
+  const soFar =
+    dl.downloaded > 0
+      ? dl.total
+        ? `${fmtBytes(dl.downloaded)} / ${fmtBytes(dl.total)}`
+        : bytesSoFar === 'label'
+          ? t('sb_download_bytes_so_far', { done: fmtBytes(dl.downloaded) })
+          : fmtBytes(dl.downloaded)
+      : '';
+  return [soFar, dl.speed ? fmtRate(dl.speed) : ''].filter(Boolean).join(' · ');
+}
 
 /**
  * How long a failed download keeps its row in the version list (seconds). Long
@@ -167,12 +207,7 @@ export default function Settings() {
       {isBaseSettings && (
         <>
           {err && (
-            <div className="card error-card">
-              <p>{err}</p>
-              <button type="button" className="btn" onClick={() => void load()}>
-                {t('retry')}
-              </button>
-            </div>
+            <ErrorState message={err} onRetry={() => () => void load()} />
           )}
 
           {/*
@@ -468,12 +503,6 @@ function SingboxCacheCard() {
     if (jobState === 'done' || (download && download.phase === 'done')) void load();
   }, [jobState, download, load]);
 
-  const label = (prefix: string, value: string) => {
-    const key = prefix + value;
-    const v = t(key);
-    return v === key ? value : v;
-  };
-
   const retry = async () => {
     setBusy(true);
     setErr(null);
@@ -572,23 +601,6 @@ function SingboxCacheCard() {
     ? job.counts.already_current + job.counts.pushed + job.counts.offline_pending + job.counts.failed
     : 0;
   const jobRunning = !!jobState && !SINGBOX_JOB_TERMINAL.has(jobState);
-  const dlPercent = download?.total ? download.percent ?? 0 : 0;
-  // Bytes/speed only: the phase is the bar's label, so repeating it in the
-  // text would waste the width the row needs.
-  const dlText = download
-    ? [
-        // Bytes only once there are some: the resolving/waiting phases would
-        // otherwise read "0 B".
-        download.downloaded > 0
-          ? download.total
-            ? `${fmtBytes(download.downloaded)} / ${fmtBytes(download.total)}`
-            : t('sb_download_bytes_so_far', { done: fmtBytes(download.downloaded) })
-          : '',
-        download.speed ? fmtRate(download.speed) : '',
-      ]
-        .filter(Boolean)
-        .join(' · ')
-    : '';
 
   /**
    * The in-flight download is a row too — but only while its version is not in
@@ -630,7 +642,7 @@ function SingboxCacheCard() {
         <div className="tile">
           <div className="tile-label">{t('sb_cache_status')}</div>
           <div className="tile-value">
-            {status ? label('sb_cache_state_', status.state) : t('sb_cache_state_empty')}
+            {status ? stateLabel(t, 'sb_cache_state_', status.state) : t('sb_cache_state_empty')}
             {status?.version ? ' · ' + status.version : ''}
           </div>
           <div className="tile-sub">{status?.updated_at ? fmtTime(status.updated_at) : '-'}</div>
@@ -683,9 +695,9 @@ function SingboxCacheCard() {
                   ) : (
                     <ProgressBar
                       tone="plain"
-                      label={label('sb_download_phase_', download.phase ?? '')}
-                      pct={dlPercent}
-                      text={dlText}
+                      label={stateLabel(t, 'sb_download_phase_', download.phase ?? '')}
+                      pct={dlProgressPct(download)}
+                      text={dlProgressText(t, download, 'label')}
                     />
                   )}
                 </td>
@@ -799,7 +811,7 @@ function SingboxCacheCard() {
       </div>
       {downloadActive && <div className="hint">{t('sb_download_hint')}</div>}
 
-      {job && <SingboxJobView job={job} handled={handled} label={label} />}
+      {job && <SingboxJobView job={job} handled={handled} />}
 
       {impact && (
         <Modal title={t('sb_update_impact_title')} onClose={() => setImpact(null)} wide>
@@ -866,11 +878,9 @@ function SingboxCacheCard() {
 function SingboxJobView({
   job,
   handled,
-  label,
 }: {
   job: SingboxUpdateJob;
   handled: number;
-  label: (prefix: string, value: string) => string;
 }) {
   const { t } = useI18n();
   const stateCls = job.state === 'failed' ? 'status-failed' : job.state === 'done' ? 'status-ok' : 'status-timeout';
@@ -880,7 +890,7 @@ function SingboxJobView({
     <div className="stack" style={{ marginTop: 14 }}>
       <div className="row-between">
         <h4>{t('sb_update_job')}</h4>
-        <span className={'chip ' + stateCls}>{label('sb_update_job_state_', job.state)}</span>
+        <span className={'chip ' + stateCls}>{stateLabel(t, 'sb_update_job_state_', job.state)}</span>
       </div>
       <div className="hint">
         {job.target_version ? <span className="mono">{job.target_version} · </span> : null}
@@ -918,7 +928,7 @@ function SingboxJobView({
                   </td>
                   <td className="mono">{n.version || '-'}</td>
                   <td className="nowrap">
-                    <span className={outcomeCls(n.outcome)}>{label('sb_update_outcome_', n.outcome)}</span>
+                    <span className={outcomeCls(n.outcome)}>{stateLabel(t, 'sb_update_outcome_', n.outcome)}</span>
                     {job.convergence_checked && n.converged !== undefined && (
                       <span className={'chip' + (n.converged ? ' status-ok' : ' status-failed')}>
                         {n.converged ? t('sb_update_converged') : t('sb_update_not_converged')}
@@ -1144,27 +1154,6 @@ function GeoIPCard({
     }
   };
 
-  const label = (prefix: string, value: string) => {
-    const key = prefix + value;
-    const v = t(key);
-    return v === key ? value : v;
-  };
-
-  const percent = dl?.total ? dl.percent ?? 0 : 0;
-  // Bytes and speed only: the phase is the bar's label, so repeating it here
-  // would waste the row's width.
-  const dlText = dl
-    ? [
-        dl.downloaded > 0
-          ? dl.total
-            ? `${fmtBytes(dl.downloaded)} / ${fmtBytes(dl.total)}`
-            : fmtBytes(dl.downloaded)
-          : '',
-        dl.speed ? fmtRate(dl.speed) : '',
-      ]
-        .filter(Boolean)
-        .join(' · ')
-    : '';
   const stateTone = status?.state === 'failed' ? ' status-failed' : status?.state === 'ok' ? ' status-ok' : ' status-timeout';
   // The updater persists the failure reason on status.error, so the card shows
   // it from one place instead of repeating the live snapshot's copy.
@@ -1189,7 +1178,7 @@ function GeoIPCard({
         <div className="tile">
           <div className="tile-label">{t('geoip_state')}</div>
           <div className="tile-value">
-            {status?.state ? <span className={'chip' + stateTone}>{label('geoip_state_', status.state)}</span> : '…'}
+            {status?.state ? <span className={'chip' + stateTone}>{stateLabel(t, 'geoip_state_', status.state)}</span> : '…'}
             {status && !status.exists && ` ${t('geoip_not_installed')}`}
           </div>
           <div className="tile-sub">
@@ -1208,7 +1197,7 @@ function GeoIPCard({
 
       {active && dl && (
         <div style={{ marginTop: 10 }}>
-          <ProgressBar tone="plain" label={label('geoip_phase_', dl.phase ?? '')} pct={percent} text={dlText} />
+          <ProgressBar tone="plain" label={stateLabel(t, 'geoip_phase_', dl.phase ?? '')} pct={dlProgressPct(dl)} text={dlProgressText(t, dl, 'bare')} />
         </div>
       )}
       {!active && stateError && <div className="form-error">{stateError}</div>}

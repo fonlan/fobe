@@ -5,6 +5,7 @@ import { useI18n } from '../i18n';
 import type { QuickCommand } from '../types';
 import Modal from '../components/Modal';
 import { PencilIcon, TrashIcon } from '../components/Icons';
+import { ErrorState } from '../components/ErrorState';
 
 /**
  * Settings → 常用命令 (2026-09-19): snippets the terminal page's side panel
@@ -78,12 +79,7 @@ export default function QuickCommands() {
       <p className="hint">{t('qc_desc')}</p>
 
       {err && (
-        <div className="card error-card">
-          <p>{err}</p>
-          <button type="button" className="btn" onClick={() => void load()}>
-            {t('retry')}
-          </button>
-        </div>
+        <ErrorState message={err} onRetry={() => () => void load()} />
       )}
 
       {commands !== null && commands.length === 0 && <div className="empty-hint">{t('qc_empty')}</div>}

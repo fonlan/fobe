@@ -3,6 +3,7 @@
 // never distorted by the stretched viewBox.
 
 import { useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { ChartGrid, ChartLegend, ChartYLabels, H, PAD_L, PAD_R, PAD_T, W, useHiddenSeries } from './chartShared';
 
 export interface ChartPoint {
   x: number;
@@ -16,11 +17,6 @@ export interface ChartSeries {
   area?: boolean;
 }
 
-const W = 640;
-const H = 220;
-const PAD_L = 10;
-const PAD_R = 12;
-const PAD_T = 12;
 const PAD_B = 8;
 const MAX_POINTS = 300;
 
@@ -89,11 +85,7 @@ export default function LineChart({
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<HoverInfo | null>(null);
-  // Series the operator switched off by clicking its legend entry. Keyed by the
-  // series name — the same key the legend and tooltip use — so the choice
-  // survives the 30s data refresh. Each chart instance owns its own set: hiding
-  // "rx" on the network chart must not touch the traffic bars below it.
-  const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
+  const { hidden, toggle } = useHiddenSeries();
 
   const prepared = useMemo(
     () => series.map((s) => ({ ...s, points: downsample(s.points) })),
@@ -102,14 +94,6 @@ export default function LineChart({
 
   const visible = useMemo(() => prepared.filter((s) => !hidden.has(s.name)), [prepared, hidden]);
   const allHidden = prepared.length > 0 && visible.length === 0;
-
-  const toggle = (name: string) =>
-    setHidden((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
 
   // With everything hidden the axes still come from the full series set: the
   // empty state ("暂无数据") would swap the whole chart out, and the legend is
@@ -189,29 +173,7 @@ export default function LineChart({
 
   return (
     <div className="chart">
-      <div className="chart-legend">
-        {prepared.map((s) => {
-          const off = hidden.has(s.name);
-          return (
-            <button
-              key={s.name}
-              type="button"
-              className={`chart-legend-item${off ? ' off' : ''}`}
-              aria-pressed={!off}
-              title={legendHint}
-              onClick={() => toggle(s.name)}
-            >
-              <span
-                className="chart-swatch"
-                // Off = hollow ring in the series colour: the row stays
-                // identifiable, but it no longer claims to be plotted.
-                style={off ? { background: 'transparent', boxShadow: `inset 0 0 0 2px ${s.color}` } : { background: s.color }}
-              />
-              {s.name}
-            </button>
-          );
-        })}
-      </div>
+      <ChartLegend items={prepared} hidden={hidden} onToggle={toggle} hint={legendHint} />
       <div
         ref={wrapRef}
         className="chart-plot"
@@ -220,17 +182,7 @@ export default function LineChart({
         onMouseLeave={() => setHover(null)}
       >
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" width="100%" height="100%">
-          {ticks.map((tv) => (
-            <line
-              key={tv}
-              x1={PAD_L}
-              x2={W - PAD_R}
-              y1={sy(tv)}
-              y2={sy(tv)}
-              className="chart-grid"
-              vectorEffect="non-scaling-stroke"
-            />
-          ))}
+          <ChartGrid ticks={ticks} sy={sy} />
           {visible.map(
             (s) =>
               s.area &&
@@ -255,17 +207,7 @@ export default function LineChart({
         {allHidden && allHiddenText && <div className="chart-hidden-hint">{allHiddenText}</div>}
 
         {/* y labels as HTML so text is not stretched by the non-uniform viewBox */}
-        {ticks.map((tv) => (
-          <span
-            key={'yl' + tv}
-            className="chart-label chart-label-y mono"
-            style={{
-              top: `${((sy(tv) - 6) / H) * 100}%`,
-            }}
-          >
-            {fmtY(tv)}
-          </span>
-        ))}
+        <ChartYLabels ticks={ticks} sy={sy} fmt={fmtY} />
         {hover && (
           <>
             <span className="chart-crosshair" style={{ left: `${hover.leftPct}%` }} />

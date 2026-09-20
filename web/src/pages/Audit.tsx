@@ -4,6 +4,7 @@ import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
 import { fmtTime } from '../format';
 import type { AuditRow } from '../types';
+import { ErrorState } from '../components/ErrorState';
 
 const PAGE_SIZES = [20, 50, 100, 200];
 const DEFAULT_PAGE_SIZE = 20;
@@ -105,12 +106,7 @@ export default function Audit() {
       </div>
 
       {err && (
-        <div className="card error-card">
-          <p>{err}</p>
-          <button type="button" className="btn" onClick={() => void load(page, pageSize)}>
-            {t('retry')}
-          </button>
-        </div>
+        <ErrorState message={err} onRetry={() => () => void load(page, pageSize)} />
       )}
 
       {entries !== null && entries.length === 0 && <div className="empty-hint">{t('audit_empty')}</div>}

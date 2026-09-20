@@ -18,6 +18,7 @@ import type {
   ModelsDevStatus,
   SettingView,
 } from '../types';
+import { ErrorState } from '../components/ErrorState';
 
 /**
  * /settings/ai — multi-provider / multi-model management (design §12.1, §12.5).
@@ -269,12 +270,7 @@ export default function SettingsAI() {
           <h2>{t('sec_ai')}</h2>
         </div>
         {err ? (
-          <div className="card error-card">
-            <p>{err}</p>
-            <button type="button" className="btn" onClick={() => void load()}>
-              {t('retry')}
-            </button>
-          </div>
+          <ErrorState message={err} onRetry={() => () => void load()} />
         ) : (
           <div className="loading">{t('loading')}</div>
         )}
@@ -292,12 +288,7 @@ export default function SettingsAI() {
       <p className="hint">{t('ai_page_hint')}</p>
 
       {err && (
-        <div className="card error-card">
-          <p>{err}</p>
-          <button type="button" className="btn" onClick={() => void load()}>
-            {t('retry')}
-          </button>
-        </div>
+        <ErrorState message={err} onRetry={() => () => void load()} />
       )}
       {msg && <div className="form-ok">{msg}</div>}
 

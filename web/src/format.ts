@@ -94,13 +94,6 @@ export function dateStrToUnix(s: string): number | null {
   return isFinite(t) ? Math.floor(t / 1000) : null;
 }
 
-/** Local-seconds for a "YYYY-MM-DDTHH:mm" datetime-local string. */
-export function datetimeLocalToUnix(s: string): number | null {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) return null;
-  const t = new Date(s).getTime();
-  return isFinite(t) ? Math.floor(t / 1000) : null;
-}
-
 /** Parse a datetime-local value as wall time in an IANA zone. Seconds optional:
  *  browsers serialize the input value canonically and drop ":00" seconds even
  *  with step=1, so a picked "00:00" comes back as "T00:00". */

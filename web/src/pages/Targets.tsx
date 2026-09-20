@@ -5,6 +5,7 @@ import { useI18n } from '../i18n';
 import type { LatencyTarget, SettingView } from '../types';
 import Modal from '../components/Modal';
 import { SaveRow, useField } from '../components/SettingsForm';
+import { ErrorState } from '../components/ErrorState';
 
 /**
  * Settings → 延迟测量 (design §16 实现修订 2026-09-16): the target list plus the
@@ -124,12 +125,7 @@ export default function Targets() {
       </form>
 
       {err && (
-        <div className="card error-card">
-          <p>{err}</p>
-          <button type="button" className="btn" onClick={() => void load()}>
-            {t('retry')}
-          </button>
-        </div>
+        <ErrorState message={err} onRetry={() => () => void load()} />
       )}
 
       {targets !== null && targets.length === 0 && <div className="empty-hint">{t('targets_empty')}</div>}

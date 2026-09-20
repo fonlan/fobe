@@ -199,33 +199,10 @@ export interface QuickCommand {
   updated_at: number;
 }
 
-export interface CommandRow {
-  id: string;
-  node_id: string;
-  kind: string;
-  payload: string;
-  status: string; // pending | sent | ok | failed | timeout
-  created_at: number;
-  sent_at: number | null;
-  finished_at: number | null;
-  result: string;
-}
-
 export interface RegTokenInfo {
   token: string;
   install_command: string;
   ttl: number;
-}
-
-export interface RegTokenRow {
-  id: number;
-  note: string;
-  /** Set = token bound to that node (reinstall / credential reissue, §4.2). */
-  node_id?: string;
-  created_at: number;
-  expires_at: number;
-  used_at?: number | null;
-  used_by?: string | null;
 }
 
 export interface BlacklistRow {

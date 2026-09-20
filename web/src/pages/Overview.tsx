@@ -13,6 +13,7 @@ import { apiErrorMessage } from '../api';
 import { useI18n } from '../i18n';
 import type { NodeView } from '../types';
 import NodeCard from '../components/NodeCard';
+import { ErrorState } from '../components/ErrorState';
 
 export default function Overview() {
   const { t } = useI18n();
@@ -94,12 +95,7 @@ export default function Overview() {
       </div>
 
       {err && (
-        <div className="card error-card">
-          <p>{err}</p>
-          <button type="button" className="btn" onClick={() => void load()}>
-            {t('retry')}
-          </button>
-        </div>
+        <ErrorState message={err} onRetry={() => () => void load()} />
       )}
 
       {!err && nodes === null && <div className="loading">{t('loading')}</div>}

@@ -4,13 +4,9 @@
 // text is never distorted by the non-uniform scaling.
 
 import { useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { ChartGrid, ChartLegend, ChartYLabels, H, PAD_L, PAD_R, PAD_T, W, useHiddenSeries } from './chartShared';
 import { niceTicks } from './LineChart';
 
-const W = 640;
-const H = 220;
-const PAD_L = 10;
-const PAD_R = 12;
-const PAD_T = 12;
 const PAD_B = 4;
 // Bar width cap in viewBox units so a sparse month doesn't turn into slabs.
 const MAX_BAR_W = 26;
@@ -53,20 +49,10 @@ export default function BarChart({
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<HoverInfo | null>(null);
-  // Stacks switched off by clicking their legend entry (see LineChart: keyed by
-  // name, per-instance, survives the polling refresh).
-  const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
+  const { hidden, toggle } = useHiddenSeries();
 
   const visible = useMemo(() => stacks.filter((s) => !hidden.has(s.name)), [stacks, hidden]);
   const allHidden = stacks.length > 0 && visible.length === 0;
-
-  const toggle = (name: string) =>
-    setHidden((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
 
   const n = barLabels.length;
 
@@ -135,27 +121,7 @@ export default function BarChart({
 
   return (
     <div className="chart">
-      <div className="chart-legend">
-        {stacks.map((s) => {
-          const off = hidden.has(s.name);
-          return (
-            <button
-              key={s.name}
-              type="button"
-              className={`chart-legend-item${off ? ' off' : ''}`}
-              aria-pressed={!off}
-              title={legendHint}
-              onClick={() => toggle(s.name)}
-            >
-              <span
-                className="chart-swatch"
-                style={off ? { background: 'transparent', boxShadow: `inset 0 0 0 2px ${s.color}` } : { background: s.color }}
-              />
-              {s.name}
-            </button>
-          );
-        })}
-      </div>
+      <ChartLegend items={stacks} hidden={hidden} onToggle={toggle} hint={legendHint} />
       <div
         ref={wrapRef}
         className="chart-plot"
@@ -164,17 +130,7 @@ export default function BarChart({
         onMouseLeave={() => setHover(null)}
       >
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" width="100%" height="100%">
-          {geom.ticks.map((tv) => (
-            <line
-              key={tv}
-              x1={PAD_L}
-              x2={W - PAD_R}
-              y1={geom.sy(tv)}
-              y2={geom.sy(tv)}
-              className="chart-grid"
-              vectorEffect="non-scaling-stroke"
-            />
-          ))}
+          <ChartGrid ticks={geom.ticks} sy={geom.sy} />
           {geom.bars.map((b) => (
             <rect key={b.key} x={b.x} y={b.y} width={b.w} height={b.h} fill={b.color} />
           ))}
@@ -183,15 +139,7 @@ export default function BarChart({
         {allHidden && allHiddenText && <div className="chart-hidden-hint">{allHiddenText}</div>}
 
         {/* y labels as HTML so text is not stretched by the non-uniform viewBox */}
-        {geom.ticks.map((tv) => (
-          <span
-            key={'yl' + tv}
-            className="chart-label chart-label-y mono"
-            style={{ top: `${((geom.sy(tv) - 6) / H) * 100}%` }}
-          >
-            {fmtY(tv)}
-          </span>
-        ))}
+        <ChartYLabels ticks={geom.ticks} sy={geom.sy} fmt={fmtY} />
 
         {hover && (
           <>

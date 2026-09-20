@@ -9,6 +9,7 @@ import Flag from '../components/Flag';
 import { CopyIcon, PencilIcon, TrashIcon } from '../components/Icons';
 import { useToast } from '../components/Toast';
 import { fmtDueDuration, copyText } from '../format';
+import { ErrorState } from '../components/ErrorState';
 
 type AddStep = 'closed' | 'form' | 'done';
 
@@ -90,12 +91,7 @@ export default function Servers() {
       <p className="hint">{t('servers_desc')}</p>
 
       {err && (
-        <div className="card error-card">
-          <p>{err}</p>
-          <button type="button" className="btn" onClick={() => void load()}>
-            {t('retry')}
-          </button>
-        </div>
+        <ErrorState message={err} onRetry={() => () => void load()} />
       )}
 
       {nodes !== null && nodes.length === 0 && <div className="empty-hint">{t('servers_empty')}</div>}
