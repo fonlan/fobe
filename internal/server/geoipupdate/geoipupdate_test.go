@@ -480,3 +480,25 @@ func TestDownloadSpeedAndPercent(t *testing.T) {
 		t.Fatalf("last observation = %+v, want the failure", last)
 	}
 }
+
+func TestEnsureRefusesRedirectIntoLinkLocal(t *testing.T) {
+	// A mirror that answers 302 pointing at the cloud metadata service. The
+	// guarded client must refuse the hop instead of following it — before the
+	// §12.5 guard the default client chased redirects to any host.
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	m := newManager(t, filepath.Join(t.TempDir(), "x.mmdb"), newMemSettings(), Config{
+		Sources: []string{srv.URL + "/db.mmdb"},
+	})
+	if got := m.Ensure(context.Background(), true); got.State != StateFailed {
+		t.Fatalf("status = %+v, want failed (the redirect into link-local must be refused)", got)
+	}
+	if n := atomic.LoadInt32(&hits); n != 1 {
+		t.Fatalf("mirror hits = %d, want exactly the first request", n)
+	}
+}

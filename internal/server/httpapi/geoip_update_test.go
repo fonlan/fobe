@@ -407,6 +407,11 @@ func TestGeoIPSettingsValidation(t *testing.T) {
 		{"geoip.max_age_days", "soon", "bad_geoip_max_age_days"},
 		{"geoip.url", "not a url", "bad_geoip_url"},
 		{"geoip.url", "ftp://mirror/db.mmdb", "bad_geoip_url"},
+		// §12.5 outbound guard (2026-09-20): a mirror URL is an endpoint the
+		// server dials on the operator's behalf, so link-local is refused at
+		// write time just like an AI base_url or a webhook.
+		{"geoip.url", "http://169.254.169.254/latest/db.mmdb", "bad_geoip_url"},
+		{"geoip.url", "http://[fe80::1]/db.mmdb", "bad_geoip_url"},
 	}
 	for _, c := range bad {
 		body, _ := json.Marshal(map[string]any{"settings": map[string]string{c.key: c.value}})
@@ -414,6 +419,15 @@ func TestGeoIPSettingsValidation(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), c.code) {
 			t.Fatalf("%s=%q: got %d %s, want 400 %s", c.key, c.value, resp.StatusCode, raw, c.code)
 		}
+	}
+
+	// Loopback stays allowed (the guard's accepted residue): a mirror on the
+	// operator's own machine is a normal self-hosted setup.
+	loopback, _ := json.Marshal(map[string]any{"settings": map[string]string{
+		"geoip.url": "http://127.0.0.1:9/db.mmdb",
+	}})
+	if resp, raw := doAuthed(t, "PUT", srv.URL+"/api/settings", cookie, loopback); resp.StatusCode != http.StatusOK {
+		t.Fatalf("loopback mirror url: got %d %s, want 200", resp.StatusCode, raw)
 	}
 
 	body, _ := json.Marshal(map[string]any{"settings": map[string]string{

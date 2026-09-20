@@ -11,6 +11,7 @@ import (
 
 	"github.com/fonlan/fobe/internal/server/geoip"
 	"github.com/fonlan/fobe/internal/server/geoipupdate"
+	"github.com/fonlan/fobe/internal/server/security"
 )
 
 // --- GeoIP MMDB (design §14/§14.1) ---
@@ -212,13 +213,19 @@ func (s *Server) OnGeoIPProgress(d geoipupdate.Download) {
 
 // validSourceURL accepts an absolute HTTP(S) download URL. Unlike the panel's
 // public URL it may carry a query string: mirror URLs are often signed or
-// versioned, and rejecting them would defeat a private mirror.
+// versioned, and rejecting them would defeat a private mirror. The host must
+// pass the §12.5 outbound guard — a mirror is an endpoint the server dials on
+// the operator's behalf, exactly like an AI base_url or a notify webhook.
+// Loopback/RFC1918 stay allowed there, so a LAN mirror keeps working.
 func validSourceURL(raw string) bool {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil {
 		return false
 	}
-	return u.Scheme == "http" || u.Scheme == "https"
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	return security.CheckOutboundHost(u.Hostname()) == nil
 }
 
 // geoIPSettingKey reports whether a settings key changes the §14 update policy.

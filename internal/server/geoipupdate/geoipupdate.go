@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/fonlan/fobe/internal/server/geoip"
+	"github.com/fonlan/fobe/internal/server/security"
 )
 
 // Settings keys. geoip.status is server-owned state (written here, never
@@ -160,7 +161,12 @@ func New(cfg Config) *Manager {
 		cfg.Now = time.Now
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
+		// GuardClient re-validates every redirect hop (§12.5 outbound rule):
+		// a hijacked — or merely misbehaving — mirror answering 302 must not
+		// steer the downloader at link-local. singboxdl runs behind the same
+		// guard; the panel-side URL validator (validSourceURL) is only the
+		// first layer, since FOBE_GEOIP_URL bypasses it.
+		cfg.HTTPClient = security.GuardClient(&http.Client{Timeout: defaultHTTPTimeout})
 	}
 	if len(cfg.Sources) == 0 {
 		cfg.Sources = DefaultSourceURLs

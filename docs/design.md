@@ -1020,6 +1020,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - **一个进程只有一个 MMDB 句柄**（`geoip.NewWith`）：hub 的国别判定与面板的状态视图共用它，更新成功后 `Reload()` 立即生效。此前 `cmd/server` 建了两个句柄，第二个要等自己的 stat 检查才发现文件变了。
 - 设置页新增：状态两块（数据库状态、数据日期）、进度条、「立即更新」、「上传 MMDB」，以及三个设置项（自动更新、最长天数、自定义下载源）。改这三项会**当场**跑一次策略检查（`Manager.Check`），不必等下一个日切。来源 URL 与上次检查时间仍由 `GET /api/geoip/status` 返回（数据来源不占面板位置，需要时再加回）。
 
+> **实现修订 2026-09-20（下载源纳入 §12.5 出站守卫）**：`geoip.url` 是面板可写、服务端代拨的出站端点，与 AI `base_url`、notify webhook 同类，此前却是唯一没过守卫的一个（写侧 `validSourceURL` 只验 URL 形状，下载侧是裸 `http.Client`——**默认追逐任意主机的 302**）。两层补齐：① 写侧（PUT 与 §17 导入共用 `validGeoIPSetting`）对 host 过 `security.CheckOutboundHost`，link-local（云元数据 169.254.169.254 等）/未指定/组播拒绝，回 `bad_geoip_url`；loopback/RFC1918 **照旧放行**——本机或局域网私有镜像是正常部署，这条守卫封的是元数据服务那一类，不是内网。② 下载侧默认客户端套 `security.GuardClient`，每个重定向跳复检（被劫持或手滑的镜像回 302 把下载器引去内网的路被堵死；`FOBE_GEOIP_URL` 不经面板校验，这层是它的兜底）。代价（同 §12.5 写明的残余）：持有设置接口的会话仍可把镜像 URL 当盲端口扫描器用——下载内容必须解析为合法 MMDB 才落盘，响应体没有读取通道。测试：`TestGeoIPSettingsValidation` 的 link-local 用例与 `TestEnsureRefusesRedirectIntoLinkLocal`。
+
 ---
 
 ## 15. 告警
