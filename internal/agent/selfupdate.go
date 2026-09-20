@@ -553,25 +553,10 @@ func (u *selfUpdater) artifactURL(target string) string {
 	return fmt.Sprintf("%s/dl/agent/%s/linux-amd64", strings.TrimRight(u.cfg.ServerURL, "/"), target)
 }
 
+// fetchChecksum delegates to the shared sidecar parser; the digest is
+// length-checked and lowercased there.
 func (u *selfUpdater) fetchChecksum(target string) (string, error) {
-	url := u.artifactURL(target) + ".sha256"
-	resp, err := u.httpClient().Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%s: %s", url, resp.Status)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		return "", err
-	}
-	fields := strings.Fields(string(raw))
-	if len(fields) == 0 {
-		return "", errors.New("empty checksum file")
-	}
-	return strings.TrimSpace(fields[0]), nil
+	return fetchExpectedSHA256(u.httpClient(), u.artifactURL(target)+".sha256")
 }
 
 // downloadFile streams the artifact into dir/tmp, refusing to start when the

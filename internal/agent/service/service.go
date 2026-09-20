@@ -64,53 +64,6 @@ func detectAt(root string) Kind {
 	}
 }
 
-// InstallAgent writes and enables the fobe-agent service.
-func InstallAgent(binPath, configPath string) error {
-	switch Detect() {
-	case KindSystemd:
-		unit := fmt.Sprintf(`[Unit]
-Description=fobe probe agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=%s -config %s -run
-Restart=always
-RestartSec=5
-User=root
-
-[Install]
-WantedBy=multi-user.target
-`, binPath, configPath)
-		if err := os.WriteFile("/etc/systemd/system/fobe-agent.service", []byte(unit), 0o644); err != nil {
-			return fmt.Errorf("write unit: %w", err)
-		}
-		return run("systemctl", "daemon-reload", "enable", "--now", "fobe-agent.service")
-
-	case KindProcd:
-		init := fmt.Sprintf(`#!/bin/sh /etc/rc.common
-USE_PROCD=1
-START=99
-
-start_service() {
-	procd_open_instance
-	procd_set_param command %s -config %s -run
-	procd_set_param respawn 3600 5 5
-	procd_set_param stdout 0
-	procd_set_param stderr 0
-	procd_close_instance
-}
-`, binPath, configPath)
-		if err := os.WriteFile("/etc/init.d/fobe-agent", []byte(init), 0o755); err != nil {
-			return fmt.Errorf("write init.d: %w", err)
-		}
-		return run("/etc/init.d/fobe-agent", "enable", "start")
-
-	default:
-		return fmt.Errorf("no service manager detected; run the agent in foreground: %s -config %s -run", binPath, configPath)
-	}
-}
-
 // sing-box on-disk layout (design §9.3 实现修订).
 //
 // The paths follow one-sing.sh — the server-side script this project mirrors

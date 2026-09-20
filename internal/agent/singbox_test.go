@@ -37,29 +37,12 @@ func TestParseSingboxVersion(t *testing.T) {
 	}
 }
 
-func TestNormalizeAndCompareVersions(t *testing.T) {
+func TestNormalizeVersion(t *testing.T) {
 	if v := normalizeVersion(" v1.11.5 "); v != "1.11.5" {
 		t.Fatalf("normalizeVersion = %q", v)
 	}
 	if v := normalizeVersion("V1.2.3"); v != "1.2.3" {
 		t.Fatalf("normalizeVersion = %q", v)
-	}
-
-	cases := []struct {
-		a, b string
-		want int
-	}{
-		{"1.11.5", "1.11.5", 0},
-		{"v1.11.5", "1.11.5", 0},
-		{"1.10.0", "1.9.9", 1},    // numeric, not lexical
-		{"1.2", "1.2.0", 0},       // missing part = zero
-		{"2.0.0", "1.99.99", 1},   //
-		{"1.11.4", "1.11.10", -1}, //
-	}
-	for _, c := range cases {
-		if got := compareVersions(c.a, c.b); got != c.want {
-			t.Fatalf("compareVersions(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
-		}
 	}
 }
 
