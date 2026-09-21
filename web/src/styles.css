@@ -412,7 +412,7 @@ section.card { margin-bottom: 0; }
 .btn.small { padding: 4px 10px; font-size: 13px; }
 .btn.block { width: 100%; justify-content: center; }
 
-.btn-icon { width: 16px; height: 16px; }
+.btn-icon { width: 16px; height: 16px; flex: none; }
 .btn-text { font-size: 13px; }
 
 .icon-btn {
@@ -868,6 +868,12 @@ section.card { margin-bottom: 0; }
 
 .node-title { display: flex; flex-direction: column; gap: 4px; }
 .node-title h2 { display: flex; align-items: center; gap: 10px; font-size: 18px; }
+/* The detail header's two actions (编辑 / Web 终端) are peers: stretch rather
+   than the row default's center pins them to one shared height, and nowrap
+   keeps a squeezed label from turning one button into a two-line box that no
+   longer matches the other. Each carries an icon, so both are the same shape. */
+.row-gap.head-actions { align-items: stretch; }
+.row-gap.head-actions > .btn { white-space: nowrap; }
 .back-link { font-size: 13px; color: var(--text-dim); }
 /* Standalone row above the terminal card, so it must not stretch across it. */
 .back-link-row { align-self: flex-start; }

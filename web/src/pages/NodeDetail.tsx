@@ -7,7 +7,7 @@ import { fmtBytes, fmtDuration, fmtPct, fmtRate, fmtTime, fmtTimeShort, fmtDate 
 import type { LatencySample, LatencyTarget, MetricsSample, NodeDetailData, TrafficResp } from '../types';
 import Flag from '../components/Flag';
 import DistroLogo, { distroName } from '../components/DistroLogo';
-import { PencilIcon } from '../components/Icons';
+import { PencilIcon, TerminalIcon } from '../components/Icons';
 import LineChart, { type ChartPoint, type ChartSeries } from '../components/LineChart';
 import BarChart from '../components/BarChart';
 import ProgressBar from '../components/ProgressBar';
@@ -206,12 +206,13 @@ export default function NodeDetail() {
             <span className={'dot ' + (node.online ? 'on' : 'off')} title={t(node.online ? 'online' : 'offline')} />
           </h2>
         </div>
-        <div className="row-gap">
+        {/* The two header actions are peers: same height, one icon each. */}
+        <div className="row-gap head-actions">
           <Link to={`/settings/servers/${encodeURIComponent(id)}`} className="btn">
             <PencilIcon /> {t('edit')}
           </Link>
           <Link to={`/nodes/${encodeURIComponent(id)}/terminal`} className="btn primary">
-            {t('web_terminal')}
+            <TerminalIcon /> {t('web_terminal')}
           </Link>
         </div>
       </div>

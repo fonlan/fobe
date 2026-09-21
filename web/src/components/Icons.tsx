@@ -92,3 +92,13 @@ export function PencilIcon(props: IconProps) {
     </Base>
   );
 }
+
+/** Open a node's browser terminal (agent-local PTY, design §11). */
+export function TerminalIcon(props: IconProps) {
+  return (
+    <Base {...props}>
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <path d="M8 10.5 10.5 13 8 15.5M13 15.5h3.5" />
+    </Base>
+  );
+}
