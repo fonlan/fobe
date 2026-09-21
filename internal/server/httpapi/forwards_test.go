@@ -192,6 +192,17 @@ func TestForwardsPanelFlow(t *testing.T) {
 		t.Fatalf("nfpf rule misread by the panel: %v", rows[0])
 	}
 
+	// 2b. The node detail page shows the same rules read-only: they ride
+	// GET /api/nodes/{id} as a plain list off the stored snapshot, so opening
+	// the page never blocks on a probe.
+	_, detail := fwdDo(t, "GET", srv.URL+"/api/nodes/"+agent.node, cookie, nil)
+	if rows = forwardsList(t, "", cookie, detail); len(rows) != 2 {
+		t.Fatalf("node detail forwards = %v", detail["forwards"])
+	}
+	if rows[0]["src_port"].(float64) != 8080 || rows[0]["dst_ip"] != "10.0.0.1" || rows[1]["proto"] != "udp" {
+		t.Fatalf("node detail rows = %v", rows)
+	}
+
 	// 3. Add: the agent applies and answers with the new set.
 	var gotAdd protocol.ForwardsRequest
 	agent.setReply(func(req protocol.ForwardsRequest) protocol.ForwardsResult {

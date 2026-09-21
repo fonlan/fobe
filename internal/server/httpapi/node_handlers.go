@@ -253,6 +253,14 @@ func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
 		}
 		resp["singbox_inbounds"] = ibs
 	}
+	// The nftables port forwards the probe last reported (§21). Same read-only
+	// treatment as the table above: a page load must never block on a probe, so
+	// this is the stored snapshot — §21 rules are shared with nfpf.sh and hand
+	// written nft, and editing stays on the EditServer card. Set even when empty
+	// (like singbox_inbounds) so the list always mirrors the snapshot.
+	if rows, err := s.Store.ListNodeForwards(id); err == nil {
+		resp["forwards"] = forwardViews(rows)
+	}
 	if net, err := s.Store.GetNodeNetwork(id); err == nil {
 		resp["network"] = net
 		resp["traffic_cycle"] = trafficCycleView(net, time.Now())

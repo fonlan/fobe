@@ -355,6 +355,24 @@ func (s *Server) writeForwardErr(w http.ResponseWriter, err error) {
 	writeErr(w, status, code)
 }
 
+// forwardViews maps stored rows to the panel view, capped by forwardsMaxRule.
+// Shared by the §21 card (whole reply) and the read-only list on the node
+// detail page, so both endpoints can never disagree about a rule.
+func forwardViews(rows []store.NodeForward) []forwardView {
+	views := make([]forwardView, 0, len(rows))
+	for i, row := range rows {
+		if i >= forwardsMaxRule {
+			break
+		}
+		views = append(views, forwardView{
+			Proto: row.Proto, SrcPort: row.SrcPort, Iface: row.Iface,
+			DstIP: row.DstIP, DstPort: row.DstPort, Comment: row.Comment,
+			Handle: row.Handle, ExtraMatch: row.ExtraMatch,
+		})
+	}
+	return views
+}
+
 // forwardsReply builds the panel view from the stored snapshot.
 func (s *Server) forwardsReply(nodeID string) (forwardsReply, error) {
 	status, err := s.Store.GetNodeForwardStatus(nodeID)
@@ -365,23 +383,12 @@ func (s *Server) forwardsReply(nodeID string) (forwardsReply, error) {
 	if err != nil {
 		return forwardsReply{}, err
 	}
-	reply := forwardsReply{
+	return forwardsReply{
 		Supported: status.Supported, Initialized: status.Initialized,
 		Code: status.Code, Message: status.Message, ReportedAt: status.ReportedAt,
 		AgentSupported: status.ReportedAt > 0,
-		Forwards:       make([]forwardView, 0, len(rows)),
-	}
-	for i, row := range rows {
-		if i >= forwardsMaxRule {
-			break
-		}
-		reply.Forwards = append(reply.Forwards, forwardView{
-			Proto: row.Proto, SrcPort: row.SrcPort, Iface: row.Iface,
-			DstIP: row.DstIP, DstPort: row.DstPort, Comment: row.Comment,
-			Handle: row.Handle, ExtraMatch: row.ExtraMatch,
-		})
-	}
-	return reply, nil
+		Forwards:       forwardViews(rows),
+	}, nil
 }
 
 // forwardDesc renders a rule for the audit trail.

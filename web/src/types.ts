@@ -133,6 +133,9 @@ export interface NodeDetailData {
   singbox?: SingboxInfo | null;
   /** All listeners the probe saw in config.json (§17g), no credentials. */
   singbox_inbounds?: SingboxInboundRow[];
+  /** The nftables port forwards the probe last reported (§21). Read-only here;
+   *  the probe's ruleset is the truth and editing lives in the EditServer card. */
+  forwards?: ForwardRule[];
   network?: NodeNetwork | null;
   traffic_cycle?: NodeTrafficCycle | null;
   interfaces?: NodeInterface[];

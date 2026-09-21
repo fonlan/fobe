@@ -365,6 +365,50 @@ export default function NodeDetail() {
           </div>
         </section>
       )}
+
+      {/* §21: the probe's nftables DNAT rules — the same read-only treatment as
+          the inbound table above, and the same columns as the EditServer card
+          minus the row actions. Empty is ordinary (old agent that never
+          reported, or a probe without forwards) and renders no card at all.
+          Editing stays in Settings → Servers → Edit. */}
+      {data.forwards && data.forwards.length > 0 && (
+        <section className="card">
+          <h3>{t('sec_forwards')}</h3>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>{t('fw_col_proto')}</th>
+                  <th>{t('fw_col_src')}</th>
+                  <th>{t('fw_col_iface')}</th>
+                  <th>{t('fw_col_dst')}</th>
+                  <th>{t('fw_col_note')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.forwards.map((fr) => (
+                  <tr key={`${fr.proto}/${fr.src_port}/${fr.iface}/${fr.handle}`}>
+                    <td className="nowrap">{fr.proto.toUpperCase()}</td>
+                    <td className="mono nowrap">{fr.src_port || t('fw_any')}</td>
+                    <td className="mono nowrap">{fr.iface || t('fw_all_ifaces')}</td>
+                    <td className="mono nowrap">
+                      {fr.dst_ip}:{fr.dst_port}
+                      {fr.extra_match && (
+                        <span className="chip chip-muted" title={t('fw_tip_extra_match')}>
+                          {t('fw_extra_match')}
+                        </span>
+                      )}
+                    </td>
+                    <td className="cell-ellipsis" title={fr.comment || undefined}>
+                      {fr.comment || <span className="hint">{t('none')}</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
