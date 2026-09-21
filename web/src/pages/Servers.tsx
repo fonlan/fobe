@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import * as api from '../api';
 import { apiErrorMessage } from '../api';
@@ -8,17 +8,26 @@ import Modal from '../components/Modal';
 import Flag from '../components/Flag';
 import { CopyIcon, PencilIcon, TrashIcon } from '../components/Icons';
 import { useToast } from '../components/Toast';
-import { fmtDueDuration, copyText } from '../format';
+import { fmtDueDays, copyText } from '../format';
 import { ErrorState } from '../components/ErrorState';
 
 type AddStep = 'closed' | 'form' | 'done';
 
-function dueText(node: NodeView, t: TFn): string {
-  if (!node.billing_configured || node.next_due_at == null) return '';
-  const due = fmtDueDuration(node.next_due_at);
-  if (!due) return '';
-  if (due.overdue) return t('due_overdue_for', { time: due.duration });
-  return t('due_in', { time: due.duration });
+/**
+ * Expiry column (§15): whole days only — "18天", not "18d 3h". Red under a week;
+ * the threshold reads the same rounded number the cell prints, so a red "7天" (or
+ * a calm "6天") cannot happen. Overdue is red too.
+ */
+function dueCell(node: NodeView, t: TFn): ReactNode {
+  if (!node.billing_configured || node.next_due_at == null) return null;
+  const due = fmtDueDays(node.next_due_at);
+  if (!due) return null;
+  const soon = due.overdue || due.days < 7;
+  return (
+    <span className={'due-days' + (soon ? ' due-soon' : '')}>
+      {due.overdue ? t('due_overdue_for', { d: due.days }) : t('due_in', { d: due.days })}
+    </span>
+  );
 }
 
 /**
@@ -143,7 +152,7 @@ export default function Servers() {
                       '-'
                     )}
                   </td>
-                  <td>{dueText(n, t)}</td>
+                  <td>{dueCell(n, t)}</td>
                   <td className="mono">
                     {n.agent_version || '-'}
                     {/* §5.5: the target is shown next to the reported version so a

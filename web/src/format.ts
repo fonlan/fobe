@@ -60,11 +60,16 @@ export function fmtDuration(seconds: number): string {
   return `${m}m`;
 }
 
-/** Format a due-time gap while preserving whether the date is already past. */
-export function fmtDueDuration(dueAt: number, now = Date.now() / 1000): { overdue: boolean; duration: string } | null {
+/**
+ * Day-granular due gap for the settings list (§15): that column prints whole days
+ * ("18天"), not the "18d 3h" the durations elsewhere use. Overdue counts up and is
+ * floored at 1 — "已逾期 0天" would read as "not late yet".
+ */
+export function fmtDueDays(dueAt: number, now = Date.now() / 1000): { overdue: boolean; days: number } | null {
   if (!isFinite(dueAt) || dueAt <= 0) return null;
   const delta = dueAt - now;
-  return { overdue: delta < 0, duration: fmtDuration(Math.abs(delta)) };
+  if (delta < 0) return { overdue: true, days: Math.max(1, Math.ceil(-delta / 86400)) };
+  return { overdue: false, days: Math.round(delta / 86400) };
 }
 
 function pad(n: number): string {

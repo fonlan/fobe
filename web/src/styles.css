@@ -699,6 +699,12 @@ section.card { margin-bottom: 0; }
   color: var(--red);
 }
 
+/* 设置→服务器列表的到期列（§15，2026-09-21 实现修订）：纯文字而非胶囊，只印整天数；
+   剩余 <7 天（含已逾期）转 red。阈值用的是单元格打印的那个取整值，因此不会出现
+   「7天」却是红的。 */
+.due-days { white-space: nowrap; }
+.due-days.due-soon { color: var(--red); }
+
 /* 费用 tag on the overview card: operator-entered data, so it takes the accent
    colour instead of a status colour (amber = due, red = offline). Qualified
    with .chip on purpose — this rule sits above the .chip block, and equal
