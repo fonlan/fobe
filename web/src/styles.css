@@ -412,23 +412,6 @@ section.card { margin-bottom: 0; }
 }
 .btn.danger:hover:not(:disabled) { background: var(--red); color: #fff; }
 
-/* A lighter primary. Measured on a real screen: a solid accent block and an
-   outlined sibling were the *same* box (both 37px) yet the solid one read
-   taller, because its edges are hard while the outline is `--border` on
-   `--bg` (~1.1:1) — i.e. the eye sizes buttons by how visible their boundary
-   is, not by pixels. Tonal keeps the hierarchy (indigo at rest) without the
-   solid block, and fills on hover like .btn.danger does. Use it where a
-   primary sits beside a peer outlined button (node detail header, §16). */
-.btn.tonal {
-  background: var(--accent-weak);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.btn.tonal:hover:not(:disabled) {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-contrast);
-}
 
 .btn.ghost { border-color: transparent; background: transparent; color: var(--text-dim); }
 .btn.ghost:hover { background: var(--panel-2); color: var(--text); }

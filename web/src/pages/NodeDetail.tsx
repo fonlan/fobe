@@ -206,15 +206,15 @@ export default function NodeDetail() {
             <span className={'dot ' + (node.online ? 'on' : 'off')} title={t(node.online ? 'online' : 'offline')} />
           </h2>
         </div>
-        {/* The two header actions are peers: same height, one icon each. The
-            terminal one is tonal rather than primary — a solid accent block
-            beside an outlined peer reads taller even when both boxes measure
-            37px, because only the solid one has a visible boundary (§16). */}
+        {/* The two header actions are peers: same height, one icon each. Back to
+            the solid primary: the tonal (tinted) variant only moved the optical
+            problem to the border — one edge visible, the other a hairline — and
+            read wrong too, so the operator kept the app's original language. */}
         <div className="row-gap head-actions">
           <Link to={`/settings/servers/${encodeURIComponent(id)}`} className="btn">
             <PencilIcon /> {t('edit')}
           </Link>
-          <Link to={`/nodes/${encodeURIComponent(id)}/terminal`} className="btn tonal">
+          <Link to={`/nodes/${encodeURIComponent(id)}/terminal`} className="btn primary">
             <TerminalIcon /> {t('web_terminal')}
           </Link>
         </div>
