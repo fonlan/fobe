@@ -381,6 +381,12 @@ section.card { margin-bottom: 0; }
   padding: 7px 14px;
   font-size: 14px;
   font-weight: 500;
+  /* The UA stylesheet gives form controls `line-height: normal`, anchors inherit
+     the page's 1.5 — so `<a class="btn">` and `<button class="btn">` computed
+     21px vs ~16px (Latin) / ~18px (CJK) content and the same row came out
+     29.5 / 26 / 28px tall (the top bar was exactly that). Pin it on the class so
+     the element type stops mattering; 1.5 keeps the anchors' current metrics. */
+  line-height: 1.5;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
 }
@@ -422,6 +428,17 @@ section.card { margin-bottom: 0; }
   color: var(--text-dim);
   font-size: 20px;
   line-height: 1;
+  /* Same trap as .btn: a `.icon-btn` on an <a> stays display:inline, so the SVG
+     rides the text baseline and the box grew to 27px while the <button> beside
+     it was inline-block at 24px — one row, two heights, both "the same" class.
+     Own the display so the element type stops deciding. min-height restores the
+     box the old 20px font strut used to provide: a flex container has no text
+     strut, so without it every icon button would shrink 4px (and the 13px
+     ip-copy icon would drag its row to 17px). */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
   cursor: pointer;
   padding: 2px 6px;
   border-radius: 6px;
