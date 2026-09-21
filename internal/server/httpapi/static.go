@@ -111,6 +111,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if s.WebDir == "" {
 		// dev mode: point the user at the Vite dev server instead of 404/blank
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write([]byte(apiOnlyHTML))
 		return
 	}
@@ -123,10 +124,36 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+
+	// Cache policy (implementation revision 2026-09-21). Vite writes
+	// content-hashed bundles under /assets/, so their name changes with their
+	// bytes and they may be cached forever. The shell must not be: with only
+	// Last-Modified, a browser falls back to heuristic freshness (≈10% of the
+	// time since that stamp) and keeps rendering the *previous* bundle after a
+	// rebuild — a healthy-looking panel showing the old UI, which is exactly how
+	// "I rebuilt it but nothing changed" presents, and it also hides the fix
+	// from whoever is told to reload. `no-cache` (not `no-store`) still allows
+	// the cheap If-Modified-Since → 304 round trip for an unchanged build.
+	isHashed := strings.HasPrefix(p, "/assets/")
 	st, err := os.Stat(full)
 	if err != nil || st.IsDir() {
-		// SPA fallback: every unknown path serves index.html
+		// A shell that predates this build asks for a bundle that no longer
+		// exists. Answering that with index.html (the old behaviour: any missing
+		// path served the SPA) hands the browser HTML where it expects JS, so it
+		// fails as a parse error instead of a clean 404.
+		if isHashed {
+			writeErr(w, http.StatusNotFound, "unknown_asset")
+			return
+		}
+		// SPA fallback: every unknown path serves index.html (isHashed is false
+		// here: a /assets/ path that is missing already returned above)
 		full = filepath.Join(s.WebDir, "index.html")
+	}
+	if isHashed {
+		// Immutable is only truthful because of the content hash in the name.
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
 	}
 	http.ServeFile(w, r, full)
 }

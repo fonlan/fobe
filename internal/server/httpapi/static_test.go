@@ -5,6 +5,8 @@ package httpapi
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -59,5 +61,60 @@ func TestStaticPageStillServesRoot(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "fobe") {
 		t.Fatalf("GET / body = %s, want the panel/API-only page", raw)
+	}
+}
+
+// TestStaticCachePolicy pins the 2026-09-21 policy. The shell must revalidate:
+// with nothing but Last-Modified the browser applies heuristic freshness (≈10%
+// of the time since that stamp) and keeps rendering the bundle from before a
+// rebuild — the panel looks healthy while showing the old UI, and the person
+// who just rebuilt it is told "nothing changed". Content-hashed bundles are the
+// opposite case: their name changes with their bytes, so they may be immutable.
+func TestStaticCachePolicy(t *testing.T) {
+	srv, api := newTestServer(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"index.html":             "<!doctype html><title>fobe</title>",
+		"logo.svg":               "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+		"assets/index-abc123.js": "export default 1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api.WebDir = dir
+
+	for _, tc := range []struct{ path, why string }{
+		{"/", "the shell itself"},
+		{"/nodes/3TFhf4xe2AA", "a deep link falls back to the shell"},
+		{"/logo.svg", "an unhashed root asset"},
+	} {
+		resp, _ := doAuthed(t, "GET", srv.URL+tc.path, "", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s (%s): got %d, want 200", tc.path, tc.why, resp.StatusCode)
+		}
+		if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
+			t.Fatalf("GET %s (%s): Cache-Control = %q, want no-cache", tc.path, tc.why, cc)
+		}
+	}
+
+	resp, _ := doAuthed(t, "GET", srv.URL+"/assets/index-abc123.js", "", nil)
+	if cc := resp.Header.Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+		t.Fatalf("hashed bundle: Cache-Control = %q, want immutable", cc)
+	}
+
+	// The case that motivated the split: a shell from an older build asks for a
+	// bundle this build no longer ships. index.html here would be executed as a
+	// module (the old fallback did exactly that, with a 200); a 404 says what
+	// happened.
+	resp, raw := doAuthed(t, "GET", srv.URL+"/assets/index-gone.js", "", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing bundle: got %d, want 404 (body %s)", resp.StatusCode, raw)
+	}
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "text/html") {
+		t.Fatalf("missing bundle answered HTML (%q): %s", ct, raw)
 	}
 }
