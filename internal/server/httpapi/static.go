@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
 )
 
 // --- /install.sh (design §5.2) ---
@@ -125,15 +128,25 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cache policy (implementation revision 2026-09-21). Vite writes
-	// content-hashed bundles under /assets/, so their name changes with their
-	// bytes and they may be cached forever. The shell must not be: with only
-	// Last-Modified, a browser falls back to heuristic freshness (≈10% of the
-	// time since that stamp) and keeps rendering the *previous* bundle after a
-	// rebuild — a healthy-looking panel showing the old UI, which is exactly how
-	// "I rebuilt it but nothing changed" presents, and it also hides the fix
-	// from whoever is told to reload. `no-cache` (not `no-store`) still allows
-	// the cheap If-Modified-Since → 304 round trip for an unchanged build.
+	// Cache policy (implementation revision 2026-09-21, revised same day).
+	// Vite writes content-hashed bundles under /assets/, so their name changes
+	// with their bytes and they may be cached forever. The shell must not be:
+	// with only Last-Modified, a browser falls back to heuristic freshness (≈10%
+	// of the time since that stamp) and keeps rendering the *previous* bundle
+	// after a rebuild — a healthy-looking panel showing the old UI, which is
+	// exactly how "I rebuilt it but nothing changed" presents.
+	//
+	// `no-cache` alone turned out not to be enough, because Last-Modified is not
+	// trustworthy here: every file in the image's /srv/web carries the *same*
+	// mtime (the layer that first created the path), so a rebuilt panel with
+	// different content still answers the browser's If-Modified-Since with 304
+	// and the old bundle stays on screen. That reproduced live: after two
+	// deploys in one session the reverted CSS was on disk, the headers said
+	// 304, and the browser kept the discarded style. So the shell is validated
+	// by a content ETag, and a zero modtime is passed to ServeContent, which
+	// emits no Last-Modified and deliberately ignores If-Modified-Since — a
+	// browser holding a pre-ETag copy therefore gets a full 200 and heals
+	// itself on the next reload instead of staying stuck.
 	isHashed := strings.HasPrefix(p, "/assets/")
 	st, err := os.Stat(full)
 	if err != nil || st.IsDir() {
@@ -152,10 +165,20 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if isHashed {
 		// Immutable is only truthful because of the content hash in the name.
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	} else {
-		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, full)
+		return
 	}
-	http.ServeFile(w, r, full)
+	// Shell and unhashed root assets (logo.svg): small files, revalidated on
+	// every load, validated by content rather than by the untrustworthy mtime.
+	data, err := os.ReadFile(full)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	sum := sha256.Sum256(data)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:16])+`"`)
+	http.ServeContent(w, r, filepath.Base(full), time.Time{}, bytes.NewReader(data))
 }
 
 const apiOnlyHTML = `<!doctype html>

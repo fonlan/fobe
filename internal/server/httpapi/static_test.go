@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestUnknownAPIPathIsJSON pins the fallout that motivated the guard: a server
@@ -104,6 +105,45 @@ func TestStaticCachePolicy(t *testing.T) {
 	resp, _ := doAuthed(t, "GET", srv.URL+"/assets/index-abc123.js", "", nil)
 	if cc := resp.Header.Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
 		t.Fatalf("hashed bundle: Cache-Control = %q, want immutable", cc)
+	}
+
+	// Shell revalidation is by content, not by mtime. In the image every file in
+	// /srv/web carries the *same* mtime across rebuilds (whatever layer first
+	// created the path owns the stamp), so a Last-Modified-based 304 can serve a
+	// bundle that is no longer on disk. That is not hypothetical: it is how a
+	// reverted stylesheet stayed on screen after two deploys in one session —
+	// disk correct, headers said 304, browser kept the discarded style.
+	shell, _ := doAuthed(t, "GET", srv.URL+"/", "", nil)
+	etag := shell.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("shell has no ETag: nothing but an untrustworthy mtime to validate on")
+	}
+	if lm := shell.Header.Get("Last-Modified"); lm != "" {
+		t.Fatalf("shell sent Last-Modified %q: that stamp is identical across rebuilds here, so it can only answer wrong 304s", lm)
+	}
+
+	conditional := func(header, value string) *http.Response {
+		req, err := http.NewRequest("GET", srv.URL+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(header, value)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { res.Body.Close() })
+		return res
+	}
+	// A browser still holding a pre-ETag copy has only If-Modified-Since to offer.
+	// It must receive the current shell (200) so it heals by itself; a 304 here
+	// is precisely the stuck state.
+	if res := conditional("If-Modified-Since", time.Now().Add(24*time.Hour).UTC().Format(http.TimeFormat)); res.StatusCode != http.StatusOK {
+		t.Fatalf("If-Modified-Since on the shell: got %d, want 200 (a 304 serves a stale bundle)", res.StatusCode)
+	}
+	// And once it does hold the ETag, an unchanged shell is still a cheap 304.
+	if res := conditional("If-None-Match", etag); res.StatusCode != http.StatusNotModified {
+		t.Fatalf("If-None-Match with the shell's own ETag: got %d, want 304", res.StatusCode)
 	}
 
 	// The case that motivated the split: a shell from an older build asks for a
