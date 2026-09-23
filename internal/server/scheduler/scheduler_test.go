@@ -431,6 +431,45 @@ func TestDeliverAlertsSendsRecoveryForRecoveredAlerts(t *testing.T) {
 	}
 }
 
+// The mainline recovery: the offline notice went out, the probe came back
+// minutes later, and the operator has to learn it is back. RecoverAlert used to
+// leave delivered_at set, and UndeliveredAlerts only returns `delivered_at IS
+// NULL` rows — so the recovery notice was unreachable for any alert that had
+// already been sent, which is every real outage (delivery runs every minute).
+// Only a probe returning inside that one-minute window ever produced a notice.
+func TestDeliverAlertsSendsRecoveryAfterDeliveredAlert(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	fake := &fakeNotifier{name: "telegram", configured: true}
+	s := New(st, testLogger(), "", 7, fake)
+
+	if _, _, err := st.CreateAlert("node_offline", "n1", "{}", 3600); err != nil {
+		t.Fatal(err)
+	}
+	s.deliverAlerts()
+	if len(fake.events) != 1 || fake.events[0].Event != notify.EventAlert {
+		t.Fatalf("offline notice = %+v, want one alert event", fake.events)
+	}
+
+	// the probe reconnects: hub.onHello -> RecoverAlert
+	if err := st.RecoverAlert("node_offline", "n1"); err != nil {
+		t.Fatal(err)
+	}
+	s.deliverAlerts()
+	if len(fake.events) != 2 || fake.events[1].Event != notify.EventRecovery {
+		t.Fatalf("events = %+v, want the recovery notice as the second delivery", fake.events)
+	}
+
+	// one notice per outage: later passes have nothing left to send
+	s.deliverAlerts()
+	if len(fake.events) != 2 {
+		t.Fatalf("recovery re-delivered: %d events", len(fake.events))
+	}
+	if undelivered, _ := st.UndeliveredAlerts(); len(undelivered) != 0 {
+		t.Fatalf("recovered alert left in the queue: %+v", undelivered)
+	}
+}
+
 func TestDeliverAlertsRetriesAfterFailure(t *testing.T) {
 	st := testStore(t)
 	addNode(t, st, "n1", "edge-1")

@@ -1042,6 +1042,8 @@ rollback:  恢复 .prev 二进制 + 旧配置 + 重启 → 告警"回滚已执�
 - 同类告警去重合并（同一节点同一类型 1 小时内只发一次，恢复时补一条 recovery）。
 - 面板内"通知中心"保留全部历史，`alerts` 表为权威。
 
+- **恢复通知真的发得出去（2026-09-23 修订）**：`delivered_at` 曾把恢复挡在门外——`UndeliveredAlerts` 只取 `delivered_at IS NULL` 的行，而 `RecoverAlert` 只写 `recovered_at`，于是**已投递**的告警恢复后再也进不了队列，上一行承诺的「恢复时补一条 recovery」实际只在「告警还没投出去（60s 内）就恢复」那一分钟窗口里成立。投递每分钟一轮、探针通常几分钟后才回来，所以主路径全哑：操作员收到「探针离线」，探针回来后什么也收不到。现在 `RecoverAlert` 同时清 `delivered_at`，把该行放回投递队列（按上一条补一条 recovery，不改队列本身：**告警本体不会重发**，清 `delivered_at` 只是让恢复态这一条出得去）；`recovered_at IS NULL` 的守卫保证**一次告警最多一条恢复通知**，重复调用（每个上线帧、收敛循环）不会把已发出的恢复再入队。放回队列的判据是**状态跃迁**而不是重连：`hub.markOnlineAudited`（hello 与心跳共用）在 `!wasOnline` 时调 `RecoverAlert`。此前只在 `onHello` 调，于是链路黑洞后自愈的探针（没有重连、没有 hello，只靠心跳把状态翻回在线）会留下一条**永不恢复的 open 告警**——而 `CreateAlert` 的去重只跳过**已恢复**的行，所以它还会把接下来一小时里**下一次真实离线**一并吞掉。
+
 - **投递留痕（2026-09-18 修订）**：告警成功投递到哪个渠道都写 `audit_logs`（`notify_sent`，带 channel / kind / event）；失败写 `notify_failed`。两者都按 (告警, 渠道, 结果) 去重：失败的告警留在队列里每分钟重试，部分失败还会把整条告警重跑一遍（§4.4）。被事件开关拦下的告警**不写审计**：那是有意的静默，不是一次投递。
 
 - **文本消息版面（2026-09-19 修订）**：Telegram 与飞书共用 `notify.MessageText`，从「一行 kind slug + RFC3339 + 原始 JSON」改成「emoji 严重度 + 人类可读标题」起头，下面接 `Node:` / `Time:` 与逐条人读字段：kind 映射成标题（`node_offline` → `🔴 fobe · Probe offline`），恢复态走 `✅ … (recovered)`，测试消息走 `🔔 fobe · Test notification`；载荷字段按 kind 转成带单位/时区的行（字节 → KB/MB/GB、`due_at`/`deadline`/`checked_at` → `YYYY-MM-DD HH:MM:SS <时区>`、`mode`/`direction` → Inbound/Outbound、集群告警的 `nodes` 列表最多列 8 台后收成 `+N more`），未知 kind 与未知字段仍原样列出（新告警类型不会静默消失）。时间按 `notify.timezone` 渲染并写明时区缩写（缺省 UTC，见下一条）；单值截断 300 字符、整条截断 3800 字符（Telegram 上限 4096）。**通用 Webhook 的 JSON 线格式与 `alerts.payload` 的存法都不变**——那是给机器读的契约；面板告警页仍按 `kind_*` 文案显示。

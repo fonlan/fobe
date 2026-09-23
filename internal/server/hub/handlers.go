@@ -45,7 +45,6 @@ func (h *Hub) onHello(c *Conn, hello *protocol.Hello) {
 		h.recordIPs(c.nodeID, hello.IPs, c.srcIP)
 	}
 	h.replaceInterfaces(c.nodeID, hello.Interfaces)
-	_ = h.store.RecoverAlert("node_offline", c.nodeID)
 	h.log.Debug("node hello", "node", c.nodeID, "version", hello.Version)
 }
 
@@ -59,15 +58,15 @@ func (h *Hub) auditSystem(action, nodeID, command string) {
 	}
 }
 
-// markOnlineAudited records liveness and audits the §4.4 up-edge. Both frame
-// paths funnel through here so neither can miss an edge: hello is the edge of
-// a reconnect, but a bare ping can be one too — a link that silently black-
-// holed and healed never disconnects (no read deadline server-side, ping
-// writes only queue in the agent's kernel buffer), so the first surviving
-// ping is what flips a node detectOffline had marked offline back to online.
-// Skipping the audit there is what left "node_offline without a matching
-// node_online" rows in the trail.
-
+// markOnlineAudited records liveness, audits the §4.4 up-edge and closes the
+// §15 offline alert. Both frame paths funnel through here so neither can miss an
+// edge: hello is the edge of a reconnect, but a bare ping can be one too — a
+// link that silently black-holed and healed never disconnects (no read deadline
+// server-side, ping writes only queue in the agent's kernel buffer), so the
+// first surviving ping is what flips a node detectOffline had marked offline
+// back to online. Skipping the audit there is what left "node_offline without a
+// matching node_online" rows in the trail; skipping the alert recovery there is
+// what left the alert open and the recovery notice unsent.
 func (h *Hub) markOnlineAudited(nodeID, version string, at int64) {
 	wasOnline, silentFor, err := h.store.MarkNodeOnline(nodeID, version, at)
 	if err != nil {
@@ -76,6 +75,14 @@ func (h *Hub) markOnlineAudited(nodeID, version string, at int64) {
 	}
 	if !wasOnline {
 		h.auditSystem("node_online", nodeID, nodeOnlineDetail(version, silentFor))
+		// §15: the recovery notice rides this status edge, not the reconnect. A
+		// black-holed link that heals without reconnecting never sends a hello,
+		// so recovering only in onHello left that node's offline alert open
+		// forever — and an unrecovered row also swallows its next real outage,
+		// because CreateAlert's dedupe only skips *recovered* alerts.
+		if err := h.store.RecoverAlert("node_offline", nodeID); err != nil {
+			h.log.Warn("recover offline alert", "node", nodeID, "err", err)
+		}
 	}
 }
 

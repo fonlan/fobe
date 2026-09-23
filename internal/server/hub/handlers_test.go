@@ -854,3 +854,48 @@ func TestPingRevivesOfflineNodeAuditsUpEdge(t *testing.T) {
 		t.Fatalf("steady-state ping added rows: %+v", got)
 	}
 }
+
+// §15: the recovery notice rides the status up-edge, not the reconnect. A link
+// that black-holed and healed without ever reconnecting sends no hello, so
+// recovering only in onHello left that node's offline alert open forever — and
+// the unrecovered row also swallows the next real outage, because CreateAlert's
+// dedupe only skips *recovered* alerts. The alert must also go back into the
+// delivery queue (delivered_at cleared), or the "back online" notice is never
+// sent for an outage the operator already heard about.
+func TestPingRevivalRecoversOfflineAlert(t *testing.T) {
+	h := newTestHub(t)
+	mustCreateNode(t, h.store, "n1")
+
+	h.onHello(&Conn{nodeID: "n1"}, &protocol.Hello{Version: "1.0.0"})
+	if _, _, err := h.store.MarkNodeOnline("n1", "", time.Now().Unix()-200); err != nil {
+		t.Fatalf("age last_seen: %v", err)
+	}
+	if err := h.store.MarkNodeOffline("n1"); err != nil {
+		t.Fatalf("mark offline: %v", err)
+	}
+	// detectOffline raises and delivers the alert right here
+	id, _, err := h.store.CreateAlert("node_offline", "n1", "{}", 3600)
+	if err != nil {
+		t.Fatalf("create alert: %v", err)
+	}
+	if err := h.store.MarkAlertDelivered(id); err != nil {
+		t.Fatalf("mark alert delivered: %v", err)
+	}
+
+	// the link heals: the first surviving ping revives the node, no hello follows
+	h.handleFrame(&Conn{nodeID: "n1"}, protocol.Envelope{V: protocol.Version, Type: protocol.TypePing, TS: protocol.Now()})
+
+	if _, err := h.store.OpenAlert("node_offline", "n1"); err == nil {
+		t.Fatal("offline alert still open after the ping revived the node")
+	}
+	alerts, err := h.store.ListAlerts(10)
+	if err != nil {
+		t.Fatalf("list alerts: %v", err)
+	}
+	if len(alerts) != 1 || alerts[0].RecoveredAt == nil {
+		t.Fatalf("alert not recovered: %+v", alerts)
+	}
+	if alerts[0].DeliveredAt != nil {
+		t.Fatalf("recovered alert not re-queued for its recovery notice: %+v", alerts[0])
+	}
+}

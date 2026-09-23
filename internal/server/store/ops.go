@@ -218,10 +218,20 @@ func (s *Store) MarkAlertDelivered(id int64) error {
 	return err
 }
 
-// RecoverAlert closes the matching open alert (recovery notice, design §15).
+// RecoverAlert closes the matching open alert and puts it back in the §15
+// delivery queue so the recovery notice actually goes out. Clearing delivered_at
+// is the whole point: UndeliveredAlerts only returns `delivered_at IS NULL`
+// rows, and delivery runs every minute while a probe usually comes back much
+// later, so an alert that had already been sent recovered silently — the
+// operator got "probe offline" and never learned it was back. An alert that
+// never left the queue keeps its single queue slot and goes out as the recovery
+// event instead. The `recovered_at IS NULL` guard makes this one-shot per alert,
+// so repeated calls (every up-edge frame, a reconcile loop) cannot re-queue a
+// notice that was already delivered.
 func (s *Store) RecoverAlert(kind, nodeID string) error {
 	_, err := s.db.Exec(
-		`UPDATE alerts SET recovered_at = ? WHERE kind = ? AND node_id = ? AND recovered_at IS NULL`,
+		`UPDATE alerts SET recovered_at = ?, delivered_at = NULL
+		 WHERE kind = ? AND node_id = ? AND recovered_at IS NULL`,
 		now(), kind, nodeID,
 	)
 	return err
