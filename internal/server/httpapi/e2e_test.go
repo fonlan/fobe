@@ -357,7 +357,8 @@ func TestFullAgentPath(t *testing.T) {
 	ar, _ := authClient.Do(req4)
 	var alertsResp struct {
 		Alerts []struct {
-			Kind string `json:"kind"`
+			Kind     string `json:"kind"`
+			NodeName string `json:"node_name"`
 		} `json:"alerts"`
 	}
 	_ = json.NewDecoder(ar.Body).Decode(&alertsResp)
@@ -366,6 +367,12 @@ func TestFullAgentPath(t *testing.T) {
 	for _, a := range alertsResp.Alerts {
 		if a.Kind == "counter_reset" {
 			foundReset = true
+			// The panel renders the name, not the id, so the read-time join
+			// must survive the handler's JSON encoding (design §15 实现修订
+			// 2026-09-28).
+			if a.NodeName != "probe-alpha" {
+				t.Fatalf("alert node_name = %q, want %q", a.NodeName, "probe-alpha")
+			}
 		}
 	}
 	if !foundReset {

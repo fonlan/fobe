@@ -56,7 +56,14 @@ export default function Alerts() {
                 <tr key={a.id} className={a.recovered_at == null ? 'alert-active' : ''}>
                   <td className="mono nowrap">{fmtTime(a.created_at)}</td>
                   <td>{kindText(t, a.kind)}</td>
-                  <td className="mono">{a.node_id || '-'}</td>
+                  {/* Name, not the probe id: the id is a meaningless hex string
+                      to the operator. node_name comes from a read-time join and
+                      is empty for cluster-wide/login alerts and for probes
+                      deleted since — the raw id is the fallback then (same rule
+                      as the audit page), and only then is it worth `mono`. */}
+                  <td className={a.node_name ? undefined : 'mono'} title={a.node_id || undefined}>
+                    {a.node_name || a.node_id || '-'}
+                  </td>
                   <td>{a.delivered_at != null ? t('alert_yes') : t('alert_no')}</td>
                   <td>
                     {a.recovered_at != null ? (

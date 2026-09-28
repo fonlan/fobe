@@ -175,9 +175,14 @@ func (s *Store) ListCommands(nodeID string, limit int) ([]Command, error) {
 // --- alerts (design §15) ---
 
 type Alert struct {
-	ID          int64  `json:"id"`
-	Kind        string `json:"kind"`
-	NodeID      string `json:"node_id,omitempty"`
+	ID     int64  `json:"id"`
+	Kind   string `json:"kind"`
+	NodeID string `json:"node_id,omitempty"`
+	// NodeName is resolved at read time (LEFT JOIN nodes) so a renamed probe
+	// shows its current name, like AuditEntry.NodeName; it stays empty for
+	// alerts that are not about a probe (login alerts, the cluster-wide stale
+	// sweep) and for probes deleted since — the panel falls back to the raw id.
+	NodeName    string `json:"node_name,omitempty"`
 	Payload     string `json:"payload,omitempty"`
 	CreatedAt   int64  `json:"created_at"`
 	DeliveredAt *int64 `json:"delivered_at,omitempty"`
@@ -238,12 +243,16 @@ func (s *Store) RecoverAlert(kind, nodeID string) error {
 }
 
 // alertCols is the single column list every alerts query shares; scanAlert is
-// its one scan target.
-const alertCols = `id, kind, node_id, payload, created_at, delivered_at, recovered_at`
+// its one scan target. Each query aliases `alerts` as `a` and joins `nodes`:
+// the panel's alert list must show node *names*, and `id` is ambiguous (both
+// tables have one) the moment the join appears.
+const alertCols = `a.id, a.kind, a.node_id, COALESCE(n.name, ''), a.payload, a.created_at, a.delivered_at, a.recovered_at`
+
+const alertFrom = `alerts a LEFT JOIN nodes n ON n.id = a.node_id`
 
 func scanAlert(rs rowScanner) (*Alert, error) {
 	a := &Alert{}
-	err := rs.Scan(&a.ID, &a.Kind, &a.NodeID, &a.Payload, &a.CreatedAt, &a.DeliveredAt, &a.RecoveredAt)
+	err := rs.Scan(&a.ID, &a.Kind, &a.NodeID, &a.NodeName, &a.Payload, &a.CreatedAt, &a.DeliveredAt, &a.RecoveredAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -257,16 +266,16 @@ func scanAlert(rs rowScanner) (*Alert, error) {
 // when none is open. Lets jobs dedupe on their own stage (e.g. billing days).
 func (s *Store) OpenAlert(kind, nodeID string) (*Alert, error) {
 	return scanAlert(s.db.QueryRow(
-		`SELECT `+alertCols+` FROM alerts WHERE kind = ? AND node_id = ? AND recovered_at IS NULL
-		 ORDER BY id DESC LIMIT 1`, kind, nodeID))
+		`SELECT `+alertCols+` FROM `+alertFrom+` WHERE a.kind = ? AND a.node_id = ? AND a.recovered_at IS NULL
+		 ORDER BY a.id DESC LIMIT 1`, kind, nodeID))
 }
 
 func (s *Store) ListAlerts(limit int) ([]Alert, error) {
-	return s.listAlerts(`SELECT `+alertCols+` FROM alerts ORDER BY id DESC LIMIT ?`, limit)
+	return s.listAlerts(`SELECT `+alertCols+` FROM `+alertFrom+` ORDER BY a.id DESC LIMIT ?`, limit)
 }
 
 func (s *Store) UndeliveredAlerts() ([]Alert, error) {
-	return s.listAlerts(`SELECT ` + alertCols + ` FROM alerts WHERE delivered_at IS NULL ORDER BY id`)
+	return s.listAlerts(`SELECT ` + alertCols + ` FROM ` + alertFrom + ` WHERE a.delivered_at IS NULL ORDER BY a.id`)
 }
 
 func (s *Store) listAlerts(query string, args ...any) ([]Alert, error) {

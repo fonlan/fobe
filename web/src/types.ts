@@ -252,6 +252,13 @@ export interface AlertRow {
   id: number;
   kind: string;
   node_id?: string;
+  /**
+   * Resolved server-side from `nodes` at read time (like AuditRow.node_name),
+   * so a renamed probe shows its current name. Absent for alerts that are not
+   * about a probe (login alerts, the cluster-wide stale sweep) and for probes
+   * deleted since; the page falls back to `node_id` then.
+   */
+  node_name?: string;
   payload?: string;
   created_at: number;
   delivered_at?: number | null;
