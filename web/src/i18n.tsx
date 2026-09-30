@@ -187,6 +187,12 @@ const zh = {
   terminal_invalid_size: '终端窗口尺寸无效。',
   terminal_start_failed: '节点 agent 无法启动本地终端。',
   terminal_exited: '终端进程已退出。',
+  // 终端组合键栏(2026-09-21):手机键盘没有 Ctrl/Esc,^C 中断只能从这里点
+  terminal_keys_label: '组合键',
+  terminal_keys_hint: '点 Ctrl / Alt 之后,下一个键会带上它(只生效一次);^C 中断当前命令,Esc / Tab / 方向键与键盘一致。',
+  terminal_keys_disconnected: '终端未连接,组合键无法发送。',
+  terminal_keys_armed: '已按下 {keys},下一个键带上它',
+  terminal_key_intr: 'Ctrl+C — 中断当前命令',
   // 终端页右栏标签容器 + 常用命令(2026-09-19)
   side_tab_ai: 'AI 助手',
   side_tab_commands: '常用命令',
@@ -1213,6 +1219,12 @@ const en: Record<DictKey, string> = {
   terminal_invalid_size: 'Terminal window dimensions are invalid.',
   terminal_start_failed: 'The node agent could not start its local terminal.',
   terminal_exited: 'The terminal process exited.',
+  // Terminal key bar (2026-09-21): phones have no Ctrl/Esc, so ^C is tapped here
+  terminal_keys_label: 'Key combinations',
+  terminal_keys_hint: 'Tap Ctrl / Alt and the next key carries it (one shot). ^C interrupts the running command; Esc / Tab / arrows match the keyboard.',
+  terminal_keys_disconnected: 'Terminal is not connected; keys cannot be sent.',
+  terminal_keys_armed: '{keys} armed — the next key carries it',
+  terminal_key_intr: 'Ctrl+C — interrupt the running command',
   // Terminal side-column tabs + quick commands (2026-09-19)
   side_tab_ai: 'AI assistant',
   side_tab_commands: 'Quick commands',

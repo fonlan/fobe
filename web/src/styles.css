@@ -1213,6 +1213,46 @@ section.card { margin-bottom: 0; }
 .status-dot-chip.status-ok .status-dot { background: var(--green); }
 .status-dot-chip.status-failed .status-dot { background: var(--red); }
 .terminal-close-reason { margin-top: 8px; }
+/* On-screen key bar (2026-09-21): the tap-only path to Ctrl+C, Esc, Tab and the
+   arrows, i.e. everything a phone keyboard cannot produce. It sits BELOW the
+   shell; nothing that can change height may be placed next to .terminal-host
+   (FitAddon measures that box, and a self-sizing sibling makes the screen grow a
+   row per frame — see the note on .terminal-shell above). */
+.terminal-keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.key-chip {
+  min-width: 40px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  /* Taps must not select or zoom; the bar is a keypad. */
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.key-chip:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.key-chip:disabled { opacity: 0.45; cursor: not-allowed; }
+/* An armed modifier is latched for exactly one key: the chip stays lit until
+   that key is sent, which is the only feedback that the next tap is modified. */
+.key-chip.armed {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  color: var(--text);
+}
+.key-chip.ctrl-key { color: var(--text); }
+.key-armed { margin-left: 2px; }
+.key-sep { width: 1px; align-self: stretch; min-height: 18px; background: var(--border); }
 /* The screen is the frame (padding/border/dark surface) FitAddon's host sits
    in. The padding cannot live on the host itself: xterm's .xterm is an
    absolutely positioned box, and absolute children are placed against the
@@ -1243,6 +1283,13 @@ section.card { margin-bottom: 0; }
   min-height: 0;
 }
 .terminal-host .xterm { position: absolute; top: 0; right: 0; bottom: 0; left: 0; }
+/* Focus is the whole ballgame for a terminal: xterm only focuses on a mousedown
+   over its own box, so the frame's 8px padding used to swallow the click and
+   every later keystroke — Ctrl+C included — went to the page instead. The frame
+   now focuses the terminal on click (Terminal.tsx) and shows that focus here.
+   :focus-within, not the :focus ring of the hidden textarea: the textarea is a
+   1x1 transparent element, the frame is what the operator is looking at. */
+.terminal-shell:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-weak); }
 /* No overflow rule for .xterm-viewport on purpose: xterm 6 renders it as an
    EMPTY box and scrolls in JS (VS Code's SmoothScrollableElement, itself
    overflow: visible), so there is nothing here for the browser to scroll — a

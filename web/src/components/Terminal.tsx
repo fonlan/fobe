@@ -1,10 +1,20 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal as XTerm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import * as api from '../api';
 import { useI18n } from '../i18n';
 import { attachTouchScroll } from './terminalTouchScroll';
+import TerminalKeys from './TerminalKeys';
+import {
+  NO_MODIFIERS,
+  applyStickyModifiers,
+  modifiedChar,
+  namedKeyBytes,
+  type NamedKey,
+  type StickyModifier,
+  type StickyModifiers,
+} from './terminalKeyBytes';
 import type {
   TerminalBufferPayload,
   TerminalClosedPayload,
@@ -83,6 +93,13 @@ export interface TerminalHandle {
    * would execute line-by-line instead of waiting for Enter.
    */
   bracketedPaste: () => boolean;
+  /**
+   * Whether the shell asked for application cursor keys (DECSET 1, on while a
+   * full-screen program like vim or less is in the foreground). The key bar
+   * sends arrows itself, and the SS3 vs CSI form decides whether that program
+   * moves the cursor or prints `^[[A` on screen.
+   */
+  applicationCursorKeys: () => boolean;
 }
 
 export interface TerminalProps {
@@ -121,6 +138,24 @@ export default function Terminal({
   const [closeReason, setCloseReason] = useState<string | null>(null);
   // Bumped by reconnect() to force the session effect to re-run.
   const [epoch, setEpoch] = useState(0);
+  // Modifier keys armed from the on-screen key bar (2026-09-21). One-shot: the
+  // next key releases them, so a forgotten Ctrl cannot turn the rest of the
+  // session into control characters. Kept here because Terminal owns the PTY
+  // data path — the next key may come from the bar OR from the operator's
+  // keyboard (xterm's onData), and both have to carry the same modifier.
+  const [sticky, setSticky] = useState<StickyModifiers>(NO_MODIFIERS);
+  const stickyRef = useRef(sticky);
+
+  useEffect(() => {
+    stickyRef.current = sticky;
+  }, [sticky]);
+
+  // A new session starts unarmed: the arm was meant for the shell that just
+  // died, and keeping it would make the first key of the reconnected shell a
+  // control character.
+  useEffect(() => {
+    setSticky(NO_MODIFIERS);
+  }, [nodeId, epoch]);
 
   useEffect(() => {
     onSessionChangeRef.current = onSessionChange;
@@ -135,6 +170,61 @@ export default function Terminal({
     onConnectionChangeRef.current?.(state);
   }, [state]);
 
+  /**
+   * One frame to the PTY, dropped when the socket is not open — every sender
+   * (xterm's onData, the key bar, the quick-command panel) goes through here so
+   * the "no socket" answer is the same everywhere.
+   */
+  const sendEnvelope = (frame: api.TerminalClientEnvelope) => {
+    const socket = wsRef.current;
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
+  };
+
+  /** Release the armed modifiers after one key rode on them (see `sticky`). */
+  const releaseModifiers = () => {
+    stickyRef.current = NO_MODIFIERS;
+    setSticky(NO_MODIFIERS);
+  };
+
+  const toggleModifier = (modifier: StickyModifier) => {
+    setSticky((current) => {
+      const next = { ...current, [modifier]: !current[modifier] };
+      stickyRef.current = next;
+      return next;
+    });
+  };
+
+  /** A control character by letter from the bar: 'c' means ^C, never a literal `c`. */
+  const sendControlKey = (letter: string) => {
+    const armed = stickyRef.current;
+    // Alt is honoured on top of the key's own Ctrl (^C and M-^C differ in
+    // readline), but the button's Ctrl is intrinsic — it cannot be turned off.
+    sendEnvelope(api.terminalEnvelope('terminal_input', { data: modifiedChar(letter, { ctrl: true, alt: armed.alt }) }));
+    releaseModifiers();
+    termRef.current?.focus();
+  };
+
+  const sendNamedKey = (key: NamedKey) => {
+    const modifiers = stickyRef.current;
+    const applicationCursorKeys = termRef.current?.modes.applicationCursorKeysMode ?? false;
+    sendEnvelope(api.terminalEnvelope('terminal_input', { data: namedKeyBytes(key, modifiers, applicationCursorKeys) }));
+    releaseModifiers();
+    termRef.current?.focus();
+  };
+
+  /**
+   * Clicking the dark frame around the screen focuses the terminal too. xterm
+   * only focuses on mousedown over its own .xterm box, so the 8px padding ring
+   * used to swallow the click: keystrokes afterwards — Ctrl+C included — went
+   * nowhere while the card still looked active. preventDefault keeps the frame
+   * itself from being selected.
+   */
+  const focusFromFrame = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest('.xterm')) return; // xterm focused itself
+    event.preventDefault();
+    termRef.current?.focus();
+  };
+
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -142,6 +232,11 @@ export default function Terminal({
     const terminal = new XTerm({
       cursorBlink: true,
       convertEol: true,
+      // Option (macOS) is a Meta key, as a terminal is expected to treat it: with
+      // the xterm default, Option+B/ Option+Backspace — readline's word motions —
+      // were swallowed by the OS's compose behaviour and typed `∫` / nothing at
+      // all instead, which reads as "combinations don't work on my Mac".
+      macOptionIsMeta: true,
       // Explicit and large on purpose (design §12.7.1): every observation the
       // AI makes — read_terminal AND run_shell's delta — is taken from THIS
       // buffer, because the server keeps no terminal state. The 1000-line
@@ -199,10 +294,6 @@ export default function Terminal({
     let closed = false;
     let lastCols = 0;
     let lastRows = 0;
-    const send = (frame: api.TerminalClientEnvelope) => {
-      const socket = wsRef.current;
-      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
-    };
     // The handle must be published after `send` exists: sendInput's closure
     // reads that binding when CALLED, but a parent that reacts to onReady by
     // rendering input controls could otherwise race the rest of this effect.
@@ -214,12 +305,13 @@ export default function Terminal({
         setEpoch((current) => current + 1);
       },
       sendInput: (data: string) => {
-        send(api.terminalEnvelope('terminal_input', { data }));
+        sendEnvelope(api.terminalEnvelope('terminal_input', { data }));
       },
       focus: () => {
         termRef.current?.focus();
       },
       bracketedPaste: () => termRef.current?.modes.bracketedPasteMode ?? false,
+      applicationCursorKeys: () => termRef.current?.modes.applicationCursorKeysMode ?? false,
     });
     const sendResize = () => {
       const current = termRef.current;
@@ -229,7 +321,7 @@ export default function Terminal({
       if (cols === lastCols && rows === lastRows) return;
       lastCols = cols;
       lastRows = rows;
-      send(api.terminalEnvelope('terminal_resize', { cols, rows }));
+      sendEnvelope(api.terminalEnvelope('terminal_resize', { cols, rows }));
     };
 
     const socket = new WebSocket(api.terminalWebSocketURL(nodeId));
@@ -239,7 +331,7 @@ export default function Terminal({
       setState('connected');
       setCloseReason(null);
       const { cols, rows } = sizeFor(terminal);
-      send(api.terminalEnvelope('terminal_open', { cols, rows }));
+      sendEnvelope(api.terminalEnvelope('terminal_open', { cols, rows }));
       terminal.focus();
     };
     socket.onmessage = (event) => {
@@ -269,13 +361,13 @@ export default function Terminal({
             lines: typeof payload.lines === 'number' ? payload.lines : 0,
           };
           try {
-            send(api.terminalEnvelope('terminal_buffer', readTerminalWindow(terminal, query)));
+            sendEnvelope(api.terminalEnvelope('terminal_buffer', readTerminalWindow(terminal, query)));
           } catch {
             // The terminal can already be disposed if unmount raced this frame.
             // Answer with a correlated failure: silence would leave the server
             // waiting out its whole timeout for an answer that cannot come.
             const failure: TerminalBufferPayload = { id, ok: false, error: 'buffer_unavailable' };
-            send(api.terminalEnvelope('terminal_buffer', failure));
+            sendEnvelope(api.terminalEnvelope('terminal_buffer', failure));
           }
         } else if (value.type === 'terminal_closed') {
           const payload = payloadRecord(value.payload) as TerminalClosedPayload;
@@ -304,7 +396,20 @@ export default function Terminal({
     };
 
     const onData = (data: string) => {
-      send(api.terminalEnvelope('terminal_input', { data }));
+      // Sticky modifiers from the key bar ride on the operator's OWN keystrokes
+      // here, not on the bar's buttons: that is what lets "arm Ctrl, then press c"
+      // work on a phone, where the soft keyboard hands the letter over as plain
+      // onData (Android reports keyCode 229 for every key it produces).
+      const armed = stickyRef.current;
+      if (!armed.ctrl && !armed.alt) {
+        sendEnvelope(api.terminalEnvelope('terminal_input', { data }));
+        return;
+      }
+      const rewritten = applyStickyModifiers(data, armed);
+      // One-shot either way: an unrecognised chunk (a paste, a function key)
+      // releases the arm instead of leaving it waiting for the next keystroke.
+      releaseModifiers();
+      sendEnvelope(api.terminalEnvelope('terminal_input', { data: rewritten }));
     };
     const dataDisposable = terminal.onData(onData);
     // Never call fit() inside onResize: fit() itself triggers xterm resize
@@ -382,10 +487,24 @@ export default function Terminal({
         stay off the edge. That padding cannot sit on the host itself — xterm's
         absolute .xterm is placed against the host's padding box and would paint
         over it. The host stays a pure sizing box for FitAddon.
+        The frame also takes the click-to-focus (see focusFromFrame) and lights
+        its border up while xterm holds focus (:focus-within in styles.css): on a
+        desktop, "Ctrl+C did nothing" is almost always "the terminal was not the
+        focused element", and there was no way to see that.
       */}
-      <div className="terminal-shell">
+      <div className="terminal-shell" onMouseDown={focusFromFrame}>
         <div ref={hostRef} className="terminal-host" role="application" aria-label={t('terminal_title')} />
       </div>
+      {/* Outside the shell on purpose: the shell's inner box is measured by
+          FitAddon, and nothing that can change height belongs next to the host
+          (a feedback loop there makes the screen grow a row per frame). */}
+      <TerminalKeys
+        armed={sticky}
+        onToggle={toggleModifier}
+        onNamedKey={sendNamedKey}
+        onControlKey={sendControlKey}
+        disabled={state !== 'connected'}
+      />
       {closeReason && <p className="hint terminal-close-reason">{closeReason}</p>}
     </section>
   );
