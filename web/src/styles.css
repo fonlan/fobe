@@ -796,6 +796,50 @@ section.card { margin-bottom: 0; }
   overflow-x: auto;
 }
 
+/* --- §16 服务器列表拖拽排序（2026-10-02）-----------------------------------
+   手柄是一个真 <button>：指针拖拽走 pointer events（手机上同样成立，
+   HTML5 `draggable` 在触摸上根本不触发），键盘 ↑/↓ 也走它换位。因此它必须
+   自带 display 与尺寸——见 .btn 那条教训：不要让元素类型决定盒子。 */
+.table .drag-col {
+  /* 手柄列只占内容宽，别跟着表格 auto 布局一起膨胀 */
+  width: 1%;
+  padding-right: 0;
+}
+
+.drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: grab;
+  /* 只挂手柄、不挂整行：挂在行上会让表格在手机上滚不动。
+     手柄上 vertical drag 因此被浏览器交给我们，而不是滚页面。 */
+  touch-action: none;
+  /* 拖动中手柄会飘出文字选区的蓝色高亮，触屏长按还会弹上下文菜单 */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.drag-handle:hover { background: var(--panel-2); color: var(--text); }
+/* .btn-icon defaults to 16px; the six-dot grip needs the extra two pixels to
+   stay legible as two dot columns instead of one smudge. */
+.drag-handle .btn-icon { width: 18px; height: 18px; }
+.table tbody tr.dragging td { opacity: 0.5; }
+.table tbody tr.dragging .drag-handle { cursor: grabbing; }
+
+/* 插入指示线用 box-shadow、不用 border：border 会把该行高度改 2px，而落点
+   判据是「行中点」，行一移动落点就在两行之间来回跳（拖拽最典型的抖动）。
+   box-shadow 不参与布局，判据稳定。 */
+.table tbody tr.drop-before td { box-shadow: inset 0 2px 0 0 var(--accent); }
+.table tbody tr.drop-after td { box-shadow: inset 0 -2px 0 0 var(--accent); }
+
 /* A plain .table inside a section card has no scroll owner (the card neither
    clips nor scrolls), so wide rows — audit log, UA strings, mono values —
    paint past the card edge. The wrapper owns the horizontal scroll instead. */

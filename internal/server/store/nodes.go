@@ -157,6 +157,9 @@ type Node struct {
 	// It exists because the panel name and the name a client shows are often
 	// not the same string, and the relay entry's auto name builds on it.
 	SubName string
+	// SortOrder is the §16 wall order the operator drags in the server list;
+	// only ReorderNodes writes it (CreateNode appends at max+1).
+	SortOrder int
 	// CountryManual is the §14 operator pin: when set, hub never re-derives
 	// country_code from the primary IP, same contract as node_ips.manual_primary.
 	CountryManual bool
@@ -175,15 +178,19 @@ type Node struct {
 // column in one place and forgetting the others used to be the easy mistake
 // (scanNode would then fail at runtime, not at compile time).
 const nodeColumns = `id, name, machine_id, status, note, created_at, last_seen, agent_version,
-		        os, arch, kernel, distro_id, distro_version, hostname, cpu_cores, primary_ip, country_code, country_manual, sub_name, tz, caps,
+		        os, arch, kernel, distro_id, distro_version, hostname, cpu_cores, primary_ip, country_code, country_manual, sub_name, sort_order, tz, caps,
 		        agent_target_version, agent_update_state, agent_update_attempts, agent_update_error,
 		        agent_update_planned_at, agent_update_done_at`
 
 func (s *Store) CreateNode(n *Node, secretHash string) error {
+	// New probes append to the end of the wall (max+1, same contract as quick
+	// commands): the operator's dragged order is explicit, and having a fresh
+	// node land in the middle of it would read as a bug.
 	_, err := s.db.Exec(
 		`INSERT INTO nodes (id, name, machine_id, node_secret_hash, status, note, created_at,
-		 agent_version, os, arch, kernel, distro_id, distro_version, hostname, cpu_cores, primary_ip, tz, caps)
-		 VALUES (?, ?, ?, ?, 'offline', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 agent_version, os, arch, kernel, distro_id, distro_version, hostname, cpu_cores, primary_ip, tz, caps, sort_order)
+		 VALUES (?, ?, ?, ?, 'offline', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		         (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM nodes))`,
 		n.ID, n.Name, n.MachineID, secretHash, n.Note, now(),
 		n.AgentVersion, n.OS, n.Arch, n.Kernel, n.DistroID, n.DistroVersion,
 		n.Hostname, n.CPUCores, n.PrimaryIP, n.TZ, "{}",
@@ -206,9 +213,14 @@ func (s *Store) GetNode(id string) (*Node, error) {
 	))
 }
 
+// ListNodes returns the wall in §16 display order: the operator's drag order
+// first, then created_at as the tie-break. Every row in a database that predates
+// sort_order carries 0 there, so those panels keep exactly their old order; the
+// id is the final tie-break so two nodes created in the same second cannot swap
+// places between renders.
 func (s *Store) ListNodes() ([]Node, error) {
 	rows, err := s.db.Query(
-		`SELECT ` + nodeColumns + ` FROM nodes ORDER BY created_at`)
+		`SELECT ` + nodeColumns + ` FROM nodes ORDER BY sort_order, created_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -224,6 +236,70 @@ func (s *Store) ListNodes() ([]Node, error) {
 	return out, rows.Err()
 }
 
+// ReorderNodes rewrites sort_order = position for the given ids, then pushes
+// every node the client did not mention to the end in its previous order (one
+// transaction, so a half-applied order is impossible).
+//
+// Permissive on purpose, like ReorderQuickCommands: unknown and repeated ids are
+// ignored rather than rejected. A panel that rendered its list before a probe
+// registered would otherwise 400 on a drag that is perfectly reasonable from
+// where the operator sits — and the worst case of the permissive rule is a row
+// the operator moved to the end, which the next drag fixes without a reload.
+func (s *Store) ReorderNodes(ids []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`SELECT id FROM nodes ORDER BY sort_order, created_at, id`)
+	if err != nil {
+		return fmt.Errorf("read node order: %w", err)
+	}
+	current := []string{}
+	known := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan node id: %w", err)
+		}
+		current = append(current, id)
+		known[id] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read node order: %w", err)
+	}
+
+	order := make([]string, 0, len(current))
+	placed := map[string]bool{}
+	for _, id := range ids {
+		if id == "" || placed[id] || !known[id] {
+			continue
+		}
+		placed[id] = true
+		order = append(order, id)
+	}
+	for _, id := range current {
+		if !placed[id] {
+			order = append(order, id)
+		}
+	}
+
+	stmt, err := tx.Prepare(`UPDATE nodes SET sort_order = ? WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for i, id := range order {
+		if _, err := stmt.Exec(int64(i), id); err != nil {
+			return fmt.Errorf("reorder node %s: %w", id, err)
+		}
+	}
+	return tx.Commit()
+}
+
 type rowScanner interface{ Scan(dest ...any) error }
 
 func (s *Store) scanNode(rs rowScanner) (*Node, error) {
@@ -231,7 +307,7 @@ func (s *Store) scanNode(rs rowScanner) (*Node, error) {
 	var caps string
 	err := rs.Scan(&n.ID, &n.Name, &n.MachineID, &n.Status, &n.Note, &n.CreatedAt, &n.LastSeen,
 		&n.AgentVersion, &n.OS, &n.Arch, &n.Kernel, &n.DistroID, &n.DistroVersion, &n.Hostname, &n.CPUCores,
-		&n.PrimaryIP, &n.CountryCode, &n.CountryManual, &n.SubName, &n.TZ, &caps,
+		&n.PrimaryIP, &n.CountryCode, &n.CountryManual, &n.SubName, &n.SortOrder, &n.TZ, &caps,
 		&n.AgentTargetVersion, &n.AgentUpdateState, &n.AgentUpdateAttempts, &n.AgentUpdateError,
 		&n.AgentUpdatePlannedAt, &n.AgentUpdateDoneAt)
 	if errors.Is(err, sql.ErrNoRows) {

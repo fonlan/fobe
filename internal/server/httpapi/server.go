@@ -156,6 +156,9 @@ func (s *Server) Handler() http.Handler {
 
 	// nodes
 	mux.HandleFunc("GET /api/nodes", s.requireSession(s.handleListNodes))
+	// §16 (2026-10-02): the operator's drag order — PUT /api/nodes/order is more
+	// specific than the {id} patterns, so it can never be read as a node id.
+	mux.HandleFunc("PUT /api/nodes/order", s.requireSession(s.handleReorderNodes))
 	mux.HandleFunc("GET /api/nodes/{id}", s.requireSession(s.handleGetNode))
 	mux.HandleFunc("PATCH /api/nodes/{id}", s.requireSession(s.handleUpdateNode))
 	mux.HandleFunc("DELETE /api/nodes/{id}", s.requireSession(s.handleDeleteNode))

@@ -105,6 +105,38 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": out})
 }
 
+// nodeOrderReq is the whole-list reorder body (§16, 2026-10-02): every visible
+// node id, front to back, exactly as the operator dropped them.
+type nodeOrderReq struct {
+	IDs []string `json:"ids"`
+}
+
+// handleReorderNodes persists the drag order the server list (and therefore the
+// overview card wall) renders in. Only the shape is validated — an empty list is
+// a client bug, not an intent. Ids that vanished, appeared or repeat since the
+// panel rendered are the store's permissive contract to absorb (see
+// store.ReorderNodes), because a 400 on a reasonable drag is worse than landing
+// an unmentioned row at the end of the wall.
+func (s *Server) handleReorderNodes(w http.ResponseWriter, r *http.Request) {
+	var req nodeOrderReq
+	if !decodeReq(w, r, &req) {
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_ids")
+		return
+	}
+	if err := s.Store.ReorderNodes(req.IDs); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	// The drag happened in one panel; every other open panel (the overview
+	// wall in another tab) must re-fetch its list instead of waiting out its 5s
+	// poll. ref is empty: a reorder is about the whole wall, not one node.
+	s.publishEvent("nodes_reordered", "")
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 func (s *Server) buildNodeView(n *store.Node) nodeView {
 	v := nodeView{
 		ID: n.ID, Name: n.Name, Status: n.Status, Online: n.Status == "online",

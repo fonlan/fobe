@@ -102,3 +102,20 @@ export function TerminalIcon(props: IconProps) {
     </Base>
   );
 }
+
+/** Drag handle for a reorderable row (§16 server list). Two dot columns read as
+ *  "grab and slide" without a caption; drawn as filled circles (r=1.7, wider
+ *  spacing than the stroke grid) because stroked 1.6px dots render as specks at
+ *  the 18px the handle asks for. */
+export function GripIcon(props: IconProps) {
+  return (
+    <Base strokeWidth="0" fill="currentColor" {...props}>
+      <circle cx="9" cy="6" r="1.7" />
+      <circle cx="15" cy="6" r="1.7" />
+      <circle cx="9" cy="12" r="1.7" />
+      <circle cx="15" cy="12" r="1.7" />
+      <circle cx="9" cy="18" r="1.7" />
+      <circle cx="15" cy="18" r="1.7" />
+    </Base>
+  );
+}

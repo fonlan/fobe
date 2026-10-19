@@ -24,7 +24,7 @@ var schemaFS embed.FS
 // and idempotent, so forgetting a bump only loses the backup-on-change
 // guarantee, never correctness. Upgrade and downgrade semantics: §6 "schema
 // 兼容策略" in design.md.
-const SchemaVersion = 16
+const SchemaVersion = 17
 
 // Store is the database handle. Safe for concurrent use.
 type Store struct {
@@ -274,6 +274,10 @@ func (s *Store) migrateAdditive() error {
 		// tool_use/tool_result strictly and rejects an orphan result, so the id
 		// has to survive the interruption.
 		{"ai_pending_actions", "call_id", `ALTER TABLE ai_pending_actions ADD COLUMN call_id TEXT NOT NULL DEFAULT ''`},
+		// §16 (2026-10-02): the operator's drag order of the server list, which
+		// the overview card wall follows. Existing rows all land on 0 and the
+		// list's created_at tie-break keeps their current order.
+		{"nodes", "sort_order", `ALTER TABLE nodes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`},
 	}
 	for _, m := range migrations {
 		if s.columnExists(m.table, m.column) {

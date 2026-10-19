@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS nodes (
     country_code    TEXT NOT NULL DEFAULT '',
     country_manual  INTEGER NOT NULL DEFAULT 0, -- §14 手动指定的国旗,主 IP 变化后不回退
     sub_name        TEXT NOT NULL DEFAULT '',   -- §10.2 订阅展示名（'' = 用 name）
+    -- §16 卡片墙/列表顺序：操作者在「设置 → 服务器」拖拽出来的次序，概览页
+    -- 卡片与服务器列表都照它排（ORDER BY sort_order, created_at）。老库全为 0，
+    -- created_at 兜底 ⇒ 升级前后的顺序一模一样。新注册的探针排到末尾。
+    sort_order      INTEGER NOT NULL DEFAULT 0,
     tz              TEXT NOT NULL DEFAULT 'UTC',
     caps            TEXT NOT NULL DEFAULT '{}',
     -- agent self-update bookkeeping (design §5.5). target is the version this

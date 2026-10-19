@@ -228,6 +228,16 @@ export function deleteNode(id: string): Promise<{ ok: boolean }> {
   return request(`/api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+/**
+ * §16 (2026-10-02) wall order: the whole list of node ids front to back, exactly
+ * as dropped in the server list. The overview card wall reads the same order
+ * back through listNodes, so a drag here is visible there without any per-card
+ * state.
+ */
+export function reorderNodes(ids: string[]): Promise<{ ok: boolean }> {
+  return request('/api/nodes/order', { method: 'PUT', body: { ids } });
+}
+
 export function nodeMetrics(id: string, from: number): Promise<{ samples: MetricsSample[] }> {
   return request(`/api/nodes/${encodeURIComponent(id)}/metrics?from=${Math.floor(from)}`);
 }
