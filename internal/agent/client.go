@@ -32,8 +32,19 @@ const (
 	// so the panel's list would otherwise be up to five minutes stale. One
 	// `nft list` a minute costs nothing.
 	forwardsEvery = 1 * time.Minute
-	backoffStart  = 1 * time.Second // §7 reconnect: 1s → 5min, jittered
-	backoffMax    = 5 * time.Minute
+	backoffStart  = 1 * time.Second // §7 reconnect: 1s → 15s, jittered
+	// backoffMax is deliberately short (2026-10-19, was 5min): the delay is a
+	// *tail* after the link returns, and a multi-minute sleep turns a short
+	// path blip into an offline edge. At 15s (+50% jitter) a probe retries
+	// well inside the server's 90s heartbeat window, so backoff alone cannot
+	// make a healthy probe look offline. A dial every 15–22s while the panel
+	// is really down costs nothing for a single-user panel.
+	backoffMax = 15 * time.Second
+	// stableSession is "the link actually works". A session that survived this
+	// long resets the schedule instead of inheriting growth from previous
+	// short drops; the old threshold was backoffMax itself (5min), so every
+	// session shorter than that kept doubling.
+	stableSession = 30 * time.Second
 )
 
 // Version is the agent build version, injected via
@@ -170,17 +181,27 @@ func Run(cfg *Config, configPath string, log *slog.Logger) error {
 		if err != nil {
 			log.Warn("agent link lost", "err", err)
 		}
-		// a session that lasted a while means the network works: reset backoff
-		if time.Since(started) > backoffMax {
-			backoff = backoffStart
-		}
+		session := time.Since(started)
 		sleep := backoff + time.Duration(rand.Int63n(int64(backoff/2)+1))
 		log.Info("reconnecting", "in", sleep.String())
 		time.Sleep(sleep)
-		if backoff *= 2; backoff > backoffMax {
-			backoff = backoffMax
-		}
+		backoff = nextBackoff(backoff, session)
 	}
+}
+
+// nextBackoff is the delay schedule after a session of the given duration: a
+// session that stayed up for stableSession proves the link works, so the next
+// drop starts over at backoffStart; anything shorter doubles, capped at
+// backoffMax. Pure on purpose so the reset/cap is testable without a network
+// or a clock.
+func nextBackoff(backoff, session time.Duration) time.Duration {
+	if session > stableSession {
+		return backoffStart
+	}
+	if next := backoff * 2; next < backoffMax {
+		return next
+	}
+	return backoffMax
 }
 
 func connectAndServe(cfg *Config, configPath string, coll *collect.Collector, sbx *singboxManager, updater *selfUpdater, metricsEvery time.Duration, log *slog.Logger) error {

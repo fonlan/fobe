@@ -53,7 +53,15 @@ func (c catalog) message(ev Event) string {
 		b.WriteString(": ")
 		b.WriteString(clip(subject, fieldCap))
 	}
-	if stamp := c.stamp(ev.CreatedAt); stamp != "" {
+	// A recovery is about *now*, not about when the alarm fired: reusing
+	// CreatedAt made both chat messages show the same Time and read as
+	// "offline and recovered in the same second" even after a long outage
+	// (2026-10-19). Events without a recovery stamp keep the old fallback.
+	stampAt := ev.CreatedAt
+	if ev.Event == EventRecovery && ev.RecoveredAt > 0 {
+		stampAt = ev.RecoveredAt
+	}
+	if stamp := c.stamp(stampAt); stamp != "" {
 		b.WriteString("\n")
 		b.WriteString(c.tr("Time"))
 		b.WriteString(": ")

@@ -67,7 +67,10 @@ export default function Alerts() {
                   <td>{a.delivered_at != null ? t('alert_yes') : t('alert_no')}</td>
                   <td>
                     {a.recovered_at != null ? (
-                      <span className="chip status-ok">{t('alert_recovered')}</span>
+                      <span className="nowrap">
+                        <span className="chip status-ok">{t('alert_recovered')}</span>
+                        <span className="hint"> · {fmtTime(a.recovered_at)}</span>
+                      </span>
                     ) : (
                       <span className="chip status-failed">{t('alert_active')}</span>
                     )}

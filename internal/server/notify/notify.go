@@ -138,7 +138,14 @@ type Event struct {
 	NodeName  string `json:"node_name,omitempty"` // telegram text only
 	Payload   string `json:"payload"`
 	CreatedAt int64  `json:"created_at"`
-	Event     string `json:"event"` // alert | recovery
+	// RecoveredAt is when the alert closed, rendered as the "Time" line of a
+	// recovery message. It used to reuse CreatedAt, so the offline and
+	// recovered chat messages carried the same timestamp and read as a
+	// same-second outage even after minutes (2026-10-19). json:"-" keeps the
+	// generic webhook's documented wire shape
+	// ({kind,node_id,payload,created_at,event}) untouched.
+	RecoveredAt int64  `json:"-"`
+	Event       string `json:"event"` // alert | recovery
 }
 
 // Notifier is one delivery channel. Deliver must be safe for the 10s client

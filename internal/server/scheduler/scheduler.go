@@ -20,12 +20,30 @@ import (
 	"github.com/fonlan/fobe/internal/server/store"
 )
 
+const (
+	// heartbeatWindow is §7's 90s no-heartbeat verdict. The agent pings every
+	// 15s, so six consecutive misses are required.
+	heartbeatWindow = 90
+	// bootGrace keeps detectOffline from blaming a probe for a silence that
+	// predates this process (2026-10-19). After a panel restart the nodes table
+	// still says "online" with a last_seen from the previous run; without the
+	// grace the first sweep (30s after boot) files a false offline + alert and
+	// the probe's hello a second later writes the matching recovery edge. The
+	// agent's reconnect delay is capped at 15s (+jitter), so five minutes is
+	// ample; after the window a still-silent probe is a real offline.
+	bootGrace = 5 * time.Minute
+)
+
 type Scheduler struct {
 	store      *store.Store
 	log        *slog.Logger
 	backupDir  string
 	retainDays int64
 	notifiers  []notify.Notifier
+
+	// startedAt is when Start ran; 0 means "not started" (unit tests that call
+	// jobs directly), which disables the boot grace.
+	startedAt int64
 
 	// auditedDelivery memoizes "<action>|<channel>" per alert. It is needed
 	// twice over: a failing channel keeps its alert queued and retried every
@@ -47,6 +65,7 @@ func New(st *store.Store, log *slog.Logger, backupDir string, retainDays int64, 
 
 // Start launches all loops; cancel the context to stop.
 func (s *Scheduler) Start(stop <-chan struct{}) {
+	s.startedAt = time.Now().Unix()
 	go s.loop(stop, 10*time.Minute, s.pruneRetention) // §6: every 10 minutes
 	go s.loop(stop, 30*time.Second, s.detectOffline)  // §7: 90s heartbeat window
 	go s.loop(stop, 1*time.Minute, s.expireCommands)  // §19.1: 10min command TTL
@@ -116,12 +135,18 @@ func (s *Scheduler) pruneRetention() {
 
 // detectOffline flips nodes whose last_seen is older than 90s to offline and
 // raises the alert (§15: 90s 无心跳). Recovery notice when it comes back.
+//
+// A heartbeat that predates this process says nothing about the probe: after a
+// panel restart the row still says "online" with a pre-restart last_seen, and
+// the probe's reconnect is still working through its backoff. Such rows get
+// bootGrace instead of an immediate verdict (2026-10-19).
 func (s *Scheduler) detectOffline() {
 	nodes, err := s.store.ListNodes()
 	if err != nil {
 		return
 	}
 	now := time.Now().Unix()
+	inBootGrace := s.startedAt > 0 && now < s.startedAt+int64(bootGrace.Seconds())
 	for _, n := range nodes {
 		if n.Status != "online" {
 			continue
@@ -130,7 +155,10 @@ func (s *Scheduler) detectOffline() {
 		if n.LastSeen.Valid {
 			lastSeen = n.LastSeen.Int64
 		}
-		if now-lastSeen > 90 {
+		if inBootGrace && lastSeen < s.startedAt {
+			continue
+		}
+		if now-lastSeen > heartbeatWindow {
 			if err := s.store.MarkNodeOffline(n.ID); err != nil {
 				s.log.Warn("mark offline", "node", n.ID, "err", err)
 			} else {
@@ -188,6 +216,10 @@ func (s *Scheduler) deliverAlerts() {
 		}
 		if a.RecoveredAt != nil {
 			ev.Event = notify.EventRecovery
+			// The recovery message's Time line must be the recovery moment,
+			// not the alert's creation (2026-10-19). The generic webhook keeps
+			// its documented shape: RecoveredAt is json:"-" on notify.Event.
+			ev.RecoveredAt = *a.RecoveredAt
 		}
 		out := s.deliverOne(targets, ev)
 		s.auditDelivery(a.ID, ev, out)

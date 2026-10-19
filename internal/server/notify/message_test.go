@@ -134,6 +134,22 @@ func TestMessageTextRecoveryAndTest(t *testing.T) {
 	}
 }
 
+// The recovery Time line is the recovery moment, not the alert's creation:
+// reusing CreatedAt made both chat messages show the same time and read as a
+// same-second outage even after minutes (2026-10-19).
+func TestMessageTextRecoveryUsesRecoveredAt(t *testing.T) {
+	rec := zhMessage(Event{
+		Kind: "node_offline", NodeID: "n1", NodeName: "edge-1",
+		CreatedAt: 1730000000, RecoveredAt: 1730000123, Event: EventRecovery,
+	})
+	if !strings.Contains(rec, "时间: 2024-10-27 03:35:23 UTC") {
+		t.Fatalf("recovery Time is not the recovery moment: %q", rec)
+	}
+	if strings.Contains(rec, "2024-10-27 03:33:20") {
+		t.Fatalf("recovery message still prints the alert creation time: %q", rec)
+	}
+}
+
 func TestMessageTextRendersTrafficFacts(t *testing.T) {
 	got := enText(Event{
 		Kind: "traffic_warn", NodeID: "n1", NodeName: "edge-1", CreatedAt: 1730000000,

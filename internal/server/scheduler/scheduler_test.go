@@ -424,6 +424,15 @@ func TestDeliverAlertsSendsRecoveryForRecoveredAlerts(t *testing.T) {
 	if len(fake.events) != 1 || fake.events[0].Event != notify.EventRecovery {
 		t.Fatalf("events = %+v, want one recovery", fake.events)
 	}
+	// The event carries the moment the alert closed, not just its creation:
+	// the text renderer uses it for the recovery message's Time line.
+	alerts, err := st.ListAlerts(1)
+	if err != nil || len(alerts) != 1 || alerts[0].RecoveredAt == nil {
+		t.Fatalf("alert missing recovered_at: %+v (%v)", alerts, err)
+	}
+	if fake.events[0].RecoveredAt != *alerts[0].RecoveredAt {
+		t.Fatalf("recovery RecoveredAt = %d, want %d", fake.events[0].RecoveredAt, *alerts[0].RecoveredAt)
+	}
 	// delivered: the recovery is not re-sent on later passes
 	s.deliverAlerts()
 	if len(fake.events) != 1 {
@@ -458,6 +467,13 @@ func TestDeliverAlertsSendsRecoveryAfterDeliveredAlert(t *testing.T) {
 	s.deliverAlerts()
 	if len(fake.events) != 2 || fake.events[1].Event != notify.EventRecovery {
 		t.Fatalf("events = %+v, want the recovery notice as the second delivery", fake.events)
+	}
+	alerts, err := st.ListAlerts(1)
+	if err != nil || len(alerts) != 1 || alerts[0].RecoveredAt == nil {
+		t.Fatalf("alert missing recovered_at: %+v (%v)", alerts, err)
+	}
+	if fake.events[1].RecoveredAt != *alerts[0].RecoveredAt {
+		t.Fatalf("recovery RecoveredAt = %d, want %d", fake.events[1].RecoveredAt, *alerts[0].RecoveredAt)
 	}
 
 	// one notice per outage: later passes have nothing left to send
@@ -631,6 +647,72 @@ func TestDetectOfflineAuditsTransitionOnce(t *testing.T) {
 	}
 	if got[0].Actor != "system" || got[0].NodeID != "n1" || !strings.Contains(got[0].Command, "silent_for=") {
 		t.Fatalf("node_offline entry = %+v", got[0])
+	}
+}
+
+// A panel restart leaves nodes "online" with a last_seen from before the
+// process started. The first sweep must not blame the probe for a silence it
+// could not have heard (2026-10-19).
+func TestDetectOfflineBootGraceSkipsPreStartSilence(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	if _, _, err := st.MarkNodeOnline("n1", "1.0.0", time.Now().Unix()-200); err != nil {
+		t.Fatalf("mark online: %v", err)
+	}
+	s := New(st, testLogger(), "", 7)
+	s.startedAt = time.Now().Unix() - 60 // the silence predates this process
+
+	s.detectOffline()
+
+	n, err := st.GetNode("n1")
+	if err != nil || n.Status != "online" {
+		t.Fatalf("pre-start silence marked offline inside boot grace: %+v (%v)", n, err)
+	}
+	if got := auditByAction(t, st, "node_offline"); len(got) != 0 {
+		t.Fatalf("boot grace still audited node_offline: %+v", got)
+	}
+	if alerts, _ := st.ListAlerts(10); len(alerts) != 0 {
+		t.Fatalf("boot grace still raised an alert: %+v", alerts)
+	}
+}
+
+// The grace only covers silence that predates the process: a heartbeat that
+// arrived after Start is judged normally.
+func TestDetectOfflineBootGraceDoesNotCoverPostStartSilence(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	if _, _, err := st.MarkNodeOnline("n1", "1.0.0", time.Now().Unix()-150); err != nil {
+		t.Fatalf("mark online: %v", err)
+	}
+	s := New(st, testLogger(), "", 7)
+	s.startedAt = time.Now().Unix() - 200 // the 150s-old heartbeat is after Start
+
+	s.detectOffline()
+
+	n, _ := st.GetNode("n1")
+	if n.Status != "offline" {
+		t.Fatalf("post-start silence stayed online: %+v", n)
+	}
+}
+
+// The grace expires: a probe that never came back is still reported offline.
+func TestDetectOfflineBootGraceExpires(t *testing.T) {
+	st := testStore(t)
+	addNode(t, st, "n1", "edge-1")
+	if _, _, err := st.MarkNodeOnline("n1", "1.0.0", time.Now().Unix()-500); err != nil {
+		t.Fatalf("mark online: %v", err)
+	}
+	s := New(st, testLogger(), "", 7)
+	s.startedAt = time.Now().Unix() - int64(bootGrace/time.Second) - 1
+
+	s.detectOffline()
+
+	n, _ := st.GetNode("n1")
+	if n.Status != "offline" {
+		t.Fatalf("pre-start silence stayed online after the grace expired: %+v", n)
+	}
+	if got := auditByAction(t, st, "node_offline"); len(got) != 1 {
+		t.Fatalf("expired grace did not audit node_offline: %+v", got)
 	}
 }
 
