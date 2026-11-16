@@ -723,11 +723,25 @@ section.card { margin-bottom: 0; }
   white-space: nowrap;
 }
 
-.flag { font-size: 20px; line-height: 1; }
+/* Country flag: a self-hosted 4:3 SVG (§14 实现修订 2026-11-16), not an emoji
+   glyph — emoji flags depend on the platform font (Windows has none at all,
+   Apple's zh-CN font turns TW into a crossed box). `flex: none` keeps it from
+   shrinking next to a long node name in the card/table heads. A code with no
+   artwork (XX and friends) keeps the quiet gray swatch. */
+.flag {
+  width: 20px;
+  height: 15px;
+  flex: none;
+  border-radius: 2px;
+  display: inline-block;
+  /* A hairline ring so a white field (JP) still has an edge on the light
+     theme's near-white card, and so mixed flags share one silhouette. */
+  box-shadow: 0 0 0 1px var(--border);
+}
 .flag-none {
   width: 20px;
-  height: 20px;
-  border-radius: 50%;
+  height: 15px;
+  border-radius: 3px;
   background: var(--border);
   display: inline-block;
 }

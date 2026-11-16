@@ -1,11 +1,5 @@
 // Pure formatting helpers shared by pages and charts.
 
-/** ISO 3166-1 alpha-2 -> regional-indicator emoji; empty/invalid -> empty string. */
-export function flagEmoji(cc: string): string {
-  if (!/^[A-Za-z]{2}$/.test(cc)) return '';
-  return String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
-}
-
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB'];
 
 export function fmtBytes(n: number): string {
